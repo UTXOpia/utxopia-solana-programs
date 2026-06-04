@@ -1,7 +1,7 @@
 /**
  * Shared Test Helpers
  *
- * Common utilities used by both test-user-flows.ts and test-redemption-lifecycle.ts:
+ * Common utilities used by current Solana maintenance scripts:
  *   - PDA derivation functions
  *   - On-chain state parsers
  *   - ChadBuffer upload

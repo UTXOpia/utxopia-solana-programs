@@ -755,14 +755,14 @@ async function main() {
   // Pre-flight: check pool is initialized and has shielded balance
   const poolCheck = await getPoolSnapshot(connection);
   if (!poolCheck) {
-    console.error("\nError: Pool not initialized. Run deploy-localnet.ts first.");
+    console.error("\nError: Pool not initialized. Run the current localnet E2E setup first.");
     process.exit(1);
   }
   console.log(`\nPool state: shielded=${poolCheck.totalShielded}, pending=${poolCheck.pendingRedemptions}, burned=${poolCheck.totalBurned}`);
 
   if (poolCheck.totalShielded < 10_000n) {
     console.error(`\nError: Insufficient shielded balance (${poolCheck.totalShielded}). Need >= 10000.`);
-    console.error("Re-run deploy-localnet.ts to add demo notes.");
+    console.error("Re-run the current localnet E2E setup to seed redemption test state.");
     process.exit(1);
   }
 

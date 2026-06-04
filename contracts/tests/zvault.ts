@@ -564,8 +564,11 @@ export function deriveRedemptionRequestPda(
 // CIRCOM ZK PROOF INTEGRATION
 // ============================================================================
 
-// Circuit paths - contracts/tests -> ../../circuits/build
-const CIRCUIT_DIR = path.resolve(__dirname, "../../circuits/build");
+// Circuit paths are external in the split-repo layout.
+const CIRCUIT_DIR = path.resolve(
+  process.env.UTXOPIA_CIRCUITS_DIR ?? path.resolve(__dirname, "../../../utxopia-circuits/circuits"),
+  "build",
+);
 const CLAIM_WASM = path.join(CIRCUIT_DIR, "claim_direct_js/claim_direct.wasm");
 const CLAIM_ZKEY = path.join(CIRCUIT_DIR, "claim_direct_final.zkey");
 const CLAIM_VK = path.join(CIRCUIT_DIR, "claim_direct_vk.json");

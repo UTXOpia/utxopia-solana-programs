@@ -13,11 +13,14 @@ export type Poseidon = Awaited<
   ReturnType<typeof import("circomlibjs").buildPoseidon>
 >;
 
-// Circuit paths - helpers -> ../../../../circuits/build (from contracts/tests/helpers)
+// Circuit paths are external in the split-repo layout.
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const CIRCUIT_DIR = path.resolve(__dirname, "../../../circuits/build");
+const CIRCUIT_DIR = path.resolve(
+  process.env.UTXOPIA_CIRCUITS_DIR ?? path.resolve(__dirname, "../../../../utxopia-circuits/circuits"),
+  "build",
+);
 const CLAIM_WASM = path.join(CIRCUIT_DIR, "claim_direct_js/claim_direct.wasm");
 const CLAIM_ZKEY = path.join(CIRCUIT_DIR, "claim_direct_final.zkey");
 const CLAIM_VK = path.join(CIRCUIT_DIR, "claim_direct_vk.json");
@@ -225,4 +228,3 @@ function hexToBytes(hex: string): Uint8Array {
 }
 
 export { TREE_DEPTH };
-
