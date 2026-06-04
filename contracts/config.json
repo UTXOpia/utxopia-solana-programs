@@ -1,0 +1,26 @@
+{
+  "programs": {
+    "devnet": {
+      "UTXOpia": "G1bj9Vw9ipZ2Z7zKa9HrcHHPNqeWjg7uu51TsDr3ixUy",
+      "btc_light_client": "C8JoSKzondM7X1ESwrBSodGMrXWtEWNmawXyjh9zEWJZ"
+    },
+    "localnet": {
+      "UTXOpia": "6cv5vLKCc19oDHMSv1eSLvkJw6Nq1QkvznXavEF6hcDT",
+      "btc_light_client": "859B7kw1xDyY8rzSXY6pAPNxaAsPWrsaAPJk3iivd43g",
+      "chadbuffer": "9C3ozzNA4Anpff9kGQWBbNSWcprjw2rjpx6pLBi1eHxc",
+      "groth16_verifier": "3SJmLhy7b7VhP3rxMzPCuxpUJh4YfyNSw5y1f38HbUdM"
+    },
+    "devnet2": {
+      "UTXOpia": "3XsZdNitUi793MujUguGoX5bBs67Sm6BFBKXueP1Qy3y",
+      "btc_light_client": "Ho6UTeF8yFnRdCK15tSZtcJozvkDABJZWYxkgGyWAfyq"
+    },
+    "mainnet": {
+      "UTXOpia": "",
+      "btc_light_client": ""
+    }
+  },
+  "defaultCluster": "devnet",
+  "wallet": {
+    "path": "~/.config/solana/johnny.json"
+  }
+}

@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = [
+    "programs/utxopia",
+    "programs/btc-light-client",
+]
+exclude = [
+    "programs/chadbuffer"
+]
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1

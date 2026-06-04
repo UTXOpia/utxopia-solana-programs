@@ -1,0 +1,18 @@
+{
+  "network": "devnet2",
+  "rpcUrl": "https://api.devnet.solana.com",
+  "programs": {
+    "UTXOpia": "3XsZdNitUi793MujUguGoX5bBs67Sm6BFBKXueP1Qy3y",
+    "btcLightClient": "Ho6UTeF8yFnRdCK15tSZtcJozvkDABJZWYxkgGyWAfyq",
+    "chadbuffer": "C5RpjtTMFXKVZCtXSzKXD4CDNTaWBg3dVeMfYvjZYHDF"
+  },
+  "accounts": {
+    "poolState": "CQM4B9uAjWjBCm2CuNE4v6qdNP73VcFD185BTAT9wjPU",
+    "commitmentTree": "7f9je1yiXqVhyzkomnVziWg9UqMqB6L3i35GjxXCABJc",
+    "zkbtcMint": "6r21aFuvVWKLWneb3brLc4NJytjeq5jwkuiozAvjoxZn",
+    "poolVault": "F4JrNuYEAmhncRRXbYdpxHki8Fozm5Xcq6QKqDYG6hXT",
+    "frostVault": "ALtzUN3wkPZgqRX6xZryXjzWp4WgSi1E1gKu5uVQLwoS",
+    "authority": "uFBMJSxoGkHj2NyncPzAkhNWsGSQirQcRjUnGfEfWg1"
+  },
+  "createdAt": "2026-03-12T00:00:00.000Z"
+}

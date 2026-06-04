@@ -1,0 +1,22 @@
+################################################################
+# Deploy all programs via BPFLoaderUpgradeable
+################################################################
+
+addon "svm" {
+    rpc_api_url = input.rpc_api_url
+    network_id = input.network_id
+}
+
+action "deploy_utxopia" "svm::deploy_program" {
+    description = "Deploy UTXOpia program"
+    program = svm::get_program_from_native_project("utxopia")
+    authority = signer.authority
+    payer = signer.payer
+}
+
+action "deploy_btc_light_client" "svm::deploy_program" {
+    description = "Deploy BTC Light Client program"
+    program = svm::get_program_from_native_project("btc-light-client")
+    authority = signer.authority
+    payer = signer.payer
+}

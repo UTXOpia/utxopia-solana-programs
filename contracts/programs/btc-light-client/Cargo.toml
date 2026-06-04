@@ -1,0 +1,19 @@
+[package]
+name = "btc-light-client"
+version = "0.1.0"
+description = "Bitcoin light client for SPV verification on Solana (Pinocchio)"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "btc_light_client"
+
+[features]
+default = []
+
+[dependencies]
+pinocchio = "0.9"
+pinocchio-system = "0.3"
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ["cfg(target_os, values(\"solana\"))"] }

@@ -1,0 +1,48 @@
+[package]
+name = "utxopia"
+version = "0.1.0"
+description = "UTXOpia - Privacy-preserving BTC to Solana bridge (Pinocchio)"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "utxopia"
+
+[features]
+default = []
+idl-build = []
+# Suppresses the SBF entrypoint + global allocator. Used when utxopia
+# is consumed as a pure library (e.g. by the ika-cpi-shim test harness),
+# so two cdylibs in the workspace don't both define `#[global_allocator]`.
+no-entrypoint = []
+# Devnet-flavored build: chains the devnet ChadBuffer/BTC LC program IDs.
+# SECURITY: DO NOT enable in production/mainnet builds.
+devnet = []
+# Use SHA256 instead of Poseidon for localnet testing (test validator lacks Poseidon syscall)
+# SECURITY: DO NOT enable in production/devnet builds - only for local testing.
+localnet = []
+# Hybrid: real Solana devnet + local regtest BTC. Reuses devnet ChadBuffer,
+# uses dedicated BTC LC + utxopia program IDs that track regtest headers.
+# For fast iteration with real Ika signing.
+devnet-regtest = ["devnet"]
+mainnet = []
+
+[dependencies]
+pinocchio = "0.9"
+pinocchio-system = "0.3"
+solana-bn254 = "~2.1"
+solana-poseidon = "~2.1"
+thiserror = "2.0"
+hex-literal = "0.4"
+# Real Poseidon for off-chain (cargo test/check) — SBF builds use the syscall instead
+light-poseidon = "0.2"
+ark-bn254 = "0.4"
+sha3 = "0.10"
+
+[dev-dependencies]
+libsecp256k1 = "0.7"
+sha2 = "0.10"
+
+[lints.rust]
+# Solana programs use target_os = "solana" which is not a standard cfg value
+unexpected_cfgs = { level = "allow", check-cfg = ["cfg(target_os, values(\"solana\"))"] }
