@@ -21,8 +21,7 @@ use crate::error::UTXOpiaError;
 /// Create a PDA account via CPI to system program
 ///
 /// This is a shared helper to eliminate duplication across instruction files.
-/// Previously duplicated in: announce_stealth, transfer_stealth, add_demo_stealth,
-/// initialize (shared across instruction files, ~100 lines saved)
+/// Previously duplicated across account-creating instruction handlers.
 #[inline]
 pub fn create_pda_account<'a>(
     payer: &'a AccountInfo,
