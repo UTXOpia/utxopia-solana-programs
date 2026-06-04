@@ -1,19 +1,39 @@
-.DS_Store
-node_modules/
+# Anchor build artifacts
 target/
+.anchor/
+**/*.rs.bk
 .surfpool/
-coverage/
 
+# Node modules (if using npm/yarn for tests)
+node_modules/
+
+# Env files
 .env
 .env.*
 !.env.example
 
+# Test artifacts
+.DS_Store
+coverage/
 *.log
 *.tsbuildinfo
 
+# Devnet/testnet config (contains test keys)
+devnet-config.json
+devnet-test-notes.json
+.devnet-*.json
+.localnet-*.json
+
+# Keypairs / state secrets
 *state*.json
 *keypair*.json
 *demo-seed*
 *.pem
 *.key
 
+# Test validator data
+test-ledger/
+
+# Lock files
+bun.lock
+Cargo.lock

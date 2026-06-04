@@ -33,7 +33,7 @@ bun run setup:devnet
 ## Structure
 
 ```
-contracts/
+.
 ├── programs/
 │   ├── utxopia/        # Main Pinocchio program
 │   │   └── src/
