@@ -2,15 +2,16 @@
 /**
  * Redemption Lifecycle Integration Test (Bitcoin regtest)
  *
- * Tests the full escrow-based redemption lifecycle on localnet:
- *   Test 1: Happy path — request → mark_processing → complete (real SPV via regtest)
- *   Test 2: Cancel path — request → cancel (re-mints commitment)
- *   Test 3: Error — cancel after mark_processing (expect failure)
- *   Test 4: Error — mark_processing by non-authority (expect failure)
+ * Legacy script for the removed request_redemption lifecycle.
+ *
+ * The proofless request_redemption processor was removed and discriminator 16 is
+ * reserved. BTC withdrawal requests now start from the proof-checked REDEEM
+ * instruction, so this script is kept only as historical reference until it is
+ * rewritten around a real JoinSplit proof fixture.
  *
  * Prerequisites:
  *   1. bun run setup:localnet (starts validator + Docker regtest + deploys)
- *   2. bun run scripts/test-redemption-lifecycle.ts
+ *   2. Use a REDEEM-based lifecycle test once proof fixtures are available.
  */
 
 import {
@@ -730,12 +731,15 @@ async function testUnauthorizedMarkProcessing(
 
 async function main() {
   console.log("============================================================");
-  console.log(`UTXOpia Redemption Lifecycle Integration Test (${NETWORK})`);
+  console.log(`UTXOpia Legacy Redemption Lifecycle Integration Test (${NETWORK})`);
   console.log("============================================================");
   console.log(`Network:     ${NETWORK}`);
   console.log(`RPC:         ${RPC_URL}`);
   console.log(`UTXOpia:      ${PROGRAM_ID.toBase58()}`);
   console.log(`BTC Relay:   ${BTC_LIGHT_CLIENT_ID.toBase58()}`);
+  console.error("\nThis script targets the removed request_redemption lifecycle.");
+  console.error("Use a REDEEM-based lifecycle test with a real JoinSplit proof fixture instead.");
+  process.exit(1);
 
   const connection = new Connection(RPC_URL, "confirmed");
 

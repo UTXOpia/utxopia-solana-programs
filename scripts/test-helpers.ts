@@ -5,7 +5,7 @@
  *   - PDA derivation functions
  *   - On-chain state parsers
  *   - ChadBuffer upload
- *   - Instruction builders (extend_blockchain, request_redemption)
+ *   - Instruction builders (extend_blockchain; legacy request_redemption is intentionally disabled)
  *   - Authority keypair loading
  *   - Shared constants
  */
@@ -324,16 +324,20 @@ export function buildExtendBlockchainIx(
 }
 
 /**
- * request_redemption (disc=5)
+ * Legacy request_redemption was removed from the UTXOPIA program.
+ *
+ * Discriminator 16 is now reserved and the proof-checked BTC withdrawal path is
+ * the REDEEM instruction. This helper remains only to make old scripts fail with
+ * a clear error instead of accidentally sending a stale opcode.
  */
 export function buildRequestRedemptionIx(
-  programId: PublicKey,
-  poolState: PublicKey,
-  commitmentTree: PublicKey,
-  nullifierRecord: PublicKey,
-  redemptionRequest: PublicKey,
-  user: PublicKey,
-  params: {
+  _programId: PublicKey,
+  _poolState: PublicKey,
+  _commitmentTree: PublicKey,
+  _nullifierRecord: PublicKey,
+  _redemptionRequest: PublicKey,
+  _user: PublicKey,
+  _params: {
     proofHash: Uint8Array;
     merkleRoot: Uint8Array;
     nullifierHash: Uint8Array;
@@ -343,36 +347,7 @@ export function buildRequestRedemptionIx(
     nonce: bigint;
   },
 ): TransactionInstruction {
-  const btcAddrBytes = Buffer.from(params.btcAddress, "utf-8");
-  const nonceBuf = Buffer.alloc(8);
-  nonceBuf.writeBigUInt64LE(params.nonce);
-
-  const dataLen = 1 + 32 + 32 + 32 + 8 + 32 + 1 + btcAddrBytes.length + 8;
-  const data = Buffer.alloc(dataLen);
-  let off = 0;
-
-  data[off++] = 5; // REQUEST_REDEMPTION
-  Buffer.from(params.proofHash).copy(data, off); off += 32;
-  Buffer.from(params.merkleRoot).copy(data, off); off += 32;
-  Buffer.from(params.nullifierHash).copy(data, off); off += 32;
-  data.writeBigUInt64LE(params.amountSats, off); off += 8;
-  Buffer.from(params.vkHash).copy(data, off); off += 32;
-  data[off++] = btcAddrBytes.length;
-  btcAddrBytes.copy(data, off); off += btcAddrBytes.length;
-  nonceBuf.copy(data, off);
-
-  return new TransactionInstruction({
-    keys: [
-      { pubkey: poolState, isSigner: false, isWritable: true },
-      { pubkey: commitmentTree, isSigner: false, isWritable: false },
-      { pubkey: nullifierRecord, isSigner: false, isWritable: true },
-      { pubkey: redemptionRequest, isSigner: false, isWritable: true },
-      { pubkey: user, isSigner: true, isWritable: true },
-      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-    ],
-    programId,
-    data,
-  });
+  throw new Error("request_redemption was removed; use the proof-checked REDEEM instruction instead");
 }
 
 // =============================================================================
