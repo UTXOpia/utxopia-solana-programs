@@ -160,6 +160,13 @@ impl CommitmentTree {
 
     /// Check if a root is valid (current or in history)
     pub fn is_valid_root(&self, root: &[u8; 32]) -> bool {
+        // Root history slots are zero-filled before the first ROOT_HISTORY_SIZE
+        // updates. Zero is not a valid Poseidon tree root and must not be
+        // accepted merely because an unused history slot contains it.
+        if root == &[0u8; 32] {
+            return false;
+        }
+
         // Check current root
         if self.current_root == *root {
             return true;
@@ -236,5 +243,19 @@ impl CommitmentTree {
     pub fn insert_leaf_and_get_root(&mut self, commitment: &[u8; 32]) -> Result<([u8; 32], u64), ProgramError> {
         let index = self.insert_leaf(commitment)?;
         Ok((self.current_root, index))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CommitmentTree, ZERO_HASHES, TREE_DEPTH};
+
+    #[test]
+    fn rejects_zero_root_but_accepts_empty_tree_root() {
+        let mut data = vec![0u8; CommitmentTree::LEN];
+        let tree = CommitmentTree::init(&mut data).expect("tree init");
+
+        assert!(!tree.is_valid_root(&[0u8; 32]));
+        assert!(tree.is_valid_root(&ZERO_HASHES[TREE_DEPTH]));
     }
 }
