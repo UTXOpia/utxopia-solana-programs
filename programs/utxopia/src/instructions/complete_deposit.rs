@@ -44,7 +44,7 @@ use crate::state::{
 };
 use crate::utils::events::ANNOUNCEMENT_TYPE_DEPOSIT;
 use crate::utils::crypto::compute_commitment;
-use crate::utils::bitcoin::{compute_tx_hash, DepositOpReturn, ParsedTransaction};
+use crate::utils::bitcoin::{compute_tx_hash, sha256, DepositOpReturn, ParsedTransaction};
 use crate::utils::chadbuffer::read_transaction_from_buffer;
 use crate::utils::{
     create_pda_account, mint_zkbtc, validate_active_tree_pda, validate_program_owner,
@@ -331,9 +331,12 @@ pub fn process_complete_deposit(
         .map_err(|_| UTXOpiaError::InvalidSpvProof)?;
 
     // --- Extract npk + ephemeral_pub from deposit TX OP_RETURN ---
-    let DepositOpReturn { ephemeral_pub, npk } = deposit_parsed
+    let DepositOpReturn { pool_tag, ephemeral_pub, npk } = deposit_parsed
         .find_deposit_op_return()
         .ok_or(UTXOpiaError::InvalidStealthOpReturn)?;
+    if pool_tag != expected_pool_tag(program_id, pool_state_info.key(), zkbtc_mint.key()) {
+        return Err(UTXOpiaError::InvalidStealthOpReturn.into());
+    }
 
     // --- Verify sweep TX spends the exact credited deposit outpoint ---
     // A txid-only linkage is insufficient when the deposit transaction has
@@ -533,4 +536,17 @@ pub fn process_complete_deposit(
     pinocchio::msg!("UTXOpia: deposit verified (SPV)");
 
     Ok(())
+}
+
+fn expected_pool_tag(program_id: &Pubkey, pool_state: &Pubkey, zkbtc_mint: &Pubkey) -> [u8; 8] {
+    const DOMAIN: &[u8; 11] = b"UTXOPIA_SOL";
+    let mut data = [0u8; 107];
+    data[0..11].copy_from_slice(DOMAIN);
+    data[11..43].copy_from_slice(program_id.as_ref());
+    data[43..75].copy_from_slice(pool_state.as_ref());
+    data[75..107].copy_from_slice(zkbtc_mint.as_ref());
+    let hash = sha256(&data);
+    let mut tag = [0u8; 8];
+    tag.copy_from_slice(&hash[0..8]);
+    tag
 }

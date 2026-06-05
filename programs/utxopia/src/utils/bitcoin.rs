@@ -10,11 +10,16 @@ pub const OP_RETURN: u8 = 0x6a;
 /// Commitment size (32 bytes)
 pub const COMMITMENT_SIZE: usize = 32;
 
-/// Deposit OP_RETURN data size: ephemeralPub(32) + npk(32) = 64 bytes
-pub const DEPOSIT_OP_RETURN_SIZE: usize = 64;
+/// Deposit OP_RETURN data size: header(1) + pool_tag(8) + ephemeralPub(32) + npk(32) = 73 bytes
+pub const DEPOSIT_OP_RETURN_SIZE: usize = 73;
+pub const DEPOSIT_POOL_TAG_SIZE: usize = 8;
+const DEPOSIT_HEADER_SOLANA_MAINNET: u8 = 0x50;
+const DEPOSIT_HEADER_SOLANA_TESTNET4: u8 = 0x52;
+const DEPOSIT_HEADER_SOLANA_REGTEST: u8 = 0x53;
 
-/// Parsed deposit OP_RETURN data: ephemeralPub(32) + npk(32)
+/// Parsed deposit OP_RETURN data.
 pub struct DepositOpReturn {
+    pub pool_tag: [u8; 8],
     pub ephemeral_pub: [u8; 32],
     pub npk: [u8; 32],
 }
@@ -321,34 +326,41 @@ impl<'a> TxOutput<'a> {
         Some(commitment)
     }
 
-    /// Parse deposit OP_RETURN: exactly 64 bytes = ephemeralPub(32) + npk(32)
-    /// Handles both direct push (0x6a 0x40 <64 bytes>) and PUSHDATA1 (0x6a 0x4c 0x40 <64 bytes>)
+    /// Parse deposit OP_RETURN: exactly 73 bytes = header + poolTag + ephemeralPub + npk.
+    /// Handles both direct push (0x6a 0x49 <73 bytes>) and PUSHDATA1 (0x6a 0x4c 0x49 <73 bytes>)
     pub fn get_deposit_op_return(&self) -> Option<DepositOpReturn> {
         if !self.is_op_return() || self.script_pubkey.len() < 2 {
             return None;
         }
 
-        let data_slice = if self.script_pubkey.len() == 66
-            && self.script_pubkey[1] == 0x40
+        let data_slice = if self.script_pubkey.len() == 75
+            && self.script_pubkey[1] == 0x49
         {
-            // Direct push: OP_RETURN (0x6a) + push 64 (0x40) + 64 bytes
-            &self.script_pubkey[2..66]
-        } else if self.script_pubkey.len() == 67
+            // Direct push: OP_RETURN (0x6a) + push 73 (0x49) + 73 bytes
+            &self.script_pubkey[2..75]
+        } else if self.script_pubkey.len() == 76
             && self.script_pubkey[1] == 0x4c
-            && self.script_pubkey[2] == 0x40
+            && self.script_pubkey[2] == 0x49
         {
-            // PUSHDATA1: OP_RETURN (0x6a) + OP_PUSHDATA1 (0x4c) + len 64 (0x40) + 64 bytes
-            &self.script_pubkey[3..67]
+            // PUSHDATA1: OP_RETURN (0x6a) + OP_PUSHDATA1 (0x4c) + len 73 (0x49) + 73 bytes
+            &self.script_pubkey[3..76]
         } else {
             return None;
         };
 
+        match data_slice[0] {
+            DEPOSIT_HEADER_SOLANA_MAINNET | DEPOSIT_HEADER_SOLANA_TESTNET4 | DEPOSIT_HEADER_SOLANA_REGTEST => {}
+            _ => return None,
+        }
+
+        let mut pool_tag = [0u8; 8];
         let mut ephemeral_pub = [0u8; 32];
         let mut npk = [0u8; 32];
-        ephemeral_pub.copy_from_slice(&data_slice[0..32]);
-        npk.copy_from_slice(&data_slice[32..64]);
+        pool_tag.copy_from_slice(&data_slice[1..9]);
+        ephemeral_pub.copy_from_slice(&data_slice[9..41]);
+        npk.copy_from_slice(&data_slice[41..73]);
 
-        Some(DepositOpReturn { ephemeral_pub, npk })
+        Some(DepositOpReturn { pool_tag, ephemeral_pub, npk })
     }
 }
 
@@ -505,7 +517,7 @@ impl<'a> ParsedTransaction<'a> {
         None
     }
 
-    /// Find deposit OP_RETURN (64-byte: ephemeralPub + npk) from outputs
+    /// Find deposit OP_RETURN (73-byte v1 payload) from outputs.
     pub fn find_deposit_op_return(&self) -> Option<DepositOpReturn> {
         for output in self.outputs() {
             if output.is_op_return() {
@@ -695,10 +707,12 @@ mod tests {
 
     #[test]
     fn test_deposit_op_return_direct_push() {
-        // OP_RETURN (0x6a) + push 64 (0x40) + 64 bytes
-        let mut script = vec![0x6a, 0x40];
+        // OP_RETURN (0x6a) + push 73 (0x49) + v1 deposit payload
+        let mut script = vec![0x6a, 0x49, 0x53];
+        let pool_tag = [0xcc; 8];
         let ephemeral = [0xaa; 32];
         let npk = [0xbb; 32];
+        script.extend_from_slice(&pool_tag);
         script.extend_from_slice(&ephemeral);
         script.extend_from_slice(&npk);
 
@@ -708,14 +722,16 @@ mod tests {
         };
         assert!(output.is_op_return());
         let data = output.get_deposit_op_return().unwrap();
+        assert_eq!(data.pool_tag, pool_tag);
         assert_eq!(data.ephemeral_pub, ephemeral);
         assert_eq!(data.npk, npk);
     }
 
     #[test]
     fn test_deposit_op_return_pushdata1() {
-        // OP_RETURN (0x6a) + PUSHDATA1 (0x4c) + 64 (0x40) + 64 bytes
-        let mut script = vec![0x6a, 0x4c, 0x40];
+        // OP_RETURN (0x6a) + PUSHDATA1 (0x4c) + 73 (0x49) + v1 deposit payload
+        let mut script = vec![0x6a, 0x4c, 0x49, 0x53];
+        script.extend_from_slice(&[0xcc; 8]); // pool tag
         script.extend_from_slice(&[0x11; 32]); // ephemeral
         script.extend_from_slice(&[0x22; 32]); // npk
 
@@ -724,6 +740,7 @@ mod tests {
             script_pubkey: &script,
         };
         let data = output.get_deposit_op_return().unwrap();
+        assert_eq!(data.pool_tag, [0xcc; 8]);
         assert_eq!(data.ephemeral_pub, [0x11; 32]);
         assert_eq!(data.npk, [0x22; 32]);
     }
@@ -825,8 +842,10 @@ mod tests {
             s
         };
 
-        // Deposit OP_RETURN: 0x6a 0x40 + 64 bytes
-        let mut op_return_script = vec![0x6a, 0x40];
+        // Deposit OP_RETURN: 0x6a 0x49 + v1 deposit payload
+        let pool_tag = [0xcc; 8];
+        let mut op_return_script = vec![0x6a, 0x49, 0x53];
+        op_return_script.extend_from_slice(&pool_tag);
         op_return_script.extend_from_slice(&ephemeral);
         op_return_script.extend_from_slice(&npk);
 
@@ -837,6 +856,7 @@ mod tests {
 
         let parsed = ParsedTransaction::parse(&raw_tx).unwrap();
         let deposit_data = parsed.find_deposit_op_return().unwrap();
+        assert_eq!(deposit_data.pool_tag, pool_tag);
         assert_eq!(deposit_data.ephemeral_pub, ephemeral);
         assert_eq!(deposit_data.npk, npk);
     }
