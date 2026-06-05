@@ -10,7 +10,7 @@ use pinocchio_system::instructions::CreateAccount;
 
 use crate::constants::{
     BLOCK_HEADER_DISCRIMINATOR, BLOCK_HEADER_SEED, HEIGHT_INDEX_DISCRIMINATOR, HEIGHT_INDEX_SEED,
-    REQUIRED_CONFIRMATIONS,
+    NETWORK_MAINNET, NETWORK_REGTEST, REQUIRED_CONFIRMATIONS,
 };
 use crate::state::{BitcoinLightClient, BlockHeader, HeightIndex};
 
@@ -21,7 +21,7 @@ use crate::state::{BitcoinLightClient, BlockHeader, HeightIndex};
 /// Instruction data (after discriminator):
 ///   [0-7]   start_height       (u64 LE)
 ///   [8-39]  start_block_hash   ([u8; 32])
-///   [40]    network            (u8: 0=mainnet, 1=testnet3, 2=testnet4, 3=regtest)
+///   [40]    network            (u8: 0=mainnet, 3=regtest)
 ///   [41-44] initial_bits       (u32 LE, optional — 0 to skip)
 ///   [45-48] epoch_start_time   (u32 LE, optional — 0 to skip)
 ///
@@ -70,6 +70,9 @@ pub fn process_reinitialize(
     let mut start_block_hash = [0u8; 32];
     start_block_hash.copy_from_slice(&data[8..40]);
     let network = data[40];
+    if network != NETWORK_MAINNET && network != NETWORK_REGTEST {
+        return Err(ProgramError::InvalidInstructionData);
+    }
 
     // Reset all fields
     let mut lc_data = light_client_info.try_borrow_mut_data()?;

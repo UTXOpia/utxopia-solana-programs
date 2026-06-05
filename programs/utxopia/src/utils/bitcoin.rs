@@ -526,11 +526,28 @@ impl<'a> ParsedTransaction<'a> {
         }
     }
 
-    /// Check if any input spends from the given txid (prev_output hash match)
+    /// Check if any input spends from the given txid (prev_output hash match).
+    ///
+    /// This is intentionally weaker than `find_input_with_prev_outpoint` and
+    /// should only be used when the previous output index is irrelevant.
     /// txid should be in internal byte order (raw double-SHA256 output)
     pub fn find_input_with_prev_txid(&self, target_txid: &[u8; 32]) -> bool {
         for input in self.inputs() {
             if &input.prev_txid == target_txid {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if any input spends exactly the given previous outpoint.
+    ///
+    /// Deposit verification must bind the credited deposit output to the sweep
+    /// input. A txid-only check is not enough because a Bitcoin transaction may
+    /// contain multiple outputs.
+    pub fn find_input_with_prev_outpoint(&self, target_txid: &[u8; 32], target_vout: u32) -> bool {
+        for input in self.inputs() {
+            if &input.prev_txid == target_txid && input.prev_vout == target_vout {
                 return true;
             }
         }
@@ -788,6 +805,11 @@ mod tests {
         assert!(parsed.find_input_with_prev_txid(&prev_txid_1));
         assert!(parsed.find_input_with_prev_txid(&prev_txid_2));
         assert!(!parsed.find_input_with_prev_txid(&[0x33; 32]));
+
+        // Exact outpoint binding must distinguish outputs in the same tx.
+        assert!(parsed.find_input_with_prev_outpoint(&prev_txid_1, 0));
+        assert!(!parsed.find_input_with_prev_outpoint(&prev_txid_1, 1));
+        assert!(parsed.find_input_with_prev_outpoint(&prev_txid_2, 1));
     }
 
     #[test]

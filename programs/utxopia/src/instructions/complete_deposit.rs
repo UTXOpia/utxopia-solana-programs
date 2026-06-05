@@ -330,18 +330,26 @@ pub fn process_complete_deposit(
     let deposit_parsed = ParsedTransaction::parse(deposit_raw_tx)
         .map_err(|_| UTXOpiaError::InvalidSpvProof)?;
 
-    // --- Verify sweep TX spends from deposit TX (legacy input linkage) ---
-    // This proves the chain: deposit TX -> sweep TX (SPV-verified).
-    // Direct-to-pool deposits skip this because the deposit tx is the
-    // SPV-verified pool UTXO itself.
-    if !direct_to_pool && !sweep_parsed.find_input_with_prev_txid(&ix_data.deposit_txid) {
-        return Err(UTXOpiaError::InvalidSpvProof.into());
-    }
-
     // --- Extract npk + ephemeral_pub from deposit TX OP_RETURN ---
     let DepositOpReturn { ephemeral_pub, npk } = deposit_parsed
         .find_deposit_op_return()
         .ok_or(UTXOpiaError::InvalidStealthOpReturn)?;
+
+    // --- Verify sweep TX spends the exact credited deposit outpoint ---
+    // A txid-only linkage is insufficient when the deposit transaction has
+    // multiple outputs. Bind the sweep to the specific output that supplied the
+    // user's original deposit value.
+    let original_deposit_output = if direct_to_pool {
+        None
+    } else {
+        let (output, deposit_vout) = deposit_parsed
+            .find_deposit_output_with_vout()
+            .ok_or(UTXOpiaError::InvalidSpvProof)?;
+        if !sweep_parsed.find_input_with_prev_outpoint(&ix_data.deposit_txid, deposit_vout) {
+            return Err(UTXOpiaError::InvalidSpvProof.into());
+        }
+        Some(output)
+    };
 
     // Extract pool output amount and vout. In direct mode this is the user's
     // deposit output to the Ika vault. If PoolConfig is supplied, require the
@@ -379,8 +387,7 @@ pub fn process_complete_deposit(
     } else {
         // Two-step sweep mode: report the original user deposit output before
         // the backend sweep miner fee reduced the pool-received amount.
-        deposit_parsed
-            .find_deposit_output()
+        original_deposit_output
             .map(|o| o.value)
             .unwrap_or(amount_sats)
     };

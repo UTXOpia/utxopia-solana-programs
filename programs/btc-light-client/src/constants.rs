@@ -29,3 +29,4 @@ pub(crate) const REQUIRED_CONFIRMATIONS: u64 = 6;
 
 // Network IDs (stored in BitcoinLightClient.network)
 pub(crate) const NETWORK_MAINNET: u8 = 0;
+pub(crate) const NETWORK_REGTEST: u8 = 3;

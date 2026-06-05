@@ -278,11 +278,6 @@ pub fn process_verify_deposit_v2(
     let sweep_parsed = ParsedTransaction::parse(sweep_raw_tx)
         .map_err(|_| UTXOpiaError::InvalidSpvProof)?;
 
-    // --- Verify sweep TX actually spends from deposit TX ---
-    if !sweep_parsed.find_input_with_prev_txid(&ix_data.deposit_txid) {
-        return Err(UTXOpiaError::InvalidSpvProof.into());
-    }
-
     // --- Read npk + ephemeral_pub from DepositIntent PDA ---
     let (ephemeral_pub, npk) = {
         let intent_data = deposit_intent_info.try_borrow_data()?;
@@ -298,60 +293,69 @@ pub fn process_verify_deposit_v2(
         (intent.ephemeral_pub, intent.npk)
     };
 
-    // --- Taproot npk ↔ deposit address verification ---
-    // If deposit TX data is provided and PoolConfig has group_pub_key,
-    // verify that npk from DepositIntent matches the actual BTC deposit address.
-    if ix_data.deposit_tx_size > 0 && accounts.len() >= 15 {
-        let pool_config_info = &accounts[13];
-        let deposit_tx_buffer_info = &accounts[14];
+    // --- Taproot npk ↔ deposit address verification + exact outpoint linkage ---
+    // The legacy txid-only check is insufficient when a BTC transaction has
+    // multiple outputs. Require the raw deposit tx, identify the exact credited
+    // output, then prove the sweep spends that output index.
+    if ix_data.deposit_tx_size == 0 || accounts.len() < 15 {
+        return Err(UTXOpiaError::InvalidSpvProof.into());
+    }
+    let pool_config_info = &accounts[13];
+    let deposit_tx_buffer_info = &accounts[14];
 
-        validate_program_owner(pool_config_info, program_id)?;
+    validate_program_owner(pool_config_info, program_id)?;
+    crate::utils::chadbuffer::validate_chadbuffer_owner(deposit_tx_buffer_info)?;
 
-        let group_pub_key = {
-            let config_data = pool_config_info.try_borrow_data()?;
-            if config_data.len() >= PoolConfig::LEN && config_data[0] == POOL_CONFIG_DISCRIMINATOR {
-                let config = PoolConfig::from_bytes(&config_data)?;
-                if config.has_group_pub_key() {
-                    Some(*config.get_group_pub_key())
-                } else {
-                    None
-                }
+    let group_pub_key = {
+        let config_data = pool_config_info.try_borrow_data()?;
+        if config_data.len() >= PoolConfig::LEN && config_data[0] == POOL_CONFIG_DISCRIMINATOR {
+            let config = PoolConfig::from_bytes(&config_data)?;
+            if config.has_group_pub_key() {
+                Some(*config.get_group_pub_key())
             } else {
                 None
             }
-        };
-
-        if let Some(gpk) = group_pub_key {
-            // Read and verify deposit TX from ChadBuffer
-            crate::utils::chadbuffer::validate_chadbuffer_owner(deposit_tx_buffer_info)?;
-            let deposit_buffer_data = deposit_tx_buffer_info
-                .try_borrow_data()
-                .map_err(|_| UTXOpiaError::InvalidSpvProof)?;
-            let deposit_raw_tx = read_transaction_from_buffer(
-                &deposit_buffer_data,
-                ix_data.deposit_tx_size as usize,
-            )?;
-
-            // Verify deposit TX hash matches deposit_txid
-            let computed_deposit_hash = compute_tx_hash(deposit_raw_tx);
-            if computed_deposit_hash != ix_data.deposit_txid {
-                return Err(UTXOpiaError::InvalidSpvProof.into());
-            }
-
-            // Parse deposit TX and find P2TR output
-            let deposit_parsed = ParsedTransaction::parse(deposit_raw_tx)
-                .map_err(|_| UTXOpiaError::InvalidSpvProof)?;
-
-            // Find the P2TR output that was spent by the sweep TX
-            // Look for any P2TR output and extract its output key
-            let deposit_output_key = deposit_parsed
-                .outputs()
-                .find_map(|output| extract_p2tr_output_key(output.script_pubkey))
-                .ok_or(UTXOpiaError::TaprootVerificationFailed)?;
-
-            // Verify: outputKey == groupPubKey + H_TapTweak(groupPubKey || npk) * G
-            verify_taproot_output_key(&gpk, &npk, &deposit_output_key)?;
+        } else {
+            None
         }
+    };
+
+    let deposit_buffer_data = deposit_tx_buffer_info
+        .try_borrow_data()
+        .map_err(|_| UTXOpiaError::InvalidSpvProof)?;
+    let deposit_raw_tx = read_transaction_from_buffer(
+        &deposit_buffer_data,
+        ix_data.deposit_tx_size as usize,
+    )?;
+
+    let computed_deposit_hash = compute_tx_hash(deposit_raw_tx);
+    if computed_deposit_hash != ix_data.deposit_txid {
+        return Err(UTXOpiaError::InvalidSpvProof.into());
+    }
+
+    let deposit_parsed = ParsedTransaction::parse(deposit_raw_tx)
+        .map_err(|_| UTXOpiaError::InvalidSpvProof)?;
+
+    let deposit_vout = if let Some(gpk) = group_pub_key {
+        let mut matched_vout: Option<u32> = None;
+        for (vout, output) in deposit_parsed.outputs().enumerate() {
+            if let Some(output_key) = extract_p2tr_output_key(output.script_pubkey) {
+                if verify_taproot_output_key(&gpk, &npk, &output_key).is_ok() {
+                    matched_vout = Some(vout as u32);
+                    break;
+                }
+            }
+        }
+        matched_vout.ok_or(UTXOpiaError::TaprootVerificationFailed)?
+    } else {
+        let (_output, vout) = deposit_parsed
+            .find_deposit_output_with_vout()
+            .ok_or(UTXOpiaError::InvalidSpvProof)?;
+        vout
+    };
+
+    if !sweep_parsed.find_input_with_prev_outpoint(&ix_data.deposit_txid, deposit_vout) {
+        return Err(UTXOpiaError::InvalidSpvProof.into());
     }
 
     // Extract deposit amount from sweep TX's deposit output (largest P2TR output)
