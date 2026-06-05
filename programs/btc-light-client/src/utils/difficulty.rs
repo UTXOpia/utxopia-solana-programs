@@ -1,6 +1,8 @@
-use crate::constants::TARGET_TIMESPAN;
 use super::pow::target_from_bits;
-use super::u256::{u256_from_le_bytes, u256_to_le_bytes, u256_gt_bytes, u256_mul_u32, u256_div_u32};
+use super::u256::{
+    u256_div_u32, u256_from_le_bytes, u256_gt_bytes, u256_mul_u32, u256_to_le_bytes,
+};
+use crate::constants::{BLOCKS_PER_EPOCH, TARGET_TIMESPAN};
 
 /// Maximum target (genesis difficulty) in compact bits format
 const MAX_TARGET_BITS: u32 = 0x1d00ffff;
@@ -39,6 +41,35 @@ pub fn calculate_new_bits(old_bits: u32, actual_timespan: u32) -> u32 {
     bits_from_target(&capped)
 }
 
+/// Return the bits a candidate block must use before accepting it.
+///
+/// Mainnet retargets on 2016-block boundaries using the previous block's
+/// timestamp. Testnet4 keeps the BIP94 epoch base difficulty at boundaries and
+/// permits the max-target min-difficulty exception after >20 minutes.
+pub fn required_bits_for_next_block(
+    testnet4: bool,
+    block_height: u64,
+    timestamp: u32,
+    parent_timestamp: u32,
+    epoch_bits: u32,
+    epoch_start_time: u32,
+) -> u32 {
+    if epoch_bits == 0 {
+        return 0;
+    }
+
+    if block_height % BLOCKS_PER_EPOCH == 0 {
+        let actual_timespan = parent_timestamp.wrapping_sub(epoch_start_time);
+        return calculate_new_bits(epoch_bits, actual_timespan);
+    }
+
+    if testnet4 && timestamp.wrapping_sub(parent_timestamp) > 20 * 60 {
+        return MAX_TARGET_BITS;
+    }
+
+    epoch_bits
+}
+
 /// Encode a 256-bit LE target back to compact bits format
 fn bits_from_target(target: &[u8; 32]) -> u32 {
     // Find the highest non-zero byte
@@ -72,4 +103,55 @@ fn bits_from_target(target: &[u8; 32]) -> u32 {
     }
 
     (size as u32) << 24 | (mantissa & 0x007fffff)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constants::TARGET_TIMESPAN;
+
+    #[test]
+    fn required_bits_mainnet_retargets_at_boundary() {
+        let epoch_bits = 0x1d00ffff;
+        let required = required_bits_for_next_block(
+            false,
+            BLOCKS_PER_EPOCH,
+            1_500,
+            TARGET_TIMESPAN / 2,
+            epoch_bits,
+            0,
+        );
+
+        assert_ne!(required, epoch_bits);
+        assert_eq!(
+            required,
+            calculate_new_bits(epoch_bits, TARGET_TIMESPAN / 2)
+        );
+    }
+
+    #[test]
+    fn required_bits_testnet4_min_difficulty_exception() {
+        let epoch_bits = 0x1d00aaaa;
+        let required = required_bits_for_next_block(false, 100, 2_001, 0, epoch_bits, 0);
+        assert_eq!(required, epoch_bits);
+
+        let testnet4_required = required_bits_for_next_block(true, 100, 2_001, 0, epoch_bits, 0);
+        assert_eq!(testnet4_required, MAX_TARGET_BITS);
+    }
+
+    #[test]
+    fn required_bits_testnet4_boundary_uses_retarget_not_min_difficulty() {
+        let epoch_bits = 0x1d00aaaa;
+        let required = required_bits_for_next_block(
+            true,
+            BLOCKS_PER_EPOCH,
+            10 * TARGET_TIMESPAN,
+            TARGET_TIMESPAN,
+            epoch_bits,
+            0,
+        );
+
+        assert_eq!(required, calculate_new_bits(epoch_bits, TARGET_TIMESPAN));
+        assert_ne!(required, MAX_TARGET_BITS);
+    }
 }

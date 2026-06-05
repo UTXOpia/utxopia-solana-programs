@@ -3,19 +3,19 @@ use pinocchio::{
     instruction::{Seed, Signer},
     program_error::ProgramError,
     pubkey::Pubkey,
-    ProgramResult,
     sysvars::{clock::Clock, Sysvar},
+    ProgramResult,
 };
 use pinocchio_system::instructions::CreateAccount;
 
 use crate::constants::{
-    BLOCK_HEADER_DISCRIMINATOR, BLOCK_HEADER_SEED, BLOCKS_PER_EPOCH, HEIGHT_INDEX_DISCRIMINATOR,
+    BLOCKS_PER_EPOCH, BLOCK_HEADER_DISCRIMINATOR, BLOCK_HEADER_SEED, HEIGHT_INDEX_DISCRIMINATOR,
     HEIGHT_INDEX_SEED, MAX_BATCH_SIZE, REQUIRED_CONFIRMATIONS,
 };
 use crate::state::{BitcoinLightClient, BlockHeader, HeightIndex};
 use crate::utils::{
-    add_chainwork, calculate_chainwork, calculate_new_bits, double_sha256, hash_meets_target,
-    target_from_bits, u256_from_le_bytes, u256_gt_limbs,
+    add_chainwork, calculate_chainwork, double_sha256, hash_meets_target,
+    required_bits_for_next_block, target_from_bits, u256_from_le_bytes, u256_gt_limbs,
 };
 
 /// Submit a batch of Bitcoin block headers, extending the blockchain.
@@ -72,7 +72,14 @@ pub fn process_extend_blockchain(
     }
 
     // Read parent block header to get starting height and chainwork
-    let (parent_height, parent_chainwork, parent_hash, parent_expected_bits, parent_epoch_start) = {
+    let (
+        parent_height,
+        parent_chainwork,
+        parent_hash,
+        parent_timestamp,
+        parent_epoch_bits,
+        parent_epoch_start,
+    ) = {
         if parent_header_info.owner() != program_id {
             return Err(ProgramError::IllegalOwner);
         }
@@ -86,9 +93,8 @@ pub fn process_extend_blockchain(
         let mut cw = [0u8; 32];
         cw.copy_from_slice(&parent.chainwork);
         let h = parent.height();
-        let bits = u32::from_le_bytes(parent.bits);
         let ts = u32::from_le_bytes(parent.timestamp);
-        (h, cw, hash, bits, ts)
+        (h, cw, hash, ts, parent.epoch_bits(), parent.epoch_start_time())
     };
 
     // Read light client state
@@ -126,12 +132,17 @@ pub fn process_extend_blockchain(
     let mut running_chainwork = parent_chainwork;
     let mut running_height = parent_height;
     // Track difficulty params for epoch boundary retarget
-    let mut running_expected_bits = lc_expected_bits;
-    let mut running_epoch_start = lc_epoch_start_time;
-    // If forking from a height below the tip's epoch, use parent's values
-    // For simplicity, we carry forward from parent
-    let _ = parent_expected_bits;
-    let _ = parent_epoch_start;
+    let mut running_expected_bits = if parent_epoch_bits != 0 {
+        parent_epoch_bits
+    } else {
+        lc_expected_bits
+    };
+    let mut running_epoch_start = if parent_epoch_start != 0 {
+        parent_epoch_start
+    } else {
+        lc_epoch_start_time
+    };
+    let mut running_parent_timestamp = parent_timestamp;
 
     // Process each header in the batch
     for i in 0..n {
@@ -139,6 +150,7 @@ pub fn process_extend_blockchain(
         let raw_header: &[u8; 80] = data[header_offset..header_offset + 80].try_into().unwrap();
 
         let header_prev_hash: &[u8; 32] = raw_header[4..36].try_into().unwrap();
+        let timestamp = u32::from_le_bytes(raw_header[68..72].try_into().unwrap());
         let bits = u32::from_le_bytes(raw_header[72..76].try_into().unwrap());
 
         // Validate chain continuity
@@ -149,14 +161,24 @@ pub fn process_extend_blockchain(
         let block_hash = double_sha256(raw_header);
         let block_height = running_height + 1;
 
-        // PoW check (mainnet only)
-        if network == crate::constants::NETWORK_MAINNET {
+        // PoW and difficulty checks for production Bitcoin networks.
+        if network == crate::constants::NETWORK_MAINNET
+            || network == crate::constants::NETWORK_TESTNET4
+        {
             let target = target_from_bits(bits);
             if !hash_meets_target(&block_hash, &target) {
                 return Err(ProgramError::InvalidArgument);
             }
-            // Enforce expected difficulty
-            if running_expected_bits != 0 && bits != running_expected_bits {
+
+            let required_bits = required_bits_for_next_block(
+                network == crate::constants::NETWORK_TESTNET4,
+                block_height,
+                timestamp,
+                running_parent_timestamp,
+                running_expected_bits,
+                running_epoch_start,
+            );
+            if required_bits != 0 && bits != required_bits {
                 return Err(ProgramError::InvalidArgument);
             }
         }
@@ -165,12 +187,20 @@ pub fn process_extend_blockchain(
         let block_work = calculate_chainwork(bits);
         let new_chainwork = add_chainwork(&running_chainwork, &block_work);
 
+        let mut header_epoch_bits = running_expected_bits;
+        let mut header_epoch_start = running_epoch_start;
+        if (network == crate::constants::NETWORK_MAINNET
+            || network == crate::constants::NETWORK_TESTNET4)
+            && block_height % BLOCKS_PER_EPOCH == 0
+        {
+            header_epoch_bits = bits;
+            header_epoch_start = timestamp;
+        }
+
         // Derive and verify BlockHeader PDA: ["block", block_hash]
         let block_header_info = &accounts[4 + i];
-        let (expected_pda, header_bump) = pinocchio::pubkey::find_program_address(
-            &[BLOCK_HEADER_SEED, &block_hash],
-            program_id,
-        );
+        let (expected_pda, header_bump) =
+            pinocchio::pubkey::find_program_address(&[BLOCK_HEADER_SEED, &block_hash], program_id);
         if block_header_info.key() != &expected_pda {
             return Err(ProgramError::InvalidSeeds);
         }
@@ -219,22 +249,17 @@ pub fn process_extend_blockchain(
             header.block_hash = block_hash;
             header.height = block_height.to_le_bytes();
             header.chainwork = new_chainwork;
+            header.set_epoch_bits(header_epoch_bits);
+            header.set_epoch_start_time(header_epoch_start);
             header.submitted_at = clock.unix_timestamp.to_le_bytes();
-        }
-
-        // Difficulty retarget at epoch boundary (mainnet only)
-        if network == crate::constants::NETWORK_MAINNET && block_height % BLOCKS_PER_EPOCH == 0 {
-            let header_timestamp = u32::from_le_bytes(raw_header[68..72].try_into().unwrap());
-            if running_epoch_start != 0 && running_expected_bits != 0 {
-                let actual_timespan = header_timestamp.wrapping_sub(running_epoch_start);
-                running_expected_bits = calculate_new_bits(running_expected_bits, actual_timespan);
-            }
-            running_epoch_start = header_timestamp;
         }
 
         prev_hash = block_hash;
         running_chainwork = new_chainwork;
         running_height = block_height;
+        running_expected_bits = header_epoch_bits;
+        running_epoch_start = header_epoch_start;
+        running_parent_timestamp = timestamp;
     }
 
     // Determine if this new fork becomes canonical (has more chainwork than current tip)
@@ -248,8 +273,7 @@ pub fn process_extend_blockchain(
         // Create/update HeightIndex PDAs for each new block
         for i in 0..n {
             let header_offset = 1 + i * 80;
-            let raw_header: &[u8; 80] =
-                data[header_offset..header_offset + 80].try_into().unwrap();
+            let raw_header: &[u8; 80] = data[header_offset..header_offset + 80].try_into().unwrap();
             let block_hash = double_sha256(raw_header);
             let block_height = parent_height + 1 + i as u64;
             let height_le = block_height.to_le_bytes();
@@ -320,7 +344,9 @@ pub fn process_extend_blockchain(
             }
 
             // Update difficulty params
-            if network == crate::constants::NETWORK_MAINNET {
+            if network == crate::constants::NETWORK_MAINNET
+                || network == crate::constants::NETWORK_TESTNET4
+            {
                 lc.set_expected_bits(running_expected_bits);
                 lc.set_epoch_start_time(running_epoch_start);
             }

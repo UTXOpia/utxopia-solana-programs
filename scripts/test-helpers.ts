@@ -43,11 +43,21 @@ export const Seeds = {
 } as const;
 
 export const BTCRelayDisc = {
+  INITIALIZE: 0,
   EXTEND_BLOCKCHAIN: 1,
   VERIFY_TRANSACTION: 2,
   PRUNE_OBSOLETE_BLOCKS: 3,
   REINITIALIZE: 4,
 } as const;
+
+export const BTCNetwork = {
+  MAINNET: 0,
+  TESTNET3: 1,
+  TESTNET4: 2,
+  REGTEST: 3,
+} as const;
+
+export type BTCNetworkId = (typeof BTCNetwork)[keyof typeof BTCNetwork];
 
 // =============================================================================
 // PDA Derivations

@@ -23,4 +23,30 @@ impl BlockHeader {
     pub fn height(&self) -> u64 {
         u64::from_le_bytes(self.height)
     }
+
+    pub fn epoch_bits(&self) -> u32 {
+        u32::from_le_bytes([
+            self._reserved[0],
+            self._reserved[1],
+            self._reserved[2],
+            self._reserved[3],
+        ])
+    }
+
+    pub fn epoch_start_time(&self) -> u32 {
+        u32::from_le_bytes([
+            self._reserved[4],
+            self._reserved[5],
+            self._reserved[6],
+            self._reserved[7],
+        ])
+    }
+
+    pub fn set_epoch_bits(&mut self, value: u32) {
+        self._reserved[0..4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    pub fn set_epoch_start_time(&mut self, value: u32) {
+        self._reserved[4..8].copy_from_slice(&value.to_le_bytes());
+    }
 }

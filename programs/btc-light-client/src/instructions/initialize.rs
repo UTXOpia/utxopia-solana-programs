@@ -3,26 +3,28 @@ use pinocchio::{
     instruction::{Seed, Signer},
     program_error::ProgramError,
     pubkey::Pubkey,
-    ProgramResult,
     sysvars::{clock::Clock, Sysvar},
+    ProgramResult,
 };
 use pinocchio_system::instructions::CreateAccount;
 
 use crate::constants::{
-    BTC_LIGHT_CLIENT_DISCRIMINATOR, HEIGHT_INDEX_DISCRIMINATOR, HEIGHT_INDEX_SEED,
-    LIGHT_CLIENT_SEED, NETWORK_MAINNET, NETWORK_REGTEST, REQUIRED_CONFIRMATIONS,
-    BLOCK_HEADER_DISCRIMINATOR, BLOCK_HEADER_SEED,
+    BLOCK_HEADER_DISCRIMINATOR, BLOCK_HEADER_SEED, BTC_LIGHT_CLIENT_DISCRIMINATOR,
+    HEIGHT_INDEX_DISCRIMINATOR, HEIGHT_INDEX_SEED, LIGHT_CLIENT_SEED, NETWORK_MAINNET,
+    NETWORK_REGTEST, NETWORK_TESTNET4, REQUIRED_CONFIRMATIONS,
 };
-use crate::state::{BitcoinLightClient, HeightIndex, BlockHeader};
+use crate::state::{BitcoinLightClient, BlockHeader, HeightIndex};
 
 /// Initialize the Bitcoin Light Client PDA + genesis HeightIndex + genesis BlockHeader.
 ///
 /// Instruction data (after discriminator):
 ///   [0-7]   start_height       (u64 LE)
 ///   [8-39]  start_block_hash   ([u8; 32])
-///   [40]    network            (u8: 0=mainnet, 3=regtest)
+///   [40]    network            (u8: 0=mainnet, 2=testnet4, 3=regtest)
 ///   [41-44] initial_bits       (u32 LE, optional — 0 to skip)
 ///   [45-48] epoch_start_time   (u32 LE, optional — 0 to skip)
+///   [49-52] start_timestamp    (u32 LE, optional — 0 to skip)
+///   [53-56] start_bits         (u32 LE, optional — 0 to skip)
 ///
 /// Accounts:
 ///   0. [writable] BitcoinLightClient PDA (["btc_light_client"])
@@ -57,24 +59,19 @@ pub fn process_initialize(
     let mut start_block_hash = [0u8; 32];
     start_block_hash.copy_from_slice(&data[8..40]);
     let network = data[40];
-    if network != NETWORK_MAINNET && network != NETWORK_REGTEST {
+    if network != NETWORK_MAINNET && network != NETWORK_TESTNET4 && network != NETWORK_REGTEST {
         return Err(ProgramError::InvalidInstructionData);
     }
 
     // Derive and create LightClient PDA
-    let (expected_pda, bump) = pinocchio::pubkey::find_program_address(
-        &[LIGHT_CLIENT_SEED],
-        program_id,
-    );
+    let (expected_pda, bump) =
+        pinocchio::pubkey::find_program_address(&[LIGHT_CLIENT_SEED], program_id);
     if light_client_info.key() != &expected_pda {
         return Err(ProgramError::InvalidSeeds);
     }
 
     let bump_bytes = [bump];
-    let signer_seeds: [Seed; 2] = [
-        Seed::from(LIGHT_CLIENT_SEED),
-        Seed::from(&bump_bytes),
-    ];
+    let signer_seeds: [Seed; 2] = [Seed::from(LIGHT_CLIENT_SEED), Seed::from(&bump_bytes)];
     let signer = [Signer::from(&signer_seeds)];
 
     let rent = pinocchio::sysvars::rent::Rent::get()?;
@@ -114,15 +111,28 @@ pub fn process_initialize(
     lc.total_chainwork = [0u8; 32];
 
     // Set initial difficulty params if provided
+    let mut initial_bits = 0u32;
+    let mut epoch_start = 0u32;
+    let mut start_timestamp = 0u32;
+    let mut start_bits = 0u32;
     if data.len() >= 49 {
-        let initial_bits = u32::from_le_bytes(data[41..45].try_into().unwrap());
-        let epoch_start = u32::from_le_bytes(data[45..49].try_into().unwrap());
+        initial_bits = u32::from_le_bytes(data[41..45].try_into().unwrap());
+        epoch_start = u32::from_le_bytes(data[45..49].try_into().unwrap());
         if initial_bits != 0 {
             lc.set_expected_bits(initial_bits);
         }
         if epoch_start != 0 {
             lc.set_epoch_start_time(epoch_start);
         }
+    }
+    if data.len() >= 53 {
+        start_timestamp = u32::from_le_bytes(data[49..53].try_into().unwrap());
+    }
+    if data.len() >= 57 {
+        start_bits = u32::from_le_bytes(data[53..57].try_into().unwrap());
+    }
+    if start_bits == 0 {
+        start_bits = initial_bits;
     }
 
     // Drop the borrow before creating more accounts
@@ -164,15 +174,17 @@ pub fn process_initialize(
         let bh = unsafe { &mut *(bh_data.as_mut_ptr() as *mut BlockHeader) };
         bh.block_hash = start_block_hash;
         bh.height = start_height.to_le_bytes();
+        bh.timestamp = start_timestamp.to_le_bytes();
+        bh.bits = start_bits.to_le_bytes();
+        bh.set_epoch_bits(initial_bits);
+        bh.set_epoch_start_time(epoch_start);
         bh.submitted_at = clock.unix_timestamp.to_le_bytes();
     }
 
     // Create genesis HeightIndex PDA: ["height_index", start_height]
     let height_le = start_height.to_le_bytes();
-    let (expected_hi_pda, hi_bump) = pinocchio::pubkey::find_program_address(
-        &[HEIGHT_INDEX_SEED, &height_le],
-        program_id,
-    );
+    let (expected_hi_pda, hi_bump) =
+        pinocchio::pubkey::find_program_address(&[HEIGHT_INDEX_SEED, &height_le], program_id);
     if height_index_info.key() != &expected_hi_pda {
         return Err(ProgramError::InvalidSeeds);
     }
