@@ -20,7 +20,7 @@
 //! - [..]     bound_params_hash: [u8; 32]
 //! - [..]     nullifiers:        [[u8; 32]; n_inputs]
 //! - [..]     commitments_out:   [[u8; 32]; n_outputs]
-//! - [..]     stealth_data:      [ephemeral_pub(32) + encrypted_amount(8)] × n_tree_outputs
+//! - [..]     stealth_data:      [ephemeral_pub(32) + encrypted_amount(8) + encrypted_token_id(32)] × n_tree_outputs
 //! - For each public output:
 //!   - amount:       u64 (8 bytes LE)
 //!   - script_len:   u8
@@ -61,8 +61,8 @@ use crate::utils::{
 /// Maximum supported N + M
 const MAX_JOINSPLIT_SIZE: usize = crate::constants::MAX_SAFE_JOINSPLIT_SIZE;
 
-/// Stealth data per output: ephemeral_pub (32) + encrypted_amount (8)
-const STEALTH_DATA_PER_OUTPUT: usize = 40;
+/// Stealth data per output: ephemeral_pub (32) + encrypted_amount (8) + encrypted_token_id (32)
+const STEALTH_DATA_PER_OUTPUT: usize = 72;
 
 /// Maximum number of public outputs per redeem
 const MAX_PUBLIC_OUTPUTS: usize = 3;
