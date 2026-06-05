@@ -24,7 +24,7 @@
 //! - [32-39]  block_height      (8 bytes)  - Block containing sweep tx (cross-check)
 //! - [40-43]  sweep_tx_size     (4 bytes)  - Raw sweep tx size in ChadBuffer
 //! - [44-75]  deposit_txid      (32 bytes) - Deposit tx ID (internal byte order)
-//! - [76-79]  deposit_tx_size   (4 bytes)  - Raw deposit tx size in ChadBuffer (0 = skip Taproot verify)
+//! - [76-79]  deposit_tx_size   (4 bytes)  - Raw deposit tx size in ChadBuffer
 
 use pinocchio::{
     account_info::AccountInfo,
@@ -59,7 +59,7 @@ pub struct VerifyDepositV2Data {
     pub block_height: u64,
     pub sweep_tx_size: u32,
     pub deposit_txid: [u8; 32],
-    /// Size of deposit TX in ChadBuffer (0 = skip Taproot verification, backward compat)
+    /// Size of deposit TX in ChadBuffer.
     pub deposit_tx_size: u32,
 }
 
@@ -81,7 +81,8 @@ impl VerifyDepositV2Data {
         let mut deposit_txid = [0u8; 32];
         deposit_txid.copy_from_slice(&data[44..76]);
 
-        // Optional: deposit_tx_size (0 if not provided → skip Taproot verify)
+        // Optional for old clients, but processing now rejects 0 because exact
+        // deposit outpoint binding requires the raw deposit transaction.
         let deposit_tx_size = if data.len() >= Self::FULL_SIZE {
             u32::from_le_bytes(data[76..80].try_into().unwrap())
         } else {

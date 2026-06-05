@@ -568,7 +568,6 @@ mod tests {
         assert_ne!(transfer, transfer_nz);
     }
 
-    #[test]
     /// Test real Poseidon3 against circomlibjs expected output
     /// circomlibjs: poseidon([1n, 2n, 3n]) = 0e7732d89e6939c0ff03d5e58dab6302f3230e269dc5b968f725df34ab36d732
     #[test]
@@ -594,6 +593,7 @@ mod tests {
         assert_eq!(hex, "115cc0f5e7d690413df64c6b9662e9cf2a3617f2743245519e19607a4417189a");
     }
 
+    #[test]
     fn test_bound_params_hash_modes_are_distinct() {
         let stealth = [0u8; 32];
         let addr = [0u8; 32]; // single 32-byte owner

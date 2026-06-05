@@ -49,15 +49,32 @@ bun run setup:devnet
 
 ## Instructions
 
-| ID | Name | Description | CU |
-|----|------|-------------|----|
-| 0 | INITIALIZE | Create pool state | ~5k |
-| 8 | VERIFY_DEPOSIT | Record BTC deposit (SPV) | ~50k |
-| 9 | CLAIM | Mint zkBTC with ZK proof | ~95k |
-| 4 | SPLIT_COMMITMENT | Split 1→2 notes | ~100k |
-| 5 | REQUEST_REDEMPTION | Burn for BTC withdrawal | ~20k |
-| 12 | ANNOUNCE_STEALTH | Stealth address send | ~15k |
-| 17 | REGISTER_NAME | Register .zkey name | ~10k |
+| ID | Name | Description |
+|----|------|-------------|
+| 0 | INITIALIZE | Create pool state |
+| 1 | SET_PAUSED | Pause or unpause pool |
+| 2 | SET_POOL_CONFIG | Configure BTC/Ika pool settings |
+| 3 | PROPOSE_POOL_UPDATE | Propose timelocked pool parameter update |
+| 4 | EXECUTE_POOL_UPDATE | Execute elapsed pool update |
+| 5 | CANCEL_POOL_UPDATE | Cancel pending pool update |
+| 6 | INIT_VK_REGISTRY | Initialize JoinSplit VK registry |
+| 7 | UPDATE_VK_REGISTRY | Update JoinSplit VK registry |
+| 8 | REGISTER_TOKEN | Register token config |
+| 9 | UPDATE_TOKEN_CONFIG | Update token config |
+| 10 | CLAIM_FEES | Claim accumulated protocol fees |
+| 11 | COMPLETE_DEPOSIT | Complete SPV-verified BTC deposit |
+| 12 | SHIELD | Shield public tokens |
+| 13 | TRANSACT | Private JoinSplit transfer |
+| 14 | UNSHIELD | JoinSplit unshield |
+| 15 | REDEEM | Proof-checked BTC withdrawal request |
+| 16 | RESERVED | Removed proofless request_redemption |
+| 17 | COMPLETE_REDEMPTION | Complete SPV-verified BTC payout |
+| 18 | MARK_PROCESSING | Reserve UTXOs for redemption signing |
+| 19 | CANCEL_REDEMPTION | Cancel pending/timed-out redemption |
+| 20 | ROTATE_TREE | Rotate active commitment tree |
+| 24 | REGISTER_DEPOSIT_INTENT | Register OP_RETURN-free deposit intent |
+| 25 | VERIFY_DEPOSIT_V2 | Verify OP_RETURN-free deposit |
+| 27 | APPROVE_REDEMPTION_SIGNING | Approve Ika BTC signing |
 
 ## Privacy Model
 

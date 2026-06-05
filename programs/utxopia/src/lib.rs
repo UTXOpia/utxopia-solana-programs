@@ -77,7 +77,9 @@ pub mod instruction {
     pub const REDEEM: u8 = 15;
 
     // Redemption lifecycle (16-19)
-    pub const REQUEST_REDEMPTION: u8 = 16;
+    // 16 was REQUEST_REDEMPTION. It is intentionally reserved because that
+    // legacy path did not verify a JoinSplit proof; use REDEEM instead.
+    pub const RESERVED_REQUEST_REDEMPTION: u8 = 16;
     pub const COMPLETE_REDEMPTION: u8 = 17;
     pub const MARK_PROCESSING: u8 = 18;
     pub const CANCEL_REDEMPTION: u8 = 19;
@@ -140,8 +142,8 @@ pub fn process_instruction(
         instruction::TRANSACT => instructions::process_transact(program_id, accounts, data),
         instruction::UNSHIELD => instructions::process_unshield(program_id, accounts, data),
         instruction::REDEEM => instructions::process_redeem(program_id, accounts, data),
-        // Redemption lifecycle (16-19)
-        instruction::REQUEST_REDEMPTION => instructions::process_request_redemption(program_id, accounts, data),
+        // Redemption lifecycle (17-19). Discriminator 16 is reserved/invalid;
+        // proof-checked BTC withdrawals enter through REDEEM.
         instruction::COMPLETE_REDEMPTION => instructions::process_complete_redemption(program_id, accounts, data),
         instruction::MARK_PROCESSING => instructions::process_mark_processing(program_id, accounts, data),
         instruction::CANCEL_REDEMPTION => instructions::process_cancel_redemption(program_id, accounts, data),
@@ -224,7 +226,7 @@ mod tests {
             instruction::TRANSACT,
             instruction::UNSHIELD,
             instruction::REDEEM,
-            instruction::REQUEST_REDEMPTION,
+            instruction::RESERVED_REQUEST_REDEMPTION,
             instruction::COMPLETE_REDEMPTION,
             instruction::MARK_PROCESSING,
             instruction::CANCEL_REDEMPTION,

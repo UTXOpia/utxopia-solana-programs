@@ -237,19 +237,21 @@ pub fn verify_taproot_tweak(
         test_secp256k1_recover(&hash_bytes, 0, &signature, &mut recovered)?;
     }
 
-    // Non-test, non-solana: unreachable in production but needed for cargo check
+    #[cfg(any(target_os = "solana", test))]
+    {
+        // 5. Compare recovered x-coordinate with expected output key
+        if recovered[0..32] != *expected_output_key {
+            return Err(UTXOpiaError::TaprootVerificationFailed.into());
+        }
+
+        Ok(())
+    }
+
     #[cfg(all(not(target_os = "solana"), not(test)))]
     {
         let _ = (&hash_bytes, &signature, &mut recovered, expected_output_key);
-        return Err(ProgramError::InvalidArgument);
+        Err(ProgramError::InvalidArgument)
     }
-
-    // 5. Compare recovered x-coordinate with expected output key
-    if recovered[0..32] != *expected_output_key {
-        return Err(UTXOpiaError::TaprootVerificationFailed.into());
-    }
-
-    Ok(())
 }
 
 /// Off-chain secp256k1 recovery for tests

@@ -20,7 +20,7 @@
 //! | 13 | `transact` | JoinSplit |
 //! | 14 | `unshield` | JoinSplit (multi-output) |
 //! | 15 | `redeem` | JoinSplit (multi-output) |
-//! | 16 | `request_redemption` | Redemption |
+//! | 16 | reserved (removed proofless `request_redemption`) | Redemption |
 //! | 17 | `complete_redemption` | Redemption |
 //! | 18 | `mark_processing` | Redemption |
 //! | 19 | `cancel_redemption` | Redemption |
@@ -33,7 +33,6 @@ pub mod register_deposit_intent;
 pub mod verify_deposit_v2;
 pub mod transact;
 pub mod redeem;
-pub mod request_redemption;
 pub mod mark_processing;
 pub mod approve_redemption_signing;
 pub mod cancel_redemption;
@@ -66,7 +65,6 @@ pub use register_deposit_intent::*;
 pub use verify_deposit_v2::*;
 pub use transact::*;
 pub use redeem::*;
-pub use request_redemption::*;
 pub use mark_processing::*;
 pub use approve_redemption_signing::*;
 pub use cancel_redemption::*;
