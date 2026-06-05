@@ -5,7 +5,7 @@
  *   - PDA derivation functions
  *   - On-chain state parsers
  *   - ChadBuffer upload
- *   - Instruction builders (extend_blockchain; legacy request_redemption is intentionally disabled)
+ *   - Instruction builders (extend_blockchain; removed request_redemption is intentionally disabled)
  *   - Authority keypair loading
  *   - Shared constants
  */
@@ -324,7 +324,7 @@ export function buildExtendBlockchainIx(
 }
 
 /**
- * Legacy request_redemption was removed from the UTXOPIA program.
+ * request_redemption was removed from the UTXOPIA program.
  *
  * Discriminator 16 is now reserved and the proof-checked BTC withdrawal path is
  * the REDEEM instruction. This helper remains only to make old scripts fail with

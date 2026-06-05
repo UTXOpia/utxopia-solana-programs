@@ -2,7 +2,7 @@
 /**
  * Redemption Lifecycle Integration Test (Bitcoin regtest)
  *
- * Legacy script for the removed request_redemption lifecycle.
+ * Disabled script for the removed request_redemption lifecycle.
  *
  * The proofless request_redemption processor was removed and discriminator 16 is
  * reserved. BTC withdrawal requests now start from the proof-checked REDEEM
@@ -731,7 +731,7 @@ async function testUnauthorizedMarkProcessing(
 
 async function main() {
   console.log("============================================================");
-  console.log(`UTXOpia Legacy Redemption Lifecycle Integration Test (${NETWORK})`);
+  console.log(`UTXOpia Redemption Lifecycle Integration Test (${NETWORK})`);
   console.log("============================================================");
   console.log(`Network:     ${NETWORK}`);
   console.log(`RPC:         ${RPC_URL}`);
