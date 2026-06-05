@@ -27,23 +27,23 @@
 //! | 27 | `approve_redemption_signing` | Redemption |
 
 // Core operations
-pub mod initialize;
-pub mod complete_deposit;
-pub mod register_deposit_intent;
-pub mod verify_deposit_v2;
-pub mod transact;
-pub mod redeem;
-pub mod mark_processing;
 pub mod approve_redemption_signing;
 pub mod cancel_redemption;
+pub mod complete_deposit;
 pub mod complete_redemption;
+pub mod initialize;
+pub mod mark_processing;
+pub mod redeem;
+pub mod register_deposit_intent;
+pub mod transact;
+pub mod verify_deposit;
 
 // Multi-token operations
+pub mod claim_fees;
 pub mod register_token;
 pub mod shield;
 pub mod unshield;
 pub mod update_token_config;
-pub mod claim_fees;
 
 // Admin utilities
 pub mod admin_update_pool;
@@ -59,22 +59,22 @@ pub mod rotate_tree;
 // See docs/COMPLIANCE.md.
 
 // Re-exports
-pub use initialize::*;
-pub use complete_deposit::*;
-pub use register_deposit_intent::*;
-pub use verify_deposit_v2::*;
-pub use transact::*;
-pub use redeem::*;
-pub use mark_processing::*;
+pub use admin_update_pool::*;
 pub use approve_redemption_signing::*;
 pub use cancel_redemption::*;
+pub use claim_fees::*;
+pub use complete_deposit::*;
 pub use complete_redemption::*;
+pub use init_vk_registry::*;
+pub use initialize::*;
+pub use mark_processing::*;
+pub use redeem::*;
+pub use register_deposit_intent::*;
 pub use register_token::*;
+pub use rotate_tree::*;
+pub use set_pool_config::*;
 pub use shield::*;
+pub use transact::*;
 pub use unshield::*;
 pub use update_token_config::*;
-pub use claim_fees::*;
-pub use admin_update_pool::*;
-pub use set_pool_config::*;
-pub use init_vk_registry::*;
-pub use rotate_tree::*;
+pub use verify_deposit::*;

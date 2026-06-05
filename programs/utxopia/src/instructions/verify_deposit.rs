@@ -1,4 +1,4 @@
-//! Verify Deposit V2 instruction (Pinocchio)
+//! Verify Deposit instruction (Pinocchio)
 //!
 //! OP_RETURN-free deposit flow:
 //! 1. User generates npk client-side, relayer creates DepositIntent PDA
@@ -30,31 +30,30 @@ use pinocchio::{
     account_info::AccountInfo,
     program_error::ProgramError,
     pubkey::{find_program_address, Pubkey},
-    ProgramResult,
     sysvars::{clock::Clock, rent::Rent, Sysvar},
+    ProgramResult,
 };
 
 use crate::error::UTXOpiaError;
 use crate::state::{
-    CommitmentTree, DepositIntent, DepositReceipt, PoolConfig, PoolState, TokenConfig,
-    VerifiedTransactionView, light_client_tip_height,
-    deposit_receipt::DEPOSIT_RECEIPT_DISCRIMINATOR,
-    pool_config::POOL_CONFIG_DISCRIMINATOR,
+    deposit_receipt::DEPOSIT_RECEIPT_DISCRIMINATOR, light_client_tip_height,
+    pool_config::POOL_CONFIG_DISCRIMINATOR, CommitmentTree, DepositIntent, DepositReceipt,
+    PoolConfig, PoolState, TokenConfig, VerifiedTransactionView,
 };
-use crate::utils::events::ANNOUNCEMENT_TYPE_DEPOSIT;
-use crate::utils::crypto::compute_commitment;
 use crate::utils::bitcoin::{compute_tx_hash, ParsedTransaction};
 use crate::utils::chadbuffer::read_transaction_from_buffer;
+use crate::utils::crypto::compute_commitment;
+use crate::utils::events::ANNOUNCEMENT_TYPE_DEPOSIT;
 use crate::utils::secp256k1::{extract_p2tr_output_key, verify_taproot_output_key};
 use crate::utils::{
-    create_pda_account, mint_zkbtc, validate_program_owner, validate_system_program,
-    validate_token_owner, validate_any_token_program_key, validate_account_writable,
+    create_pda_account, mint_zkbtc, validate_account_writable, validate_any_token_program_key,
+    validate_program_owner, validate_system_program, validate_token_owner,
 };
 
 use super::complete_deposit::DEMO_REQUIRED_CONFIRMATIONS;
 
-/// Instruction data for verify_deposit_v2 (OP_RETURN-free)
-pub struct VerifyDepositV2Data {
+/// Instruction data for verify_deposit (OP_RETURN-free)
+pub struct VerifyDepositData {
     pub sweep_txid: [u8; 32],
     pub block_height: u64,
     pub sweep_tx_size: u32,
@@ -63,12 +62,11 @@ pub struct VerifyDepositV2Data {
     pub deposit_tx_size: u32,
 }
 
-impl VerifyDepositV2Data {
-    pub const MIN_SIZE: usize = 32 + 8 + 4 + 32; // 76 bytes (backward compat)
+impl VerifyDepositData {
     pub const FULL_SIZE: usize = 32 + 8 + 4 + 32 + 4; // 80 bytes
 
     pub fn from_bytes(data: &[u8]) -> Result<Self, ProgramError> {
-        if data.len() < Self::MIN_SIZE {
+        if data.len() < Self::FULL_SIZE {
             return Err(ProgramError::InvalidInstructionData);
         }
 
@@ -81,13 +79,7 @@ impl VerifyDepositV2Data {
         let mut deposit_txid = [0u8; 32];
         deposit_txid.copy_from_slice(&data[44..76]);
 
-        // Optional for old clients, but processing now rejects 0 because exact
-        // deposit outpoint binding requires the raw deposit transaction.
-        let deposit_tx_size = if data.len() >= Self::FULL_SIZE {
-            u32::from_le_bytes(data[76..80].try_into().unwrap())
-        } else {
-            0
-        };
+        let deposit_tx_size = u32::from_le_bytes(data[76..80].try_into().unwrap());
 
         Ok(Self {
             sweep_txid,
@@ -120,7 +112,7 @@ impl VerifyDepositV2Data {
 /// 12. `[]`         TokenConfig PDA (for token_id)
 /// 13. `[]`         PoolConfig PDA (optional, for Taproot npk verification)
 /// 14. `[]`         Deposit TX buffer (ChadBuffer, optional, for Taproot verification)
-pub fn process_verify_deposit_v2(
+pub fn process_verify_deposit(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     data: &[u8],
@@ -144,7 +136,7 @@ pub fn process_verify_deposit_v2(
     let token_config_info = &accounts[12];
 
     // Parse instruction data
-    let ix_data = VerifyDepositV2Data::from_bytes(data)?;
+    let ix_data = VerifyDepositData::from_bytes(data)?;
 
     // Validate account owners
     validate_program_owner(pool_state_info, program_id)?;
@@ -214,11 +206,7 @@ pub fn process_verify_deposit_v2(
         // Create deposit receipt PDA
         let rent = Rent::get()?;
         let bump_bytes = [receipt_bump];
-        let signer_seeds: &[&[u8]] = &[
-            DepositReceipt::SEED,
-            &ix_data.deposit_txid,
-            &bump_bytes,
-        ];
+        let signer_seeds: &[&[u8]] = &[DepositReceipt::SEED, &ix_data.deposit_txid, &bump_bytes];
 
         create_pda_account(
             authority,
@@ -267,7 +255,8 @@ pub fn process_verify_deposit_v2(
         .try_borrow_data()
         .map_err(|_| UTXOpiaError::InvalidBlockHeader)?;
 
-    let sweep_raw_tx = read_transaction_from_buffer(&sweep_buffer_data, ix_data.sweep_tx_size as usize)?;
+    let sweep_raw_tx =
+        read_transaction_from_buffer(&sweep_buffer_data, ix_data.sweep_tx_size as usize)?;
 
     // Verify sweep transaction hash matches sweep_txid
     let computed_sweep_hash = compute_tx_hash(sweep_raw_tx);
@@ -276,8 +265,8 @@ pub fn process_verify_deposit_v2(
     }
 
     // Parse sweep TX and extract deposit amount
-    let sweep_parsed = ParsedTransaction::parse(sweep_raw_tx)
-        .map_err(|_| UTXOpiaError::InvalidSpvProof)?;
+    let sweep_parsed =
+        ParsedTransaction::parse(sweep_raw_tx).map_err(|_| UTXOpiaError::InvalidSpvProof)?;
 
     // --- Read npk + ephemeral_pub from DepositIntent PDA ---
     let (ephemeral_pub, npk) = {
@@ -295,7 +284,7 @@ pub fn process_verify_deposit_v2(
     };
 
     // --- Taproot npk ↔ deposit address verification + exact outpoint linkage ---
-    // The legacy txid-only check is insufficient when a BTC transaction has
+    // The txid-only check is insufficient when a BTC transaction has
     // multiple outputs. Require the raw deposit tx, identify the exact credited
     // output, then prove the sweep spends that output index.
     if ix_data.deposit_tx_size == 0 || accounts.len() < 15 {
@@ -324,18 +313,16 @@ pub fn process_verify_deposit_v2(
     let deposit_buffer_data = deposit_tx_buffer_info
         .try_borrow_data()
         .map_err(|_| UTXOpiaError::InvalidSpvProof)?;
-    let deposit_raw_tx = read_transaction_from_buffer(
-        &deposit_buffer_data,
-        ix_data.deposit_tx_size as usize,
-    )?;
+    let deposit_raw_tx =
+        read_transaction_from_buffer(&deposit_buffer_data, ix_data.deposit_tx_size as usize)?;
 
     let computed_deposit_hash = compute_tx_hash(deposit_raw_tx);
     if computed_deposit_hash != ix_data.deposit_txid {
         return Err(UTXOpiaError::InvalidSpvProof.into());
     }
 
-    let deposit_parsed = ParsedTransaction::parse(deposit_raw_tx)
-        .map_err(|_| UTXOpiaError::InvalidSpvProof)?;
+    let deposit_parsed =
+        ParsedTransaction::parse(deposit_raw_tx).map_err(|_| UTXOpiaError::InvalidSpvProof)?;
 
     let deposit_vout = if let Some(gpk) = group_pub_key {
         let mut matched_vout: Option<u32> = None;
@@ -360,7 +347,8 @@ pub fn process_verify_deposit_v2(
     }
 
     // Extract deposit amount from sweep TX's deposit output (largest P2TR output)
-    let deposit_output = sweep_parsed.find_deposit_output()
+    let deposit_output = sweep_parsed
+        .find_deposit_output()
         .ok_or(UTXOpiaError::InvalidSpvProof)?;
     let amount_sats = deposit_output.value;
 
@@ -401,7 +389,7 @@ pub fn process_verify_deposit_v2(
     );
 
     // Emit deposit verified event (BTC txids + amount for indexer)
-    // v2 doesn't have deposit TX parsed outside scope, pass 0 for original_amount (Mempool fetch fills it)
+    // Deposit TX amount is parsed from the raw transaction during completion.
     crate::utils::events::emit_deposit_verified(
         &ix_data.sweep_txid,
         &ix_data.deposit_txid,
@@ -435,7 +423,7 @@ pub fn process_verify_deposit_v2(
     }
 
     // Update token config: keep total_shielded symmetric with unshield.sub_shielded.
-    // Without this, an unshield against a v2-deposited note would underflow on the
+    // Without this, an unshield against a verified-deposit note would underflow on the
     // TokenConfig.total_shielded counter.
     {
         let mut tc_data = token_config_info.try_borrow_mut_data()?;
@@ -461,7 +449,7 @@ pub fn process_verify_deposit_v2(
         intent_data.fill(0);
     }
 
-    pinocchio::msg!("UTXOpia: deposit verified (v2)");
+    pinocchio::msg!("UTXOpia: deposit verified");
 
     Ok(())
 }

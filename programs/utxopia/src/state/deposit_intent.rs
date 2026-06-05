@@ -1,7 +1,7 @@
 //! DepositIntent account
 //!
 //! Stores ephemeral_pub + npk for OP_RETURN-free deposits.
-//! Created by the relayer after BTC detected, read by verify_deposit_v2,
+//! Created by the relayer after BTC detected, read by verify_deposit,
 //! then closed (rent returned to relayer).
 //!
 //! PDA seeds: ["deposit_intent", npk]
@@ -38,7 +38,11 @@ impl DepositIntent {
     }
 
     /// Initialize a new deposit intent
-    pub fn init(data: &mut [u8], ephemeral_pub: &[u8; 32], npk: &[u8; 32]) -> Result<(), ProgramError> {
+    pub fn init(
+        data: &mut [u8],
+        ephemeral_pub: &[u8; 32],
+        npk: &[u8; 32],
+    ) -> Result<(), ProgramError> {
         if data.len() < Self::LEN {
             return Err(ProgramError::InvalidAccountData);
         }

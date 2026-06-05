@@ -62,7 +62,7 @@ export function derivePoolStatePDA(programId: PublicKey): [PublicKey, number] {
 
 export function deriveCommitmentTreePDA(programId: PublicKey): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
-    [Buffer.from(Seeds.COMMITMENT_TREE)],
+    [Buffer.from(Seeds.COMMITMENT_TREE), Buffer.from([0, 0, 0, 0])],
     programId,
   );
 }

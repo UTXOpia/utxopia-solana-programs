@@ -96,11 +96,11 @@ pub mod instruction {
     // signs per-commitment verdicts; chain stores a screener registry).
     // The compliance design is documented in docs/COMPLIANCE.md.
 
-    // OP_RETURN-free deposits (24-25) — wired to support backend v2 deposit path.
+    // OP_RETURN-free deposits (24-25).
     // Backend's deposit_tracker uses 24 to register a DepositIntent PDA before
     // sweep, then 25 to verify the swept tx against that PDA on chain.
     pub const REGISTER_DEPOSIT_INTENT: u8 = 24;
-    pub const VERIFY_DEPOSIT_V2: u8 = 25;
+    pub const VERIFY_DEPOSIT: u8 = 25;
 
     // Ika pre-broadcast signing approval (27)
     pub const APPROVE_REDEMPTION_SIGNING: u8 = 27;
@@ -151,7 +151,7 @@ pub fn process_instruction(
         instruction::ROTATE_TREE => instructions::process_rotate_tree(program_id, accounts, data),
         // OP_RETURN-free deposits (24-25)
         instruction::REGISTER_DEPOSIT_INTENT => instructions::process_register_deposit_intent(program_id, accounts, data),
-        instruction::VERIFY_DEPOSIT_V2 => instructions::process_verify_deposit_v2(program_id, accounts, data),
+        instruction::VERIFY_DEPOSIT => instructions::process_verify_deposit(program_id, accounts, data),
         // Ika pre-broadcast signing approval (27)
         instruction::APPROVE_REDEMPTION_SIGNING => instructions::process_approve_redemption_signing(program_id, accounts, data),
         _ => Err(ProgramError::InvalidInstructionData),

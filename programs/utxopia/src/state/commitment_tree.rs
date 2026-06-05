@@ -8,8 +8,8 @@
 //! - Frontier array to track rightmost filled nodes
 //! - Standard Merkle path proofs compatible with ZK circuits
 
-use pinocchio::program_error::ProgramError;
 use crate::utils::crypto::poseidon2_hash;
+use pinocchio::program_error::ProgramError;
 
 /// Discriminator for CommitmentTree account
 pub const COMMITMENT_TREE_DISCRIMINATOR: u8 = 0x05;
@@ -95,9 +95,6 @@ pub struct CommitmentTree {
 impl CommitmentTree {
     pub const LEN: usize = core::mem::size_of::<Self>();
     pub const SEED_PREFIX: &'static [u8] = b"commitment_tree";
-
-    /// Legacy seed (tree index 0, backward compat)
-    pub const SEED: &'static [u8] = b"commitment_tree";
 
     /// Maximum number of leaves (2^16 = 65536)
     pub const MAX_LEAVES: u64 = 1u64 << TREE_DEPTH;
@@ -240,7 +237,10 @@ impl CommitmentTree {
     }
 
     /// Insert a leaf and return the new root (for verification)
-    pub fn insert_leaf_and_get_root(&mut self, commitment: &[u8; 32]) -> Result<([u8; 32], u64), ProgramError> {
+    pub fn insert_leaf_and_get_root(
+        &mut self,
+        commitment: &[u8; 32],
+    ) -> Result<([u8; 32], u64), ProgramError> {
         let index = self.insert_leaf(commitment)?;
         Ok((self.current_root, index))
     }
@@ -248,7 +248,7 @@ impl CommitmentTree {
 
 #[cfg(test)]
 mod tests {
-    use super::{CommitmentTree, ZERO_HASHES, TREE_DEPTH};
+    use super::{CommitmentTree, TREE_DEPTH, ZERO_HASHES};
 
     #[test]
     fn rejects_zero_root_but_accepts_empty_tree_root() {

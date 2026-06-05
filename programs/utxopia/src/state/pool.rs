@@ -414,7 +414,7 @@ mod tests {
 
     #[test]
     fn test_pool_state_size_unchanged() {
-        // PoolState size must stay constant — backward compatible with existing PDAs.
+        // PoolState size must stay constant for zero-copy account layout.
         // _reserved was 20 bytes, now carved into: total_btc_held(8) + utxo_count(2) + _reserved(10)
         assert_eq!(PoolState::LEN, 268);
     }
@@ -498,9 +498,9 @@ mod tests {
     }
 
     #[test]
-    fn test_pool_state_utxo_fields_backward_compatible() {
-        // Simulate an existing PDA with all zeros in the _reserved region
-        // (before UTXO tracking was added). The new fields should read as 0.
+    fn test_pool_state_utxo_fields_preserve_layout() {
+        // Simulate an account with zeros in the reserved region. The UTXO fields
+        // should read as 0.
         let mut buf = vec![0u8; PoolState::LEN];
         buf[0] = POOL_STATE_DISCRIMINATOR;
         let pool = PoolState::from_bytes(&buf).unwrap();

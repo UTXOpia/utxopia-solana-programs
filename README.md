@@ -73,7 +73,7 @@ bun run setup:devnet
 | 19 | CANCEL_REDEMPTION | Cancel pending/timed-out redemption |
 | 20 | ROTATE_TREE | Rotate active commitment tree |
 | 24 | REGISTER_DEPOSIT_INTENT | Register OP_RETURN-free deposit intent |
-| 25 | VERIFY_DEPOSIT_V2 | Verify OP_RETURN-free deposit |
+| 25 | VERIFY_DEPOSIT | Verify OP_RETURN-free deposit |
 | 27 | APPROVE_REDEMPTION_SIGNING | Approve Ika BTC signing |
 
 ## Privacy Model

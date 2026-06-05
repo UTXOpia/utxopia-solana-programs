@@ -25,8 +25,7 @@ use pinocchio::{
 use crate::error::UTXOpiaError;
 use crate::state::{CommitmentTree, PoolState};
 use crate::utils::{
-    create_pda_account, validate_account_writable, validate_program_owner,
-    validate_system_program,
+    create_pda_account, validate_account_writable, validate_program_owner, validate_system_program,
 };
 
 pub fn process_rotate_tree(
@@ -71,16 +70,7 @@ pub fn process_rotate_tree(
     let current_tree_seeds: &[&[u8]] = &[CommitmentTree::SEED_PREFIX, &current_index_bytes];
     let (expected_current_pda, _) = find_program_address(current_tree_seeds, program_id);
     if current_tree_info.key() != &expected_current_pda {
-        // Backward compat: tree index 0 may use legacy seed without index
-        if current_index == 0 {
-            let legacy_seeds: &[&[u8]] = &[CommitmentTree::SEED];
-            let (legacy_pda, _) = find_program_address(legacy_seeds, program_id);
-            if current_tree_info.key() != &legacy_pda {
-                return Err(ProgramError::InvalidSeeds);
-            }
-        } else {
-            return Err(ProgramError::InvalidSeeds);
-        }
+        return Err(ProgramError::InvalidSeeds);
     }
 
     // Verify current tree is full
@@ -106,7 +96,11 @@ pub fn process_rotate_tree(
     let rent = Rent::get()?;
     let tree_lamports = rent.minimum_balance(CommitmentTree::LEN);
     let new_bump_bytes = [new_bump];
-    let new_signer_seeds: &[&[u8]] = &[CommitmentTree::SEED_PREFIX, &new_index_bytes, &new_bump_bytes];
+    let new_signer_seeds: &[&[u8]] = &[
+        CommitmentTree::SEED_PREFIX,
+        &new_index_bytes,
+        &new_bump_bytes,
+    ];
 
     create_pda_account(
         authority,

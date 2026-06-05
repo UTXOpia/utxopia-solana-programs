@@ -30,10 +30,12 @@ function buildInitializeIx(
   poolVault: PublicKey, frostVault: PublicKey, authority: PublicKey,
   programId: PublicKey, poolBump: number, treeBump: number
 ): TransactionInstruction {
-  const data = Buffer.alloc(3);
+  const data = Buffer.alloc(7);
   data[0] = 0; // INITIALIZE discriminator
   data[1] = poolBump;
   data[2] = treeBump;
+  data.writeUInt16LE(0, 3); // deposit_fee_bps
+  data.writeUInt16LE(0, 5); // withdrawal_fee_bps
   return new TransactionInstruction({
     keys: [
       { pubkey: poolState, isSigner: false, isWritable: true },

@@ -53,7 +53,7 @@ function derivePoolStatePDA(programId: PublicKey): [PublicKey, number] {
 
 function deriveCommitmentTreePDA(programId: PublicKey): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
-    [Buffer.from(SEEDS.COMMITMENT_TREE)],
+    [Buffer.from(SEEDS.COMMITMENT_TREE), Buffer.from([0, 0, 0, 0])],
     programId
   );
 }
@@ -69,10 +69,12 @@ function buildInitializeIx(
   poolBump: number,
   treeBump: number
 ): TransactionInstruction {
-  const data = Buffer.alloc(3);
+  const data = Buffer.alloc(7);
   data[0] = 0; // INITIALIZE discriminator
   data[1] = poolBump;
   data[2] = treeBump;
+  data.writeUInt16LE(0, 3); // deposit_fee_bps
+  data.writeUInt16LE(0, 5); // withdrawal_fee_bps
 
   return new TransactionInstruction({
     keys: [

@@ -167,10 +167,12 @@ function buildInitializeInstruction(
   poolBump: number,
   treeBump: number,
 ): TransactionInstruction {
-  const data = Buffer.alloc(3);
+  const data = Buffer.alloc(7);
   data[0] = Instruction.Initialize;
   data[1] = poolBump;
   data[2] = treeBump;
+  data.writeUInt16LE(0, 3); // deposit_fee_bps
+  data.writeUInt16LE(0, 5); // withdrawal_fee_bps
 
   return new TransactionInstruction({
     keys: [

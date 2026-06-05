@@ -2,7 +2,7 @@
 //!
 //! Stores the pool's BTC scriptPubKey (P2TR) and FROST group public key
 //! on-chain for trustless verification in `complete_redemption` and
-//! `verify_deposit_v2`.
+//! `verify_deposit`.
 //!
 //! PDA seeds: ["pool_config"]
 
@@ -15,7 +15,7 @@ pub const POOL_CONFIG_DISCRIMINATOR: u8 = 0x0A;
 ///
 /// Field history:
 /// - `group_pub_key` is the legacy FROST group key. New pools (Ika-controlled)
-///   leave it zero; `verify_deposit_v2` falls back to the Ika x-only pubkey.
+///   leave it zero; `verify_deposit` falls back to the Ika x-only pubkey.
 /// - `ika_dwallet`, `ika_dwallet_xonly_pubkey`, `cpi_authority_bump` are the
 ///   Ika-era custody fields (2026-05).
 #[repr(C)]

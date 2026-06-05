@@ -17,9 +17,9 @@ use pinocchio::{
 };
 
 use crate::error::UTXOpiaError;
-use crate::state::{PoolState, RedemptionRequest, RedemptionStatus, UtxoRecord, UtxoStatus};
 use crate::state::utxo::UTXO_RECORD_DISCRIMINATOR;
-use crate::utils::{validate_program_owner, validate_account_writable};
+use crate::state::{PoolState, RedemptionRequest, RedemptionStatus, UtxoRecord, UtxoStatus};
+use crate::utils::{validate_account_writable, validate_program_owner};
 
 /// Maximum UTXOs that can be selected in a single mark_processing call
 const MAX_UTXOS_PER_MARK: usize = 20;
@@ -28,7 +28,6 @@ const MAX_UTXOS_PER_MARK: usize = 20;
 ///
 /// # Instruction Data
 /// - utxo_count: 1 byte (u8) — number of UTXO accounts in remaining accounts.
-///   If 0, falls back to old behavior (no trustless UTXO tracking).
 ///
 /// # Accounts
 /// 0. `[writable]` Pool state
@@ -69,8 +68,15 @@ pub fn process_mark_processing(
         }
     }
 
+    if data.is_empty() {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+
     // Parse instruction data: utxo_count (1 byte)
-    let utxo_count = if !data.is_empty() { data[0] as usize } else { 0 };
+    let utxo_count = data[0] as usize;
+    if utxo_count == 0 {
+        return Err(ProgramError::InvalidInstructionData);
+    }
 
     // Validate we have enough remaining accounts for UTXOs
     if accounts.len() < 3 + utxo_count {
@@ -82,67 +88,52 @@ pub fn process_mark_processing(
     }
 
     // --- Phase 1: Validate and read UTXO amounts, mark as Reserved ---
-    let total_input_sats = if utxo_count > 0 {
-        let mut total: u64 = 0;
-        // Stack-allocated array to hold amounts for pool state update
-        let mut utxo_amounts = [0u64; MAX_UTXOS_PER_MARK];
+    let mut total_input_sats: u64 = 0;
+    // Stack-allocated array to hold amounts for pool state update
+    let mut utxo_amounts = [0u64; MAX_UTXOS_PER_MARK];
+
+    for i in 0..utxo_count {
+        let utxo_info = &accounts[3 + i];
+
+        // Validate UTXO account
+        validate_program_owner(utxo_info, program_id)?;
+        validate_account_writable(utxo_info)?;
+
+        let mut utxo_data = utxo_info.try_borrow_mut_data()?;
+
+        // Validate discriminator
+        if utxo_data.is_empty() || utxo_data[0] != UTXO_RECORD_DISCRIMINATOR {
+            return Err(UTXOpiaError::InvalidUtxo.into());
+        }
+
+        let utxo = UtxoRecord::from_bytes_mut(&mut utxo_data)?;
+
+        // Must be Unspent
+        if utxo.get_status() != UtxoStatus::Unspent {
+            return Err(UTXOpiaError::UtxoNotUnspent.into());
+        }
+
+        let amount = utxo.amount_sats();
+        utxo_amounts[i] = amount;
+
+        // Sum amount
+        total_input_sats = total_input_sats
+            .checked_add(amount)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
+
+        // Mark as Reserved
+        utxo.set_status(UtxoStatus::Reserved);
+    }
+
+    // --- Phase 2: Update PoolState counters ---
+    {
+        let mut pool_data = pool_state_info.try_borrow_mut_data()?;
+        let pool = PoolState::from_bytes_mut(&mut pool_data)?;
 
         for i in 0..utxo_count {
-            let utxo_info = &accounts[3 + i];
-
-            // Validate UTXO account
-            validate_program_owner(utxo_info, program_id)?;
-            validate_account_writable(utxo_info)?;
-
-            let mut utxo_data = utxo_info.try_borrow_mut_data()?;
-
-            // Validate discriminator
-            if utxo_data.is_empty() || utxo_data[0] != UTXO_RECORD_DISCRIMINATOR {
-                return Err(UTXOpiaError::InvalidUtxo.into());
-            }
-
-            let utxo = UtxoRecord::from_bytes_mut(&mut utxo_data)?;
-
-            // Must be Unspent
-            if utxo.get_status() != UtxoStatus::Unspent {
-                return Err(UTXOpiaError::UtxoNotUnspent.into());
-            }
-
-            let amount = utxo.amount_sats();
-            utxo_amounts[i] = amount;
-
-            // Sum amount
-            total = total.checked_add(amount)
-                .ok_or(ProgramError::ArithmeticOverflow)?;
-
-            // Mark as Reserved
-            utxo.set_status(UtxoStatus::Reserved);
+            pool.remove_utxo(utxo_amounts[i])?;
         }
-
-        // --- Phase 2: Update PoolState counters ---
-        {
-            let mut pool_data = pool_state_info.try_borrow_mut_data()?;
-            let pool = PoolState::from_bytes_mut(&mut pool_data)?;
-
-            for i in 0..utxo_count {
-                pool.remove_utxo(utxo_amounts[i])?;
-            }
-        }
-
-        total
-    } else {
-        // Backward compat: no UTXOs passed, use old instruction data format
-        // data[0] was utxo_count=0, remaining bytes may contain total_input_sats
-        if data.len() >= 9 {
-            // utxo_count(1) + total_input_sats(8)
-            u64::from_le_bytes(data[1..9].try_into().unwrap())
-        } else if data.is_empty() && false {
-            // Truly legacy: no data at all
-            0
-        } else {
-            0
-        }
-    };
+    }
 
     // Validate status is Pending and transition to Processing
     {

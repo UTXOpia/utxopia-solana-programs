@@ -41,10 +41,26 @@ pub fn create_pda_account<'a>(
 
     // Convert seeds to Pinocchio format
     let seeds: [Seed; 4] = [
-        if !signer_seeds.is_empty() { Seed::from(signer_seeds[0]) } else { Seed::from(&[][..]) },
-        if signer_seeds.len() > 1 { Seed::from(signer_seeds[1]) } else { Seed::from(&[][..]) },
-        if signer_seeds.len() > 2 { Seed::from(signer_seeds[2]) } else { Seed::from(&[][..]) },
-        if signer_seeds.len() > 3 { Seed::from(signer_seeds[3]) } else { Seed::from(&[][..]) },
+        if !signer_seeds.is_empty() {
+            Seed::from(signer_seeds[0])
+        } else {
+            Seed::from(&[][..])
+        },
+        if signer_seeds.len() > 1 {
+            Seed::from(signer_seeds[1])
+        } else {
+            Seed::from(&[][..])
+        },
+        if signer_seeds.len() > 2 {
+            Seed::from(signer_seeds[2])
+        } else {
+            Seed::from(&[][..])
+        },
+        if signer_seeds.len() > 3 {
+            Seed::from(signer_seeds[3])
+        } else {
+            Seed::from(&[][..])
+        },
     ];
 
     let signer = Signer::from(&seeds[..signer_seeds.len()]);
@@ -283,7 +299,7 @@ pub fn close_account_securely(
         let mut data = account.try_borrow_mut_data()?;
         if !data.is_empty() {
             data[0] = 0xFF; // Closed account marker
-            // Zero remaining data for security
+                            // Zero remaining data for security
             for byte in data[1..].iter_mut() {
                 *byte = 0;
             }
@@ -310,35 +326,23 @@ pub fn close_account_securely(
 }
 
 /// Validate that a commitment tree account matches the active tree index.
-///
-/// Supports backward compatibility: tree index 0 may use the legacy seed
-/// `"commitment_tree"` (without index suffix).
 pub fn validate_active_tree_pda(
     tree_account: &AccountInfo,
     program_id: &Pubkey,
     active_index: u32,
 ) -> Result<(), ProgramError> {
-    use pinocchio::pubkey::find_program_address;
     use crate::state::CommitmentTree;
+    use pinocchio::pubkey::find_program_address;
 
     let index_bytes = active_index.to_le_bytes();
     let indexed_seeds: &[&[u8]] = &[CommitmentTree::SEED_PREFIX, &index_bytes];
     let (expected_pda, _) = find_program_address(indexed_seeds, program_id);
 
-    if tree_account.key() == &expected_pda {
-        return Ok(());
+    if tree_account.key() != &expected_pda {
+        return Err(ProgramError::InvalidSeeds);
     }
 
-    // Backward compat: tree index 0 accepts legacy seed without index
-    if active_index == 0 {
-        let legacy_seeds: &[&[u8]] = &[CommitmentTree::SEED];
-        let (legacy_pda, _) = find_program_address(legacy_seeds, program_id);
-        if tree_account.key() == &legacy_pda {
-            return Ok(());
-        }
-    }
-
-    Err(ProgramError::InvalidSeeds)
+    Ok(())
 }
 
 /// Validate that a frozen (historical) tree account is a valid commitment tree PDA
@@ -351,8 +355,8 @@ pub fn validate_frozen_tree(
     active_index: u32,
     expected_root: &[u8; 32],
 ) -> Result<bool, ProgramError> {
-    use pinocchio::pubkey::find_program_address;
     use crate::state::{CommitmentTree, COMMITMENT_TREE_DISCRIMINATOR};
+    use pinocchio::pubkey::find_program_address;
 
     validate_program_owner(tree_account, program_id)?;
 
@@ -370,14 +374,6 @@ pub fn validate_frozen_tree(
         let (pda, _) = find_program_address(seeds, program_id);
         if tree_account.key() == &pda {
             return Ok(tree.current_root == *expected_root);
-        }
-        // Also check legacy seed for index 0
-        if idx == 0 {
-            let legacy_seeds: &[&[u8]] = &[CommitmentTree::SEED];
-            let (legacy_pda, _) = find_program_address(legacy_seeds, program_id);
-            if tree_account.key() == &legacy_pda {
-                return Ok(tree.current_root == *expected_root);
-            }
         }
     }
 

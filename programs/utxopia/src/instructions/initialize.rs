@@ -15,8 +15,7 @@ use crate::error::UTXOpiaError;
 use crate::state::{CommitmentTree, PoolState, POOL_STATE_DISCRIMINATOR};
 
 /// Initialize instruction data
-/// Layout: pool_bump(1) + tree_bump(1) + [deposit_fee_bps(2) + withdrawal_fee_bps(2)]
-/// Fee fields are optional (backward compat: 2-byte data still works, defaults to 0 bps).
+/// Layout: pool_bump(1) + tree_bump(1) + deposit_fee_bps(2) + withdrawal_fee_bps(2)
 pub struct InitializeData {
     pub pool_bump: u8,
     pub tree_bump: u8,
@@ -26,24 +25,14 @@ pub struct InitializeData {
 
 impl InitializeData {
     pub fn from_bytes(data: &[u8]) -> Result<Self, ProgramError> {
-        if data.len() < 2 {
+        if data.len() < 6 {
             return Err(ProgramError::InvalidInstructionData);
         }
-        let deposit_fee_bps = if data.len() >= 4 {
-            u16::from_le_bytes(data[2..4].try_into().unwrap())
-        } else {
-            0
-        };
-        let withdrawal_fee_bps = if data.len() >= 6 {
-            u16::from_le_bytes(data[4..6].try_into().unwrap())
-        } else {
-            0
-        };
         Ok(Self {
             pool_bump: data[0],
             tree_bump: data[1],
-            deposit_fee_bps,
-            withdrawal_fee_bps,
+            deposit_fee_bps: u16::from_le_bytes(data[2..4].try_into().unwrap()),
+            withdrawal_fee_bps: u16::from_le_bytes(data[4..6].try_into().unwrap()),
         })
     }
 }
@@ -111,7 +100,8 @@ pub fn process_initialize(
     }
 
     // Verify commitment_tree PDA
-    let tree_seeds: &[&[u8]] = &[CommitmentTree::SEED];
+    let tree_index_bytes = 0u32.to_le_bytes();
+    let tree_seeds: &[&[u8]] = &[CommitmentTree::SEED_PREFIX, &tree_index_bytes];
     let (expected_tree_pda, tree_bump) = find_program_address(tree_seeds, program_id);
     if accounts.commitment_tree.key() != &expected_tree_pda {
         return Err(ProgramError::InvalidSeeds);
@@ -152,7 +142,11 @@ pub fn process_initialize(
     if tree_data_len == 0 {
         // Create commitment_tree PDA
         let tree_bump_bytes = [tree_bump];
-        let tree_signer_seeds: &[&[u8]] = &[CommitmentTree::SEED, &tree_bump_bytes];
+        let tree_signer_seeds: &[&[u8]] = &[
+            CommitmentTree::SEED_PREFIX,
+            &tree_index_bytes,
+            &tree_bump_bytes,
+        ];
 
         create_pda_account(
             accounts.authority,
@@ -173,10 +167,14 @@ pub fn process_initialize(
         let pool = PoolState::init(&mut pool_data)?;
 
         pool.bump = pool_bump;
-        pool.authority.copy_from_slice(accounts.authority.key().as_ref());
-        pool.zkbtc_mint.copy_from_slice(accounts.zkbtc_mint.key().as_ref());
-        pool.pool_vault.copy_from_slice(accounts.pool_vault.key().as_ref());
-        pool.frost_vault.copy_from_slice(accounts.frost_vault.key().as_ref());
+        pool.authority
+            .copy_from_slice(accounts.authority.key().as_ref());
+        pool.zkbtc_mint
+            .copy_from_slice(accounts.zkbtc_mint.key().as_ref());
+        pool.pool_vault
+            .copy_from_slice(accounts.pool_vault.key().as_ref());
+        pool.frost_vault
+            .copy_from_slice(accounts.frost_vault.key().as_ref());
         pool.set_min_deposit(MIN_DEPOSIT_SATS);
         pool.set_max_deposit(MAX_DEPOSIT_SATS);
         pool.set_service_fee_base(2_000);
