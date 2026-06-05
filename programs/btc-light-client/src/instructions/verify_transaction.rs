@@ -9,10 +9,10 @@ use pinocchio::{
 use pinocchio_system::instructions::CreateAccount;
 
 use crate::constants::{
-    BLOCK_HEADER_DISCRIMINATOR, BLOCK_HEADER_SEED, REQUIRED_CONFIRMATIONS,
-    VERIFIED_TX_DISCRIMINATOR, VERIFIED_TX_SEED,
+    BLOCK_HEADER_DISCRIMINATOR, BLOCK_HEADER_SEED, HEIGHT_INDEX_DISCRIMINATOR,
+    HEIGHT_INDEX_SEED, REQUIRED_CONFIRMATIONS, VERIFIED_TX_DISCRIMINATOR, VERIFIED_TX_SEED,
 };
-use crate::state::{BitcoinLightClient, BlockHeader, VerifiedTransaction};
+use crate::state::{BitcoinLightClient, BlockHeader, HeightIndex, VerifiedTransaction};
 use crate::utils::{double_sha256, double_sha256_pair};
 
 /// Verify a Bitcoin transaction's inclusion in a confirmed block, creating a VerifiedTransaction PDA.
@@ -27,9 +27,10 @@ use crate::utils::{double_sha256, double_sha256_pair};
 ///   0. [writable, PDA] VerifiedTransaction (to create)
 ///   1. []              BitcoinLightClient
 ///   2. []              BlockHeader (["block", block_hash])
-///   3. []              ChadBuffer (raw tx)
-///   4. [signer, writable] Payer
-///   5. []              System program
+///   3. []              HeightIndex (["height_index", block_height])
+///   4. []              ChadBuffer (raw tx)
+///   5. [signer, writable] Payer
+///   6. []              System program
 pub fn process_verify_transaction(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -38,16 +39,17 @@ pub fn process_verify_transaction(
     if data.len() < 68 {
         return Err(ProgramError::InvalidInstructionData);
     }
-    if accounts.len() < 6 {
+    if accounts.len() < 7 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
     let verified_tx_info = &accounts[0];
     let light_client_info = &accounts[1];
     let block_header_info = &accounts[2];
-    let tx_buffer_info = &accounts[3];
-    let payer = &accounts[4];
-    let _system_program = &accounts[5];
+    let height_index_info = &accounts[3];
+    let tx_buffer_info = &accounts[4];
+    let payer = &accounts[5];
+    let _system_program = &accounts[6];
 
     if !payer.is_signer() {
         return Err(ProgramError::MissingRequiredSignature);
@@ -58,6 +60,9 @@ pub fn process_verify_transaction(
         return Err(ProgramError::IllegalOwner);
     }
     if block_header_info.owner() != program_id {
+        return Err(ProgramError::IllegalOwner);
+    }
+    if height_index_info.owner() != program_id {
         return Err(ProgramError::IllegalOwner);
     }
 
@@ -114,6 +119,23 @@ pub fn process_verify_transaction(
         merkle_root.copy_from_slice(&header.merkle_root);
         (merkle_root, header.height())
     };
+
+    let height_le = block_height.to_le_bytes();
+    let (expected_hi_pda, _) =
+        pinocchio::pubkey::find_program_address(&[HEIGHT_INDEX_SEED, &height_le], program_id);
+    if height_index_info.key() != &expected_hi_pda {
+        return Err(ProgramError::InvalidSeeds);
+    }
+    {
+        let hi_data = height_index_info.try_borrow_data()?;
+        if hi_data.len() < HeightIndex::LEN || hi_data[0] != HEIGHT_INDEX_DISCRIMINATOR {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        let hi = unsafe { &*(hi_data.as_ptr() as *const HeightIndex) };
+        if hi.height != height_le || hi.block_hash != block_hash {
+            return Err(ProgramError::InvalidArgument);
+        }
+    }
 
     // Verify sufficient confirmations
     {
