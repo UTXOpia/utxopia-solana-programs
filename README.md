@@ -20,14 +20,11 @@ Tracks Bitcoin block headers for SPV verification.
 # Build programs
 bun run build
 
-# Deploy to devnet
-bun run deploy
+# Deploy fresh devnet program
+bun run scripts/deploy-fresh-devnet.ts
 
 # Run tests
 bun run test
-
-# Setup devnet
-bun run setup:devnet
 ```
 
 ## Structure
@@ -42,7 +39,7 @@ bun run setup:devnet
 │   │       ├── state/       # Account structures
 │   │       └── utils/       # Helpers (BTC, chadbuffer)
 │   └── btc-light-client/    # BTC header tracking
-├── scripts/                 # Setup & deployment
+├── scripts/                 # Deployment and verification
 ├── tests/                   # Integration tests
 └── package.json
 ```

@@ -5,7 +5,7 @@
  *   - PDA derivation functions
  *   - On-chain state parsers
  *   - ChadBuffer upload
- *   - Instruction builders (extend_blockchain; removed request_redemption is intentionally disabled)
+ *   - Instruction builders for BTC light-client header extension
  *   - Authority keypair loading
  *   - Shared constants
  */
@@ -35,7 +35,6 @@ export const Seeds = {
   VK_REGISTRY: "vk_registry",
   NULLIFIER: "nullifier",
   STEALTH_ANNOUNCEMENT: "stealth",
-  REDEMPTION: "redemption",
   DEPOSIT: "deposit",
   BTC_LIGHT_CLIENT: "btc_light_client",
   BLOCK_HEADER: "block",
@@ -94,15 +93,6 @@ export function deriveNullifierPDA(programId: PublicKey, nullifierHash: Uint8Arr
 export function deriveStealthAnnouncementPDA(programId: PublicKey, ephemeralPub: Uint8Array): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
     [Buffer.from(Seeds.STEALTH_ANNOUNCEMENT), Buffer.from(ephemeralPub)],
-    programId,
-  );
-}
-
-export function deriveRedemptionPDA(programId: PublicKey, user: PublicKey, nonce: bigint): [PublicKey, number] {
-  const nonceBuf = Buffer.alloc(8);
-  nonceBuf.writeBigUInt64LE(nonce);
-  return PublicKey.findProgramAddressSync(
-    [Buffer.from(Seeds.REDEMPTION), user.toBuffer(), nonceBuf],
     programId,
   );
 }
@@ -173,23 +163,6 @@ export function parsePoolState(data: Buffer): PoolSnapshot | null {
     totalBurned: data.readBigUInt64LE(148),
     pendingRedemptions: data.readBigUInt64LE(156),
     totalShielded: data.readBigUInt64LE(188),
-  };
-}
-
-export interface RedemptionSnapshot {
-  status: number;
-  requester: PublicKey;
-  amountSats: bigint;
-  btcAddressLen: number;
-}
-
-export function parseRedemptionRequest(data: Buffer): RedemptionSnapshot | null {
-  if (data.length < 90 || data[0] !== 0x04) return null;
-  return {
-    status: data[1],
-    requester: new PublicKey(data.subarray(16, 48)),
-    amountSats: data.readBigUInt64LE(48),
-    btcAddressLen: data[2],
   };
 }
 
@@ -331,33 +304,6 @@ export function buildExtendBlockchainIx(
     programId: btcLightClientId,
     data,
   });
-}
-
-/**
- * request_redemption was removed from the UTXOPIA program.
- *
- * Discriminator 16 is now reserved and the proof-checked BTC withdrawal path is
- * the REDEEM instruction. This helper remains only to make old scripts fail with
- * a clear error instead of accidentally sending a stale opcode.
- */
-export function buildRequestRedemptionIx(
-  _programId: PublicKey,
-  _poolState: PublicKey,
-  _commitmentTree: PublicKey,
-  _nullifierRecord: PublicKey,
-  _redemptionRequest: PublicKey,
-  _user: PublicKey,
-  _params: {
-    proofHash: Uint8Array;
-    merkleRoot: Uint8Array;
-    nullifierHash: Uint8Array;
-    amountSats: bigint;
-    vkHash: Uint8Array;
-    btcAddress: string;
-    nonce: bigint;
-  },
-): TransactionInstruction {
-  throw new Error("request_redemption was removed; use the proof-checked REDEEM instruction instead");
 }
 
 // =============================================================================

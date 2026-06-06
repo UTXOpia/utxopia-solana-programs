@@ -1,8 +1,12 @@
-//! Set pool config instruction (disc 27)
+//! Set pool config instruction (disc 2)
 //!
-//! Authority-only instruction to set the pool's BTC scriptPubKey and either
-//! the legacy FROST group public key or the new Ika dWallet custody fields
-//! in the PoolConfig PDA.
+//! Authority-only initialization instruction for the pool's BTC scriptPubKey
+//! and either the legacy FROST group public key or the new Ika dWallet custody
+//! fields in the PoolConfig PDA.
+//!
+//! PoolConfig is custody-critical: the pool script and Ika dWallet define
+//! where BTC is controlled. This instruction creates and initializes the PDA
+//! once; it does not mutate an initialized config.
 //!
 //! Instruction Data Layout (all post-script fields optional, append-only):
 //! - [0]                pool_script_len: u8 (max 34)
@@ -29,8 +33,7 @@ use pinocchio::{
 use crate::error::UTXOpiaError;
 use crate::state::{PoolConfig, PoolState, POOL_CONFIG_DISCRIMINATOR};
 use crate::utils::{
-    create_pda_account, validate_account_writable, validate_program_owner,
-    validate_system_program,
+    create_pda_account, validate_account_writable, validate_program_owner, validate_system_program,
 };
 
 pub fn process_set_pool_config(
@@ -110,10 +113,20 @@ pub fn process_set_pool_config(
     };
 
     let cpi_authority_bump: Option<u8> = if data.len() >= cursor + 1 {
-        Some(data[cursor])
+        let bump = data[cursor];
+        cursor += 1;
+        Some(bump)
     } else {
         None
     };
+    if cursor != data.len() {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    validate_ika_fields(
+        ika_dwallet.as_ref(),
+        ika_dwallet_xonly.as_ref(),
+        cpi_authority_bump,
+    )?;
 
     // Verify PoolConfig PDA
     let config_seeds: &[&[u8]] = &[PoolConfig::SEED];
@@ -149,12 +162,18 @@ pub fn process_set_pool_config(
             cpi_authority_bump,
         )?;
     } else {
-        // Update existing
+        // Existing account: only initialize zeroed/preallocated PDAs. A
+        // populated PoolConfig is immutable because it defines BTC custody.
         validate_program_owner(pool_config_info, program_id)?;
 
-        // Migration path: old (pre-Ika) PoolConfig PDAs are 96 bytes. The
-        // current struct is 161 bytes. Grow the account in-place + top up
-        // rent before re-initialising the layout. Authority pays.
+        if config_data_len >= 1 {
+            let config_data = pool_config_info.try_borrow_data()?;
+            if config_data[0] == POOL_CONFIG_DISCRIMINATOR {
+                return Err(UTXOpiaError::AlreadyInitialized.into());
+            }
+        }
+
+        // Zeroed/preallocated PDA: grow if necessary before initialization.
         if config_data_len < PoolConfig::LEN {
             let rent = Rent::get()?;
             let needed = rent.minimum_balance(PoolConfig::LEN);
@@ -171,31 +190,18 @@ pub fn process_set_pool_config(
         }
 
         let mut config_data = pool_config_info.try_borrow_mut_data()?;
-
-        if config_data[0] != POOL_CONFIG_DISCRIMINATOR {
-            let config = PoolConfig::init(&mut config_data)?;
-            apply_fields(
-                config,
-                pool_script,
-                group_pub_key.as_ref(),
-                ika_dwallet.as_ref(),
-                ika_dwallet_xonly.as_ref(),
-                cpi_authority_bump,
-            )?;
-        } else {
-            let config = PoolConfig::from_bytes_mut(&mut config_data)?;
-            apply_fields(
-                config,
-                pool_script,
-                group_pub_key.as_ref(),
-                ika_dwallet.as_ref(),
-                ika_dwallet_xonly.as_ref(),
-                cpi_authority_bump,
-            )?;
-        }
+        let config = PoolConfig::init(&mut config_data)?;
+        apply_fields(
+            config,
+            pool_script,
+            group_pub_key.as_ref(),
+            ika_dwallet.as_ref(),
+            ika_dwallet_xonly.as_ref(),
+            cpi_authority_bump,
+        )?;
     }
 
-    pinocchio::msg!("UTXOpia: pool config updated");
+    pinocchio::msg!("UTXOpia: pool config initialized");
     Ok(())
 }
 
@@ -224,4 +230,46 @@ fn apply_fields(
         config.set_cpi_authority_bump(bump);
     }
     Ok(())
+}
+
+#[inline]
+fn validate_ika_fields(
+    ika_dwallet: Option<&[u8; 32]>,
+    ika_dwallet_xonly: Option<&[u8; 32]>,
+    cpi_authority_bump: Option<u8>,
+) -> ProgramResult {
+    let any_ika =
+        ika_dwallet.is_some() || ika_dwallet_xonly.is_some() || cpi_authority_bump.is_some();
+    if !any_ika {
+        return Ok(());
+    }
+    let Some(dwallet) = ika_dwallet else {
+        return Err(ProgramError::InvalidInstructionData);
+    };
+    let Some(xonly) = ika_dwallet_xonly else {
+        return Err(ProgramError::InvalidInstructionData);
+    };
+    if cpi_authority_bump.is_none() || *dwallet == [0u8; 32] || *xonly == [0u8; 32] {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ika_fields_are_all_or_nothing() {
+        let dwallet = [1u8; 32];
+        let xonly = [2u8; 32];
+
+        assert!(validate_ika_fields(None, None, None).is_ok());
+        assert!(validate_ika_fields(Some(&dwallet), Some(&xonly), Some(255)).is_ok());
+        assert!(validate_ika_fields(Some(&dwallet), None, Some(255)).is_err());
+        assert!(validate_ika_fields(Some(&dwallet), Some(&xonly), None).is_err());
+        assert!(validate_ika_fields(None, Some(&xonly), Some(255)).is_err());
+        assert!(validate_ika_fields(Some(&[0u8; 32]), Some(&xonly), Some(255)).is_err());
+        assert!(validate_ika_fields(Some(&dwallet), Some(&[0u8; 32]), Some(255)).is_err());
+    }
 }

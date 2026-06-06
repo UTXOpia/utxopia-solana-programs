@@ -2,9 +2,9 @@
 //!
 //! Three instructions for governance-delayed pool parameter changes:
 //!
-//! - `propose_pool_update` (disc 21): Authority proposes new values, starts 48h timelock
-//! - `execute_pool_update` (disc 22): Anyone executes after timelock expires
-//! - `cancel_pool_update` (disc 23): Authority cancels pending proposal
+//! - `propose_pool_update` (disc 3): Authority proposes new values, starts 48h timelock
+//! - `execute_pool_update` (disc 4): Anyone executes after timelock expires
+//! - `cancel_pool_update` (disc 5): Authority cancels pending proposal
 //!
 //! Propose instruction data: min_deposit(u64 LE) + max_deposit(u64 LE) + service_fee_base(u64 LE) = 24 bytes
 //! service_fee_base goes through the 48h timelock.

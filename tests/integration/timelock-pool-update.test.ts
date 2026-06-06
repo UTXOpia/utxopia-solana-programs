@@ -37,9 +37,9 @@ const PROGRAM_ID = new PublicKey("7JJeVjVCy1fZqCDWvf41R7LuTWirTjX7Tp6suC2WVUMQ")
 
 // Instruction discriminators (must match lib.rs)
 const DISC_INITIALIZE = 0;
-const DISC_PROPOSE_POOL_UPDATE = 21;
-const DISC_EXECUTE_POOL_UPDATE = 22;
-const DISC_CANCEL_POOL_UPDATE = 23;
+const DISC_PROPOSE_POOL_UPDATE = 3;
+const DISC_EXECUTE_POOL_UPDATE = 4;
+const DISC_CANCEL_POOL_UPDATE = 5;
 
 // PoolState offsets (must match pool.rs repr(C) layout)
 // 0:disc 1:bump 2:flags 3:pad 4:authority(32) 36:mint(32) 68:poolVault(32) 100:frostVault(32)
