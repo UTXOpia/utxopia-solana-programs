@@ -260,22 +260,22 @@ export async function fetchTxStatus(
 }
 
 // =============================================================================
-// Segwit stripping — produce legacy serialization for correct txid hashing
+// Segwit stripping — produce non-witness serialization for correct txid hashing
 // =============================================================================
 
 /**
  * Strip witness data from a segwit-serialized raw transaction.
  *
  * Segwit format:  version(4) + marker(1:0x00) + flag(1:0x01) + inputs + outputs + witness + locktime(4)
- * Legacy format:  version(4) + inputs + outputs + locktime(4)
+ * Non-witness txid serialization: version(4) + inputs + outputs + locktime(4)
  *
  * The on-chain compute_tx_hash does double_sha256(raw_tx), so we must provide
- * the legacy serialization for segwit txs to get the correct txid.
+ * the non-witness serialization for segwit txs to get the correct txid.
  */
 export function stripWitnessData(rawTx: Buffer): Buffer {
   // Check for segwit marker: byte 4 == 0x00 and byte 5 == 0x01
   if (rawTx[4] !== 0x00 || rawTx[5] !== 0x01) {
-    // Already legacy format
+    // Already non-witness serialized.
     return rawTx;
   }
 
