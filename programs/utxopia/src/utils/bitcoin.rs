@@ -10,7 +10,7 @@ pub const OP_RETURN: u8 = 0x6a;
 /// Commitment size (32 bytes)
 pub const COMMITMENT_SIZE: usize = 32;
 
-/// Deposit OP_RETURN data size: header(1) + pool_tag(8) + ephemeralPub(32) + npk(32) = 73 bytes
+/// Deposit OP_RETURN data size: header(1) + pool_tag(8) + ephemeral_pubkey(32) + note_public_key(32) = 73 bytes
 pub const DEPOSIT_OP_RETURN_SIZE: usize = 73;
 pub const DEPOSIT_POOL_TAG_SIZE: usize = 8;
 const DEPOSIT_HEADER_SOLANA_MAINNET: u8 = 0x50;
@@ -20,8 +20,8 @@ const DEPOSIT_HEADER_SOLANA_REGTEST: u8 = 0x53;
 /// Parsed deposit OP_RETURN data.
 pub struct DepositOpReturn {
     pub pool_tag: [u8; 8],
-    pub ephemeral_pub: [u8; 32],
-    pub npk: [u8; 32],
+    pub ephemeral_pubkey: [u8; 32],
+    pub note_public_key: [u8; 32],
 }
 
 /// Double SHA256 hash (Bitcoin standard)
@@ -326,7 +326,7 @@ impl<'a> TxOutput<'a> {
         Some(commitment)
     }
 
-    /// Parse deposit OP_RETURN: exactly 73 bytes = header + poolTag + ephemeralPub + npk.
+    /// Parse deposit OP_RETURN: exactly 73 bytes = header + pool_tag + ephemeral_pubkey + note_public_key.
     /// Handles both direct push (0x6a 0x49 <73 bytes>) and PUSHDATA1 (0x6a 0x4c 0x49 <73 bytes>)
     pub fn get_deposit_op_return(&self) -> Option<DepositOpReturn> {
         if !self.is_op_return() || self.script_pubkey.len() < 2 {
@@ -354,13 +354,13 @@ impl<'a> TxOutput<'a> {
         }
 
         let mut pool_tag = [0u8; 8];
-        let mut ephemeral_pub = [0u8; 32];
-        let mut npk = [0u8; 32];
+        let mut ephemeral_pubkey = [0u8; 32];
+        let mut note_public_key = [0u8; 32];
         pool_tag.copy_from_slice(&data_slice[1..9]);
-        ephemeral_pub.copy_from_slice(&data_slice[9..41]);
-        npk.copy_from_slice(&data_slice[41..73]);
+        ephemeral_pubkey.copy_from_slice(&data_slice[9..41]);
+        note_public_key.copy_from_slice(&data_slice[41..73]);
 
-        Some(DepositOpReturn { pool_tag, ephemeral_pub, npk })
+        Some(DepositOpReturn { pool_tag, ephemeral_pubkey, note_public_key })
     }
 }
 
@@ -710,11 +710,11 @@ mod tests {
         // OP_RETURN (0x6a) + push 73 (0x49) + v1 deposit payload
         let mut script = vec![0x6a, 0x49, 0x53];
         let pool_tag = [0xcc; 8];
-        let ephemeral = [0xaa; 32];
-        let npk = [0xbb; 32];
+        let ephemeral_pubkey = [0xaa; 32];
+        let note_public_key = [0xbb; 32];
         script.extend_from_slice(&pool_tag);
-        script.extend_from_slice(&ephemeral);
-        script.extend_from_slice(&npk);
+        script.extend_from_slice(&ephemeral_pubkey);
+        script.extend_from_slice(&note_public_key);
 
         let output = TxOutput {
             value: 0,
@@ -723,8 +723,8 @@ mod tests {
         assert!(output.is_op_return());
         let data = output.get_deposit_op_return().unwrap();
         assert_eq!(data.pool_tag, pool_tag);
-        assert_eq!(data.ephemeral_pub, ephemeral);
-        assert_eq!(data.npk, npk);
+        assert_eq!(data.ephemeral_pubkey, ephemeral_pubkey);
+        assert_eq!(data.note_public_key, note_public_key);
     }
 
     #[test]
@@ -732,8 +732,8 @@ mod tests {
         // OP_RETURN (0x6a) + PUSHDATA1 (0x4c) + 73 (0x49) + v1 deposit payload
         let mut script = vec![0x6a, 0x4c, 0x49, 0x53];
         script.extend_from_slice(&[0xcc; 8]); // pool tag
-        script.extend_from_slice(&[0x11; 32]); // ephemeral
-        script.extend_from_slice(&[0x22; 32]); // npk
+        script.extend_from_slice(&[0x11; 32]); // ephemeral_pubkey
+        script.extend_from_slice(&[0x22; 32]); // note_public_key
 
         let output = TxOutput {
             value: 0,
@@ -741,8 +741,8 @@ mod tests {
         };
         let data = output.get_deposit_op_return().unwrap();
         assert_eq!(data.pool_tag, [0xcc; 8]);
-        assert_eq!(data.ephemeral_pub, [0x11; 32]);
-        assert_eq!(data.npk, [0x22; 32]);
+        assert_eq!(data.ephemeral_pubkey, [0x11; 32]);
+        assert_eq!(data.note_public_key, [0x22; 32]);
     }
 
     #[test]
@@ -832,8 +832,8 @@ mod tests {
     #[test]
     fn test_parsed_tx_deposit_op_return() {
         let prev_txid = [0x11u8; 32];
-        let ephemeral = [0xaa; 32];
-        let npk = [0xbb; 32];
+        let ephemeral_pubkey = [0xaa; 32];
+        let note_public_key = [0xbb; 32];
 
         // P2TR output
         let p2tr_script = {
@@ -846,8 +846,8 @@ mod tests {
         let pool_tag = [0xcc; 8];
         let mut op_return_script = vec![0x6a, 0x49, 0x53];
         op_return_script.extend_from_slice(&pool_tag);
-        op_return_script.extend_from_slice(&ephemeral);
-        op_return_script.extend_from_slice(&npk);
+        op_return_script.extend_from_slice(&ephemeral_pubkey);
+        op_return_script.extend_from_slice(&note_public_key);
 
         let raw_tx = build_test_tx(
             &[(prev_txid, 0)],
@@ -857,8 +857,8 @@ mod tests {
         let parsed = ParsedTransaction::parse(&raw_tx).unwrap();
         let deposit_data = parsed.find_deposit_op_return().unwrap();
         assert_eq!(deposit_data.pool_tag, pool_tag);
-        assert_eq!(deposit_data.ephemeral_pub, ephemeral);
-        assert_eq!(deposit_data.npk, npk);
+        assert_eq!(deposit_data.ephemeral_pubkey, ephemeral_pubkey);
+        assert_eq!(deposit_data.note_public_key, note_public_key);
     }
 
     // =========================================================================

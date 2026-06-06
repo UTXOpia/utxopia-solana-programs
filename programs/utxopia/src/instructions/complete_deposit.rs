@@ -1,21 +1,21 @@
 //! Verify Stealth Deposit instruction (Pinocchio)
 //!
-//! Trustless npk-based deposit flow:
-//! 1. User generates npk client-side, sends BTC with OP_RETURN(ephemeralPub || npk)
+//! Trustless note-public-key deposit flow:
+//! 1. User generates note_public_key client-side, sends BTC with OP_RETURN(ephemeral_pubkey || note_public_key)
 //! 2. Backend detects the direct Ika-vault deposit and verifies it in-place
 //! 3. Backend calls btc-light-client's verify_transaction to create VerifiedTransaction PDA
 //! 4. Backend uploads the deposit TX to a ChadBuffer account
-//! 5. Backend calls this instruction — npk + ephemeral_pub extracted ON-CHAIN from deposit TX
+//! 5. Backend calls this instruction — note_public_key + ephemeral_pubkey extracted ON-CHAIN from deposit TX
 //!
 //! This instruction:
 //! - Checks VerifiedTransaction PDA exists (btc-light-client already verified SPV for deposit TX)
 //! - Verifies sufficient confirmations via light client tip height
-//! - Reads deposit TX from its ChadBuffer, extracts npk + ephemeral_pub from OP_RETURN.
+//! - Reads deposit TX from its ChadBuffer, extracts note_public_key + ephemeral_pubkey from OP_RETURN.
 //!   For direct-to-pool deposits, `deposit_tx_size = 0` and the SPV-verified tx
 //!   itself is treated as the deposit tx.
 //! - Extracts credited amount trustlessly from the SPV-verified transaction output.
 //! - Applies Solana-side deposit fees and computes commitment ON-CHAIN:
-//!   Poseidon(npk, ZKBTC_TOKEN_ID, gross_amount - fee)
+//!   Poseidon(note_public_key, ZKBTC_TOKEN_ID, gross_amount - fee)
 //! - Inserts commitment into Merkle tree
 //! - Emits stealth announcement as sol_log_data event (type=0, plaintext amount)
 //! - Mints zkBTC collateral equal to the shielded note amount to the pool vault
@@ -59,10 +59,10 @@ pub const DEMO_REQUIRED_CONFIRMATIONS: u64 = 1;
 #[cfg(not(feature = "devnet"))]
 pub const DEMO_REQUIRED_CONFIRMATIONS: u64 = 6;
 
-/// Instruction data for complete_deposit (trustless npk extraction)
+/// Instruction data for complete_deposit (trustless note_public_key extraction)
 ///
-/// The commitment is computed ON-CHAIN: Poseidon(npk, ZKBTC_TOKEN_ID, amount)
-/// npk + ephemeral_pub are extracted ON-CHAIN from the deposit TX's OP_RETURN.
+/// The commitment is computed ON-CHAIN: Poseidon(note_public_key, ZKBTC_TOKEN_ID, amount)
+/// note_public_key + ephemeral_pubkey are extracted ON-CHAIN from the deposit TX's OP_RETURN.
 /// Amount is extracted from the SPV-verified deposit transaction.
 pub struct CompleteDepositData {
     pub sweep_txid: [u8; 32],
@@ -100,9 +100,9 @@ impl CompleteDepositData {
     }
 }
 
-/// Verify an npk-based stealth deposit using VerifiedTransaction PDA
+/// Verify a note-public-key stealth deposit using VerifiedTransaction PDA
 ///
-/// Trustlessly extracts npk + ephemeral_pub from the deposit TX's OP_RETURN.
+/// Trustlessly extracts note_public_key + ephemeral_pubkey from the deposit TX's OP_RETURN.
 /// Verifies the sweep TX spends from the deposit TX (input linkage).
 /// Computes commitment on-chain, inserts into Merkle tree, emits stealth announcement event.
 ///
@@ -330,8 +330,8 @@ pub fn process_complete_deposit(
     let deposit_parsed = ParsedTransaction::parse(deposit_raw_tx)
         .map_err(|_| UTXOpiaError::InvalidSpvProof)?;
 
-    // --- Extract npk + ephemeral_pub from deposit TX OP_RETURN ---
-    let DepositOpReturn { pool_tag, ephemeral_pub, npk } = deposit_parsed
+    // --- Extract note_public_key + ephemeral_pubkey from deposit TX OP_RETURN ---
+    let DepositOpReturn { pool_tag, ephemeral_pubkey, note_public_key } = deposit_parsed
         .find_deposit_op_return()
         .ok_or(UTXOpiaError::InvalidStealthOpReturn)?;
     if pool_tag != expected_pool_tag(program_id, pool_state_info.key(), zkbtc_mint.key()) {
@@ -408,9 +408,9 @@ pub fn process_complete_deposit(
     let total_fee = protocol_fee.checked_add(service_fee).ok_or(ProgramError::ArithmeticOverflow)?;
     let shielded_amount = amount_sats.checked_sub(total_fee).ok_or(ProgramError::ArithmeticOverflow)?;
 
-    // Compute commitment ON-CHAIN: Poseidon(npk, token_id, shielded_amount)
-    // npk is trustlessly extracted from the deposit TX's OP_RETURN
-    let commitment = compute_commitment(&npk, &token_id, shielded_amount)?;
+    // Compute commitment ON-CHAIN: Poseidon(note_public_key, token_id, shielded_amount)
+    // note_public_key is trustlessly extracted from the deposit TX's OP_RETURN
+    let commitment = compute_commitment(&note_public_key, &token_id, shielded_amount)?;
 
     // Insert commitment into Merkle tree
     let leaf_index = {
@@ -430,7 +430,7 @@ pub fn process_complete_deposit(
     let amount_bytes = shielded_amount.to_le_bytes();
     crate::utils::events::emit_stealth_announcement(
         ANNOUNCEMENT_TYPE_DEPOSIT,
-        &ephemeral_pub,
+        &ephemeral_pubkey,
         &amount_bytes,
         &commitment,
         leaf_index as u32,
