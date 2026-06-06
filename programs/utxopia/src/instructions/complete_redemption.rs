@@ -94,6 +94,11 @@ impl CompleteRedemptionData {
             return Err(ProgramError::InvalidInstructionData);
         }
         let consumed_utxo_count = data[offset];
+        offset += 1;
+
+        if offset != data.len() {
+            return Err(ProgramError::InvalidInstructionData);
+        }
 
         Ok(Self {
             btc_txid,
@@ -162,6 +167,14 @@ mod data_tests {
         data.extend_from_slice(&txid);
         data.extend_from_slice(&100u32.to_le_bytes());
         data.push(0); // pool_script_len
+        assert!(CompleteRedemptionData::from_bytes(&data).is_err());
+    }
+
+    #[test]
+    fn rejects_trailing_bytes() {
+        let txid = [0x44u8; 32];
+        let mut data = build_ix_data(&txid, 200, &[], 0);
+        data.push(0x99);
         assert!(CompleteRedemptionData::from_bytes(&data).is_err());
     }
 }
@@ -501,8 +514,11 @@ pub fn process_complete_redemption(
     }
 
     let consumed_start = if ix_data.pool_script_len > 0 { 14 } else { 13 };
+    if accounts.len() < consumed_start + consumed_count {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
 
-    if consumed_count > 0 && accounts.len() >= consumed_start + consumed_count {
+    if consumed_count > 0 {
         for i in 0..consumed_count {
             let consumed_utxo_info = &accounts[consumed_start + i];
             validate_program_owner(consumed_utxo_info, program_id)?;
