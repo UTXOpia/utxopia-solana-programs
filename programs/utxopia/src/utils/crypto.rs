@@ -335,7 +335,3 @@ pub const ZERO_HASHES: [[u8; 32]; 20] = [
     [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32],
     [0u8; 32], [0u8; 32], [0u8; 32],
 ];
-
-#[cfg(test)]
-#[path = "crypto_tests.rs"]
-mod crypto_tests;

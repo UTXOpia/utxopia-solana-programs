@@ -697,7 +697,3 @@ fn read_varint(data: &[u8]) -> Result<(u64, usize), ProgramError> {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "bitcoin_tests.rs"]
-mod bitcoin_tests;

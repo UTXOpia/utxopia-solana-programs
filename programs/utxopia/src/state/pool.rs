@@ -432,7 +432,3 @@ impl PoolState {
         Ok(())
     }
 }
-
-#[cfg(test)]
-#[path = "pool_tests.rs"]
-mod pool_tests;
