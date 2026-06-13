@@ -4,24 +4,18 @@
 //! Manages block headers, height indices, and SPV verification.
 
 mod constants;
+mod instructions;
 mod state;
 mod utils;
-mod instructions;
 
 use pinocchio::{
-    account_info::AccountInfo,
-    entrypoint,
-    program_error::ProgramError,
-    pubkey::Pubkey,
+    account_info::AccountInfo, entrypoint, program_error::ProgramError, pubkey::Pubkey,
     ProgramResult,
 };
 
 use instructions::{
-    process_initialize,
-    process_extend_blockchain,
-    process_verify_transaction,
-    process_prune_obsolete_blocks,
-    process_reinitialize,
+    process_extend_blockchain, process_initialize, process_prune_obsolete_blocks,
+    process_reinitialize, process_verify_transaction,
 };
 
 entrypoint!(process_instruction);

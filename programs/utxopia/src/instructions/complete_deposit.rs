@@ -31,25 +31,24 @@ use pinocchio::{
     account_info::AccountInfo,
     program_error::ProgramError,
     pubkey::{find_program_address, Pubkey},
-    ProgramResult,
     sysvars::{clock::Clock, rent::Rent, Sysvar},
+    ProgramResult,
 };
 
 use crate::error::UTXOpiaError;
 use crate::state::{
-    CommitmentTree, DepositReceipt, PoolConfig, PoolState, TokenConfig, UtxoRecord,
-    VerifiedTransactionView, light_client_tip_height,
-    deposit_receipt::DEPOSIT_RECEIPT_DISCRIMINATOR,
-    pool_config::POOL_CONFIG_DISCRIMINATOR,
+    deposit_receipt::DEPOSIT_RECEIPT_DISCRIMINATOR, light_client_tip_height,
+    pool_config::POOL_CONFIG_DISCRIMINATOR, CommitmentTree, DepositReceipt, PoolConfig, PoolState,
+    TokenConfig, UtxoRecord, VerifiedTransactionView,
 };
-use crate::utils::events::ANNOUNCEMENT_TYPE_DEPOSIT;
-use crate::utils::crypto::compute_commitment;
 use crate::utils::bitcoin::{compute_tx_hash, sha256, DepositOpReturn, ParsedTransaction};
 use crate::utils::chadbuffer::read_transaction_from_buffer;
+use crate::utils::crypto::compute_commitment;
+use crate::utils::events::ANNOUNCEMENT_TYPE_DEPOSIT;
 use crate::utils::{
-    create_pda_account, mint_zkbtc, validate_active_tree_pda, validate_program_owner,
-    validate_system_program, validate_token_owner, validate_any_token_program_key,
-    validate_account_writable,
+    create_pda_account, mint_zkbtc, validate_account_writable, validate_active_tree_pda,
+    validate_any_token_program_key, validate_program_owner, validate_system_program,
+    validate_token_owner,
 };
 
 /// Required confirmations for deposits
@@ -193,7 +192,12 @@ pub fn process_complete_deposit(
         }
 
         validate_active_tree_pda(commitment_tree_info, program_id, pool.active_tree_index())?;
-        (pool.bump, pool.min_deposit(), pool.max_deposit(), pool.deposit_fee_bps())
+        (
+            pool.bump,
+            pool.min_deposit(),
+            pool.max_deposit(),
+            pool.deposit_fee_bps(),
+        )
     };
 
     // Read token config for token_id and service_fee
@@ -223,11 +227,7 @@ pub fn process_complete_deposit(
         // Create deposit receipt PDA to prevent future duplicates
         let rent = Rent::get()?;
         let bump_bytes = [receipt_bump];
-        let signer_seeds: &[&[u8]] = &[
-            DepositReceipt::SEED,
-            &ix_data.deposit_txid,
-            &bump_bytes,
-        ];
+        let signer_seeds: &[&[u8]] = &[DepositReceipt::SEED, &ix_data.deposit_txid, &bump_bytes];
 
         create_pda_account(
             authority,
@@ -279,7 +279,8 @@ pub fn process_complete_deposit(
         .try_borrow_data()
         .map_err(|_| UTXOpiaError::InvalidBlockHeader)?;
 
-    let sweep_raw_tx = read_transaction_from_buffer(&sweep_buffer_data, ix_data.sweep_tx_size as usize)?;
+    let sweep_raw_tx =
+        read_transaction_from_buffer(&sweep_buffer_data, ix_data.sweep_tx_size as usize)?;
 
     // Verify sweep transaction hash matches sweep_txid
     let computed_sweep_hash = compute_tx_hash(sweep_raw_tx);
@@ -288,8 +289,8 @@ pub fn process_complete_deposit(
     }
 
     // Parse SPV-verified TX and extract deposit amount
-    let sweep_parsed = ParsedTransaction::parse(sweep_raw_tx)
-        .map_err(|_| UTXOpiaError::InvalidSpvProof)?;
+    let sweep_parsed =
+        ParsedTransaction::parse(sweep_raw_tx).map_err(|_| UTXOpiaError::InvalidSpvProof)?;
 
     // --- Read and verify deposit TX from ChadBuffer ---
     // Direct-to-pool mode: deposit_tx_size == 0 means the SPV-verified tx is
@@ -327,11 +328,15 @@ pub fn process_complete_deposit(
     };
 
     // Parse deposit TX
-    let deposit_parsed = ParsedTransaction::parse(deposit_raw_tx)
-        .map_err(|_| UTXOpiaError::InvalidSpvProof)?;
+    let deposit_parsed =
+        ParsedTransaction::parse(deposit_raw_tx).map_err(|_| UTXOpiaError::InvalidSpvProof)?;
 
     // --- Extract note_public_key + ephemeral_pubkey from deposit TX OP_RETURN ---
-    let DepositOpReturn { pool_tag, ephemeral_pubkey, note_public_key } = deposit_parsed
+    let DepositOpReturn {
+        pool_tag,
+        ephemeral_pubkey,
+        note_public_key,
+    } = deposit_parsed
         .find_deposit_op_return()
         .ok_or(UTXOpiaError::InvalidStealthOpReturn)?;
     if pool_tag != expected_pool_tag(program_id, pool_state_info.key(), zkbtc_mint.key()) {
@@ -405,8 +410,12 @@ pub fn process_complete_deposit(
 
     // Apply deposit fees: deposit_fee_bps (pool-level) + service_fee (per-token, BTC only)
     let protocol_fee = (amount_sats as u128 * deposit_fee_bps as u128 / 10_000) as u64;
-    let total_fee = protocol_fee.checked_add(service_fee).ok_or(ProgramError::ArithmeticOverflow)?;
-    let shielded_amount = amount_sats.checked_sub(total_fee).ok_or(ProgramError::ArithmeticOverflow)?;
+    let total_fee = protocol_fee
+        .checked_add(service_fee)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    let shielded_amount = amount_sats
+        .checked_sub(total_fee)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
 
     // Compute commitment ON-CHAIN: Poseidon(note_public_key, token_id, shielded_amount)
     // note_public_key is trustlessly extracted from the deposit TX's OP_RETURN

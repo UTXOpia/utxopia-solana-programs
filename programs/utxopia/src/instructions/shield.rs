@@ -12,20 +12,15 @@
 //! 5. `[writable]` Commitment tree
 //! 6. `[]`         Token-2022 program
 
-use pinocchio::{
-    account_info::AccountInfo,
-    program_error::ProgramError,
-    ProgramResult,
-};
+use pinocchio::{account_info::AccountInfo, program_error::ProgramError, ProgramResult};
 
 use crate::error::UTXOpiaError;
 use crate::state::{CommitmentTree, PoolState, TokenConfig};
 use crate::utils::{
     crypto::compute_commitment,
-    events::{emit_stealth_announcement, emit_shield_meta, ANNOUNCEMENT_TYPE_DEPOSIT},
-    transfer_token_user,
-    validate_account_writable, validate_active_tree_pda, validate_program_owner,
-    validate_token_owner, validate_any_token_program_key,
+    events::{emit_shield_meta, emit_stealth_announcement, ANNOUNCEMENT_TYPE_DEPOSIT},
+    transfer_token_user, validate_account_writable, validate_active_tree_pda,
+    validate_any_token_program_key, validate_program_owner, validate_token_owner,
 };
 
 /// Instruction data: amount(8) + npk(32) + ephemeral_pub(32) = 72 bytes

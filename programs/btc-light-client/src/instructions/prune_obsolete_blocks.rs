@@ -1,8 +1,5 @@
 use pinocchio::{
-    account_info::AccountInfo,
-    program_error::ProgramError,
-    pubkey::Pubkey,
-    ProgramResult,
+    account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, ProgramResult,
 };
 
 use crate::constants::{
@@ -53,10 +50,8 @@ pub fn process_prune_obsolete_blocks(
     block_hash.copy_from_slice(&data[0..32]);
 
     // Verify BlockHeader PDA address
-    let (expected_header_pda, _) = pinocchio::pubkey::find_program_address(
-        &[BLOCK_HEADER_SEED, &block_hash],
-        program_id,
-    );
+    let (expected_header_pda, _) =
+        pinocchio::pubkey::find_program_address(&[BLOCK_HEADER_SEED, &block_hash], program_id);
     if block_header_info.key() != &expected_header_pda {
         return Err(ProgramError::InvalidSeeds);
     }
@@ -76,10 +71,8 @@ pub fn process_prune_obsolete_blocks(
 
     // Verify HeightIndex PDA at this height
     let height_le = block_height.to_le_bytes();
-    let (expected_hi_pda, _) = pinocchio::pubkey::find_program_address(
-        &[HEIGHT_INDEX_SEED, &height_le],
-        program_id,
-    );
+    let (expected_hi_pda, _) =
+        pinocchio::pubkey::find_program_address(&[HEIGHT_INDEX_SEED, &height_le], program_id);
     if height_index_info.key() != &expected_hi_pda {
         return Err(ProgramError::InvalidSeeds);
     }
@@ -121,8 +114,10 @@ pub fn process_prune_obsolete_blocks(
     }
     // Add to rent receiver
     unsafe {
-        *rent_receiver.borrow_mut_lamports_unchecked() =
-            rent_receiver.lamports().checked_add(header_lamports).ok_or(ProgramError::ArithmeticOverflow)?;
+        *rent_receiver.borrow_mut_lamports_unchecked() = rent_receiver
+            .lamports()
+            .checked_add(header_lamports)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
     }
 
     // Reassign to system program (all zeros = system program)

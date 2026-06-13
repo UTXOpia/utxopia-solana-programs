@@ -195,6 +195,9 @@ pub enum UTXOpiaError {
 
     #[error("Required Ika CPI accounts missing from accounts slice")]
     IkaCpiAccountsMissing = 6088,
+
+    #[error("Invalid token config limits (min/max/cap)")]
+    InvalidTokenConfig = 6089,
 }
 
 impl From<UTXOpiaError> for ProgramError {

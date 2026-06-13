@@ -53,7 +53,7 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 
     #[cfg(all(not(target_os = "solana"), test))]
     {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let hash = Sha256::digest(data);
         result.copy_from_slice(&hash);
     }
@@ -216,8 +216,12 @@ fn u256_add(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
 
 fn u256_gte(a: [u64; 4], b: [u64; 4]) -> bool {
     for i in (0..4).rev() {
-        if a[i] > b[i] { return true; }
-        if a[i] < b[i] { return false; }
+        if a[i] > b[i] {
+            return true;
+        }
+        if a[i] < b[i] {
+            return false;
+        }
     }
     true
 }
@@ -235,7 +239,9 @@ fn u256_sub(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
 }
 
 fn u256_shl(v: [u64; 4], shift: u32) -> [u64; 4] {
-    if shift >= 256 { return [0; 4]; }
+    if shift >= 256 {
+        return [0; 4];
+    }
     let limb_shift = (shift / 64) as usize;
     let bit_shift = shift % 64;
     let mut result = [0u64; 4];
@@ -258,12 +264,18 @@ fn u256_clz(v: [u64; 4]) -> u32 {
 }
 
 fn u256_div(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
-    if b == [0, 0, 0, 0] { return [0; 4]; }
-    if !u256_gte(a, b) { return [0; 4]; }
+    if b == [0, 0, 0, 0] {
+        return [0; 4];
+    }
+    if !u256_gte(a, b) {
+        return [0; 4];
+    }
 
     let a_clz = u256_clz(a);
     let b_clz = u256_clz(b);
-    if b_clz < a_clz { return [0; 4]; }
+    if b_clz < a_clz {
+        return [0; 4];
+    }
 
     let shift_max = b_clz - a_clz;
     let mut remainder = a;
@@ -333,9 +345,7 @@ impl<'a> TxOutput<'a> {
             return None;
         }
 
-        let data_slice = if self.script_pubkey.len() == 75
-            && self.script_pubkey[1] == 0x49
-        {
+        let data_slice = if self.script_pubkey.len() == 75 && self.script_pubkey[1] == 0x49 {
             // Direct push: OP_RETURN (0x6a) + push 73 (0x49) + 73 bytes
             &self.script_pubkey[2..75]
         } else if self.script_pubkey.len() == 76
@@ -349,7 +359,9 @@ impl<'a> TxOutput<'a> {
         };
 
         match data_slice[0] {
-            DEPOSIT_HEADER_SOLANA_MAINNET | DEPOSIT_HEADER_SOLANA_TESTNET4 | DEPOSIT_HEADER_SOLANA_REGTEST => {}
+            DEPOSIT_HEADER_SOLANA_MAINNET
+            | DEPOSIT_HEADER_SOLANA_TESTNET4
+            | DEPOSIT_HEADER_SOLANA_REGTEST => {}
             _ => return None,
         }
 
@@ -360,7 +372,11 @@ impl<'a> TxOutput<'a> {
         ephemeral_pubkey.copy_from_slice(&data_slice[9..41]);
         note_public_key.copy_from_slice(&data_slice[41..73]);
 
-        Some(DepositOpReturn { pool_tag, ephemeral_pubkey, note_public_key })
+        Some(DepositOpReturn {
+            pool_tag,
+            ephemeral_pubkey,
+            note_public_key,
+        })
     }
 }
 
@@ -395,9 +411,8 @@ impl<'a> ParsedTransaction<'a> {
         offset += 4;
 
         // Check for segwit marker
-        let is_segwit = raw_tx.len() > offset + 2
-            && raw_tx[offset] == 0x00
-            && raw_tx[offset + 1] == 0x01;
+        let is_segwit =
+            raw_tx.len() > offset + 2 && raw_tx[offset] == 0x00 && raw_tx[offset + 1] == 0x01;
 
         if is_segwit {
             offset += 2;
@@ -565,7 +580,6 @@ impl<'a> ParsedTransaction<'a> {
         }
         false
     }
-
 }
 
 /// Iterator over transaction outputs
@@ -583,9 +597,7 @@ impl<'a> Iterator for OutputIterator<'a> {
             return None;
         }
 
-        let value = u64::from_le_bytes(
-            self.data[self.offset..self.offset + 8].try_into().ok()?
-        );
+        let value = u64::from_le_bytes(self.data[self.offset..self.offset + 8].try_into().ok()?);
         self.offset += 8;
 
         let (script_len, varint_size) = read_varint(&self.data[self.offset..]).ok()?;
@@ -600,7 +612,10 @@ impl<'a> Iterator for OutputIterator<'a> {
         self.offset = script_end;
         self.remaining -= 1;
 
-        Some(TxOutput { value, script_pubkey })
+        Some(TxOutput {
+            value,
+            script_pubkey,
+        })
     }
 }
 
@@ -633,9 +648,8 @@ impl<'a> Iterator for InputIterator<'a> {
         self.offset += 32;
 
         // Previous vout (4 bytes)
-        let prev_vout = u32::from_le_bytes(
-            self.data[self.offset..self.offset + 4].try_into().ok()?
-        );
+        let prev_vout =
+            u32::from_le_bytes(self.data[self.offset..self.offset + 4].try_into().ok()?);
         self.offset += 4;
 
         // Script length (varint) + script + sequence (4)
@@ -648,7 +662,10 @@ impl<'a> Iterator for InputIterator<'a> {
 
         self.remaining -= 1;
 
-        Some(TxInput { prev_txid, prev_vout })
+        Some(TxInput {
+            prev_txid,
+            prev_vout,
+        })
     }
 }
 
@@ -761,7 +778,7 @@ mod tests {
     /// Build a minimal raw Bitcoin transaction for testing
     fn build_test_tx(
         inputs: &[([u8; 32], u32)], // (prev_txid, prev_vout)
-        outputs: &[(u64, &[u8])],     // (value, script_pubkey)
+        outputs: &[(u64, &[u8])],   // (value, script_pubkey)
     ) -> Vec<u8> {
         let mut tx = Vec::new();
 
@@ -873,10 +890,7 @@ mod tests {
             s
         };
 
-        let raw_tx = build_test_tx(
-            &[([0x11; 32], 0)],
-            &[(100_000, &p2tr_script)],
-        );
+        let raw_tx = build_test_tx(&[([0x11; 32], 0)], &[(100_000, &p2tr_script)]);
 
         let parsed = ParsedTransaction::parse(&raw_tx).unwrap();
         let (output, vout) = parsed.find_deposit_output_with_vout().unwrap();
@@ -920,10 +934,7 @@ mod tests {
             s
         };
 
-        let raw_tx = build_test_tx(
-            &[([0x11; 32], 0)],
-            &[(75_000, &p2tr_1), (25_000, &p2tr_2)],
-        );
+        let raw_tx = build_test_tx(&[([0x11; 32], 0)], &[(75_000, &p2tr_1), (25_000, &p2tr_2)]);
 
         let parsed = ParsedTransaction::parse(&raw_tx).unwrap();
         let (output, vout) = parsed.find_deposit_output_with_vout().unwrap();
@@ -944,10 +955,7 @@ mod tests {
             s
         };
 
-        let raw_tx = build_test_tx(
-            &[([0x11; 32], 0)],
-            &[(0, &p2tr_1), (50_000, &p2tr_2)],
-        );
+        let raw_tx = build_test_tx(&[([0x11; 32], 0)], &[(0, &p2tr_1), (50_000, &p2tr_2)]);
 
         let parsed = ParsedTransaction::parse(&raw_tx).unwrap();
         let (output, vout) = parsed.find_deposit_output_with_vout().unwrap();
@@ -968,10 +976,7 @@ mod tests {
             s
         };
 
-        let raw_tx = build_test_tx(
-            &[([0x11; 32], 0)],
-            &[(0, &op_return_1), (0, &op_return_2)],
-        );
+        let raw_tx = build_test_tx(&[([0x11; 32], 0)], &[(0, &op_return_1), (0, &op_return_2)]);
 
         let parsed = ParsedTransaction::parse(&raw_tx).unwrap();
         assert!(parsed.find_deposit_output_with_vout().is_none());
@@ -1037,10 +1042,7 @@ mod tests {
             s
         };
 
-        let raw_tx = build_test_tx(
-            &[([0x11; 32], 0)],
-            &[(50_000, &other_script)],
-        );
+        let raw_tx = build_test_tx(&[([0x11; 32], 0)], &[(50_000, &other_script)]);
 
         let parsed = ParsedTransaction::parse(&raw_tx).unwrap();
         assert!(parsed.find_output_by_script(&pool_script).is_none());

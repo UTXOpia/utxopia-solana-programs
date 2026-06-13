@@ -98,11 +98,7 @@ pub fn process_initialize(
     lc.genesis_hash = start_block_hash;
     lc.tip_hash = start_block_hash;
     lc.set_tip_height(start_height);
-    lc.set_finalized_height(if start_height > REQUIRED_CONFIRMATIONS {
-        start_height - REQUIRED_CONFIRMATIONS
-    } else {
-        0
-    });
+    lc.set_finalized_height(start_height.saturating_sub(REQUIRED_CONFIRMATIONS));
     lc.set_header_count(0);
 
     let clock = Clock::get()?;

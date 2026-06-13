@@ -6,15 +6,15 @@
 use pinocchio::{
     account_info::AccountInfo,
     program_error::ProgramError,
-    pubkey::Pubkey,
+    pubkey::{find_program_address, Pubkey},
     sysvars::{clock::Clock, Sysvar},
     ProgramResult,
 };
 
 use crate::error::UTXOpiaError;
+use crate::state::TokenConfig;
 use crate::state::{CommitmentTree, PoolState, RedemptionRequest, RedemptionStatus};
 use crate::utils::crypto::compute_commitment;
-use crate::state::TokenConfig;
 use crate::utils::{close_account_securely, validate_account_writable, validate_program_owner};
 
 /// Cancel redemption instruction data
@@ -78,8 +78,8 @@ pub fn process_cancel_redemption(
     validate_account_writable(redemption_info)?;
     validate_account_writable(commitment_tree_info)?;
 
-    // Validate requester and status
-    let amount_sats = {
+    // Validate requester and status; capture the amount and the recorded token_id
+    let (amount_sats, token_id) = {
         let redemption_data = redemption_info.try_borrow_data()?;
         let redemption = RedemptionRequest::from_bytes(&redemption_data)?;
 
@@ -97,7 +97,9 @@ pub fn process_cancel_redemption(
                 // Allow cancel only if timed out
                 let clock = Clock::get()?;
                 let processing_slot = redemption.processing_slot() as u64;
-                if clock.slot < processing_slot.saturating_add(crate::constants::REDEMPTION_TIMEOUT_SLOTS) {
+                if clock.slot
+                    < processing_slot.saturating_add(crate::constants::REDEMPTION_TIMEOUT_SLOTS)
+                {
                     return Err(UTXOpiaError::RedemptionCancelNotAllowed.into());
                 }
                 // Timed out — allow cancellation
@@ -107,17 +109,25 @@ pub fn process_cancel_redemption(
             }
         }
 
-        redemption.amount_sats()
+        (redemption.amount_sats(), *redemption.token_id())
     };
 
-    // Read token_id from token config
+    // Re-mint with the token_id recorded at redeem time, not one read from a
+    // caller-supplied config. Validate the config's PDA and that it matches the
+    // redemption's token so a cheap-token cancel can't mint a valuable-token note.
     validate_program_owner(token_config_info, program_id)?;
     validate_account_writable(token_config_info)?;
-    let token_id = {
+    {
         let tc_data = token_config_info.try_borrow_data()?;
         let tc = TokenConfig::from_bytes(&tc_data)?;
-        tc.token_id
-    };
+        let (expected_tc_pda, _) = find_program_address(&[TokenConfig::SEED, &tc.mint], program_id);
+        if token_config_info.key() != &expected_tc_pda {
+            return Err(ProgramError::InvalidSeeds);
+        }
+        if tc.token_id != token_id {
+            return Err(UTXOpiaError::Unauthorized.into());
+        }
+    }
 
     // Compute new commitment and insert into Merkle tree
     let commitment = compute_commitment(&ix_data.npk, &token_id, amount_sats)?;

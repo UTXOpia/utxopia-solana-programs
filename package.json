@@ -7,8 +7,13 @@
     "build:devnet": "cargo build-sbf --features devnet",
     "build:localnet": "cargo build-sbf --features localnet",
     "build:mainnet": "cargo build-sbf",
+    "check:scripts": "tsc -p tsconfig.scripts.json --noEmit",
     "test": "cargo test",
+    "test:unit": "cargo test && bun test tests/unit",
     "test:integration": "bun test tests/**/*.test.ts",
+    "test:localnet": "bun scripts/e2e-localnet.ts",
+    "test:regtest": "bun scripts/regtest-flow.ts",
+    "relay:deposit": "bun scripts/relay-deposit.ts",
     "regtest:up": "docker compose -f ../docker-compose.regtest.yml up -d",
     "regtest:down": "docker compose -f ../docker-compose.regtest.yml down"
   },

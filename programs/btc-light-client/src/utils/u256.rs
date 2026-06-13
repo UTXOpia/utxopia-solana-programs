@@ -33,8 +33,12 @@ pub fn u256_add(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
 /// Compare a > b (strictly greater)
 pub fn u256_gt_limbs(a: [u64; 4], b: [u64; 4]) -> bool {
     for i in (0..4).rev() {
-        if a[i] > b[i] { return true; }
-        if a[i] < b[i] { return false; }
+        if a[i] > b[i] {
+            return true;
+        }
+        if a[i] < b[i] {
+            return false;
+        }
     }
     false // equal
 }
@@ -42,8 +46,12 @@ pub fn u256_gt_limbs(a: [u64; 4], b: [u64; 4]) -> bool {
 /// Compare a >= b
 pub fn u256_gte(a: [u64; 4], b: [u64; 4]) -> bool {
     for i in (0..4).rev() {
-        if a[i] > b[i] { return true; }
-        if a[i] < b[i] { return false; }
+        if a[i] > b[i] {
+            return true;
+        }
+        if a[i] < b[i] {
+            return false;
+        }
     }
     true // equal
 }
@@ -61,7 +69,9 @@ pub fn u256_sub(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
 }
 
 pub fn u256_shl(v: [u64; 4], shift: u32) -> [u64; 4] {
-    if shift >= 256 { return [0; 4]; }
+    if shift >= 256 {
+        return [0; 4];
+    }
     let limb_shift = (shift / 64) as usize;
     let bit_shift = shift % 64;
     let mut result = [0u64; 4];
@@ -86,12 +96,18 @@ pub fn u256_clz(v: [u64; 4]) -> u32 {
 
 /// 256-bit division: a / b (returns quotient only)
 pub fn u256_div(a: [u64; 4], b: [u64; 4]) -> [u64; 4] {
-    if b == [0, 0, 0, 0] { return [0; 4]; }
-    if !u256_gte(a, b) { return [0; 4]; }
+    if b == [0, 0, 0, 0] {
+        return [0; 4];
+    }
+    if !u256_gte(a, b) {
+        return [0; 4];
+    }
 
     let a_clz = u256_clz(a);
     let b_clz = u256_clz(b);
-    if b_clz < a_clz { return [0; 4]; }
+    if b_clz < a_clz {
+        return [0; 4];
+    }
 
     let shift_max = b_clz - a_clz;
     let mut remainder = a;
@@ -139,8 +155,12 @@ pub fn u256_div_u32(a: [u64; 4], b: u32) -> [u64; 4] {
 /// Compare two 256-bit LE byte arrays: a > b
 pub fn u256_gt_bytes(a: &[u8; 32], b: &[u8; 32]) -> bool {
     for i in (0..32).rev() {
-        if a[i] > b[i] { return true; }
-        if a[i] < b[i] { return false; }
+        if a[i] > b[i] {
+            return true;
+        }
+        if a[i] < b[i] {
+            return false;
+        }
     }
     false
 }

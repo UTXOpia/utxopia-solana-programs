@@ -11,11 +11,7 @@
 //!             bit 2 = update max_deposit, bit 3 = update deposit_cap,
 //!             bit 4 = update enabled
 
-use pinocchio::{
-    account_info::AccountInfo,
-    program_error::ProgramError,
-    ProgramResult,
-};
+use pinocchio::{account_info::AccountInfo, program_error::ProgramError, ProgramResult};
 
 use crate::error::UTXOpiaError;
 use crate::state::{PoolState, TokenConfig};

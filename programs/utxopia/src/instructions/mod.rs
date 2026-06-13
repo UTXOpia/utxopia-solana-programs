@@ -48,11 +48,13 @@ pub mod update_token_config;
 // Admin utilities
 pub mod admin_update_pool;
 pub mod set_pool_config;
+pub mod set_pool_script;
 
 // VK registry (deployment)
 pub mod init_vk_registry;
 
 // Tree management
+pub mod init_tree;
 pub mod rotate_tree;
 // PoI module removed — compliance is handled by off-chain passive
 // attestation (registered screeners sign per-commitment verdicts).
@@ -65,6 +67,7 @@ pub use cancel_redemption::*;
 pub use claim_fees::*;
 pub use complete_deposit::*;
 pub use complete_redemption::*;
+pub use init_tree::*;
 pub use init_vk_registry::*;
 pub use initialize::*;
 pub use mark_processing::*;
@@ -73,6 +76,7 @@ pub use register_deposit_intent::*;
 pub use register_token::*;
 pub use rotate_tree::*;
 pub use set_pool_config::*;
+pub use set_pool_script::*;
 pub use shield::*;
 pub use transact::*;
 pub use unshield::*;

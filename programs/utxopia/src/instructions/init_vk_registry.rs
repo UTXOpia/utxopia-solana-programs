@@ -43,8 +43,11 @@ impl InitVkRegistryData {
         let n_inputs = data[0];
         let n_outputs = data[1];
 
-        // Validate dimensions: N >= 1, M >= 1, N+M <= 14
-        if n_inputs == 0 || n_outputs == 0 || (n_inputs as usize + n_outputs as usize) > 14 {
+        // Validate dimensions against the audited JoinSplit VK set.
+        if n_inputs == 0
+            || n_outputs == 0
+            || (n_inputs as usize + n_outputs as usize) > crate::constants::MAX_SAFE_JOINSPLIT_SIZE
+        {
             return Err(ProgramError::InvalidArgument);
         }
 
@@ -121,7 +124,12 @@ pub fn process_init_vk_registry(
         let lamports = rent.minimum_balance(VkRegistry::SIZE);
 
         let bump_bytes = [bump];
-        let signer_seeds: &[&[u8]] = &[VkRegistry::SEED, &n_inputs_bytes, &n_outputs_bytes, &bump_bytes];
+        let signer_seeds: &[&[u8]] = &[
+            VkRegistry::SEED,
+            &n_inputs_bytes,
+            &n_outputs_bytes,
+            &bump_bytes,
+        ];
 
         create_pda_account(
             authority,

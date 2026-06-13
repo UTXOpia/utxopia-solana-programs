@@ -43,4 +43,3 @@ pub use token_config::*;
 pub use utxo::*;
 pub use verified_tx_reader::*;
 pub use vk_registry::*;
-

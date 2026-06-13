@@ -5,14 +5,11 @@
 
 use pinocchio::program_error::ProgramError;
 
-
 /// BN254 scalar field modulus (Fr) — big-endian
 /// = 21888242871839275222246405745257275088548364400416034343698204186575808495617
 const BN254_FR_MODULUS: [u8; 32] = [
-    0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29,
-    0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58, 0x5d,
-    0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91,
-    0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00, 0x00, 0x01,
+    0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58, 0x5d,
+    0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00, 0x00, 0x01,
 ];
 
 /// Poseidon hash of two 32-byte inputs (for Merkle tree nodes)
@@ -71,29 +68,35 @@ fn reduce_to_field(val: &[u8; 32]) -> [u8; 32] {
 /// Inputs are automatically reduced to valid BN254 field elements
 #[cfg(target_os = "solana")]
 fn poseidon2_hash_syscall(left: &[u8; 32], right: &[u8; 32]) -> Result<[u8; 32], ProgramError> {
-    use solana_poseidon::{hashv, Parameters, Endianness};
+    use solana_poseidon::{hashv, Endianness, Parameters};
 
     // Reduce inputs to valid field elements if needed
     let left_reduced = reduce_to_field(left);
     let right_reduced = reduce_to_field(right);
 
     // Call Poseidon syscall - no fallback, this MUST work
-    hashv(Parameters::Bn254X5, Endianness::BigEndian, &[&left_reduced, &right_reduced])
-        .map(|hash| hash.to_bytes())
-        .map_err(|_| ProgramError::InvalidArgument)
+    hashv(
+        Parameters::Bn254X5,
+        Endianness::BigEndian,
+        &[&left_reduced, &right_reduced],
+    )
+    .map(|hash| hash.to_bytes())
+    .map_err(|_| ProgramError::InvalidArgument)
 }
 
 /// Off-chain implementation using light-poseidon (matches on-chain Poseidon syscall exactly)
 #[cfg(not(target_os = "solana"))]
 fn poseidon2_hash_reference(left: &[u8; 32], right: &[u8; 32]) -> Result<[u8; 32], ProgramError> {
-    use light_poseidon::{Poseidon, PoseidonBytesHasher};
     use ark_bn254::Fr;
+    use light_poseidon::{Poseidon, PoseidonBytesHasher};
 
     // Reduce inputs to valid field elements (matches on-chain reduce_to_field)
     let left_r = reduce_to_field_exact(left);
     let right_r = reduce_to_field_exact(right);
     let mut poseidon = Poseidon::<Fr>::new_circom(2).map_err(|_| ProgramError::InvalidArgument)?;
-    let hash = poseidon.hash_bytes_be(&[&left_r, &right_r]).map_err(|_| ProgramError::InvalidArgument)?;
+    let hash = poseidon
+        .hash_bytes_be(&[&left_r, &right_r])
+        .map_err(|_| ProgramError::InvalidArgument)?;
     Ok(hash)
 }
 
@@ -117,30 +120,44 @@ pub fn poseidon3_hash(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> Result<[u8; 3
 /// SHA256 hash for localnet testing with 3 inputs
 /// Poseidon3 hash using Solana syscall
 #[cfg(target_os = "solana")]
-fn poseidon3_hash_syscall(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> Result<[u8; 32], ProgramError> {
-    use solana_poseidon::{hashv, Parameters, Endianness};
+fn poseidon3_hash_syscall(
+    a: &[u8; 32],
+    b: &[u8; 32],
+    c: &[u8; 32],
+) -> Result<[u8; 32], ProgramError> {
+    use solana_poseidon::{hashv, Endianness, Parameters};
 
     let a_reduced = reduce_to_field(a);
     let b_reduced = reduce_to_field(b);
     let c_reduced = reduce_to_field(c);
 
-    hashv(Parameters::Bn254X5, Endianness::BigEndian, &[&a_reduced, &b_reduced, &c_reduced])
-        .map(|hash| hash.to_bytes())
-        .map_err(|_| ProgramError::InvalidArgument)
+    hashv(
+        Parameters::Bn254X5,
+        Endianness::BigEndian,
+        &[&a_reduced, &b_reduced, &c_reduced],
+    )
+    .map(|hash| hash.to_bytes())
+    .map_err(|_| ProgramError::InvalidArgument)
 }
 
 /// Off-chain implementation using light-poseidon (matches on-chain Poseidon syscall exactly)
 #[cfg(not(target_os = "solana"))]
-fn poseidon3_hash_reference(a: &[u8; 32], b: &[u8; 32], c: &[u8; 32]) -> Result<[u8; 32], ProgramError> {
-    use light_poseidon::{Poseidon, PoseidonBytesHasher};
+fn poseidon3_hash_reference(
+    a: &[u8; 32],
+    b: &[u8; 32],
+    c: &[u8; 32],
+) -> Result<[u8; 32], ProgramError> {
     use ark_bn254::Fr;
+    use light_poseidon::{Poseidon, PoseidonBytesHasher};
 
     // Reduce inputs to valid field elements (matches on-chain reduce_to_field)
     let a_r = reduce_to_field_exact(a);
     let b_r = reduce_to_field_exact(b);
     let c_r = reduce_to_field_exact(c);
     let mut poseidon = Poseidon::<Fr>::new_circom(3).map_err(|_| ProgramError::InvalidArgument)?;
-    let hash = poseidon.hash_bytes_be(&[&a_r, &b_r, &c_r]).map_err(|_| ProgramError::InvalidArgument)?;
+    let hash = poseidon
+        .hash_bytes_be(&[&a_r, &b_r, &c_r])
+        .map_err(|_| ProgramError::InvalidArgument)?;
     Ok(hash)
 }
 
@@ -253,11 +270,14 @@ pub fn compute_bound_params_hash_redeem(
     reduce_to_field_exact(&hash)
 }
 
-
 /// Compute commitment with explicit token_id: Poseidon(npk, token_id, amount)
 ///
 /// Used by multi-token shield/unshield. The token_id is Poseidon(reduce_to_field(mint), 0).
-pub fn compute_commitment(npk: &[u8; 32], token_id: &[u8; 32], amount_sats: u64) -> Result<[u8; 32], ProgramError> {
+pub fn compute_commitment(
+    npk: &[u8; 32],
+    token_id: &[u8; 32],
+    amount_sats: u64,
+) -> Result<[u8; 32], ProgramError> {
     let mut amount = [0u8; 32];
     amount[24..32].copy_from_slice(&amount_sats.to_be_bytes());
 
@@ -272,7 +292,6 @@ pub fn compute_token_id(mint_bytes: &[u8; 32]) -> Result<[u8; 32], ProgramError>
     let reduced = reduce_to_field_exact(mint_bytes);
     poseidon2_hash(&reduced, &[0u8; 32])
 }
-
 
 /// Compute Merkle root from a leaf and its sibling path
 ///
@@ -312,10 +331,8 @@ pub const ZERO_HASHES: [[u8; 32]; 20] = [
     [0u8; 32],
     // Levels 1-19: Each level is hash of previous level with itself
     // In production, these should be precomputed with actual Poseidon2
-    [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32],
-    [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32],
-    [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32],
-    [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32],
+    [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32],
+    [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32],
     [0u8; 32], [0u8; 32], [0u8; 32],
 ];
 
@@ -344,7 +361,10 @@ mod tests {
         let hash_ac = poseidon2_hash(&a, &c).unwrap();
         let hash_ba = poseidon2_hash(&b, &a).unwrap();
 
-        assert_ne!(hash_ab, hash_ac, "Different inputs should produce different hashes");
+        assert_ne!(
+            hash_ab, hash_ac,
+            "Different inputs should produce different hashes"
+        );
         assert_ne!(hash_ab, hash_ba, "Order should matter");
     }
 
@@ -370,7 +390,10 @@ mod tests {
         let hash_abc = poseidon3_hash(&a, &b, &c).unwrap();
         let hash_abd = poseidon3_hash(&a, &b, &d).unwrap();
 
-        assert_ne!(hash_abc, hash_abd, "Different inputs should produce different hashes");
+        assert_ne!(
+            hash_abc, hash_abd,
+            "Different inputs should produce different hashes"
+        );
     }
 
     #[test]
@@ -382,21 +405,33 @@ mod tests {
         let commitment1 = compute_commitment(&npk, &token_id, amount_sats).unwrap();
         let commitment2 = compute_commitment(&npk, &token_id, amount_sats).unwrap();
 
-        assert_eq!(commitment1, commitment2, "Commitment should be deterministic");
+        assert_eq!(
+            commitment1, commitment2,
+            "Commitment should be deterministic"
+        );
 
         // Different amount should give different commitment
         let commitment3 = compute_commitment(&npk, &token_id, 200_000).unwrap();
-        assert_ne!(commitment1, commitment3, "Different amounts should give different commitments");
+        assert_ne!(
+            commitment1, commitment3,
+            "Different amounts should give different commitments"
+        );
 
         // Different npk should give different commitment
         let npk2 = [0x43u8; 32];
         let commitment4 = compute_commitment(&npk2, &token_id, amount_sats).unwrap();
-        assert_ne!(commitment1, commitment4, "Different npks should give different commitments");
+        assert_ne!(
+            commitment1, commitment4,
+            "Different npks should give different commitments"
+        );
 
         // Different token_id should give different commitment
         let token_id2 = [0x02u8; 32];
         let commitment5 = compute_commitment(&npk, &token_id2, amount_sats).unwrap();
-        assert_ne!(commitment1, commitment5, "Different token_ids should give different commitments");
+        assert_ne!(
+            commitment1, commitment5,
+            "Different token_ids should give different commitments"
+        );
     }
 
     #[test]
@@ -460,7 +495,10 @@ mod tests {
 
         // Different amounts produce different commitments
         let commitment3 = compute_commitment(&zero_npk, &token_id, 200_000).unwrap();
-        assert_ne!(commitment, commitment3, "Different burn amounts must produce different commitments");
+        assert_ne!(
+            commitment, commitment3,
+            "Different burn amounts must produce different commitments"
+        );
     }
 
     #[test]
@@ -472,7 +510,10 @@ mod tests {
 
         let mint2 = [0xCDu8; 32];
         let id3 = compute_token_id(&mint2).unwrap();
-        assert_ne!(id1, id3, "Different mints should produce different token IDs");
+        assert_ne!(
+            id1, id3,
+            "Different mints should produce different token IDs"
+        );
     }
 
     #[test]
@@ -488,14 +529,20 @@ mod tests {
         let stealth = [0u8; 32];
         let devnet = compute_bound_params_hash_private_transfer(103, &stealth);
         let mainnet = compute_bound_params_hash_private_transfer(101, &stealth);
-        assert_ne!(devnet, mainnet, "Different chain IDs must produce different hashes");
+        assert_ne!(
+            devnet, mainnet,
+            "Different chain IDs must produce different hashes"
+        );
     }
 
     #[test]
     fn test_bound_params_hash_is_valid_field_element() {
         let stealth = [0u8; 32];
         let hash = compute_bound_params_hash_private_transfer(103, &stealth);
-        assert!(!is_ge_modulus(&hash), "Hash must be a valid BN254 field element");
+        assert!(
+            !is_ge_modulus(&hash),
+            "Hash must be a valid BN254 field element"
+        );
     }
 
     #[test]
@@ -504,7 +551,10 @@ mod tests {
         let stealth_b = [0xBBu8; 32];
         let hash_a = compute_bound_params_hash_private_transfer(103, &stealth_a);
         let hash_b = compute_bound_params_hash_private_transfer(103, &stealth_b);
-        assert_ne!(hash_a, hash_b, "Different stealth data must produce different hashes");
+        assert_ne!(
+            hash_a, hash_b,
+            "Different stealth data must produce different hashes"
+        );
     }
 
     #[test]
@@ -514,7 +564,10 @@ mod tests {
         let script_b = [0x51u8, 0x20, 0xCC, 0xDD];
         let hash_a = compute_bound_params_hash_redeem(103, &script_a, &stealth);
         let hash_b = compute_bound_params_hash_redeem(103, &script_b, &stealth);
-        assert_ne!(hash_a, hash_b, "Different BTC scripts must produce different hashes");
+        assert_ne!(
+            hash_a, hash_b,
+            "Different BTC scripts must produce different hashes"
+        );
 
         // Same script, same stealth → deterministic
         let hash_a2 = compute_bound_params_hash_redeem(103, &script_a, &stealth);
@@ -528,7 +581,10 @@ mod tests {
         let script = [0x51u8, 0x20, 0xAA, 0xBB];
         let hash_a = compute_bound_params_hash_redeem(103, &script, &stealth_a);
         let hash_b = compute_bound_params_hash_redeem(103, &script, &stealth_b);
-        assert_ne!(hash_a, hash_b, "Different stealth data must produce different redeem hashes");
+        assert_ne!(
+            hash_a, hash_b,
+            "Different stealth data must produce different redeem hashes"
+        );
     }
 
     /// Cross-language test vectors — these hex values must match the SDK tests.
@@ -572,25 +628,36 @@ mod tests {
     /// circomlibjs: poseidon([1n, 2n, 3n]) = 0e7732d89e6939c0ff03d5e58dab6302f3230e269dc5b968f725df34ab36d732
     #[test]
     fn test_poseidon3_vs_circomlibjs() {
-        let mut a = [0u8; 32]; a[31] = 1;
-        let mut b = [0u8; 32]; b[31] = 2;
-        let mut c = [0u8; 32]; c[31] = 3;
+        let mut a = [0u8; 32];
+        a[31] = 1;
+        let mut b = [0u8; 32];
+        b[31] = 2;
+        let mut c = [0u8; 32];
+        c[31] = 3;
         let hash = poseidon3_hash(&a, &b, &c).unwrap();
         let hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
         println!("Poseidon3(1,2,3) = {}", hex);
-        assert_eq!(hex, "0e7732d89e6939c0ff03d5e58dab6302f3230e269dc5b968f725df34ab36d732");
+        assert_eq!(
+            hex,
+            "0e7732d89e6939c0ff03d5e58dab6302f3230e269dc5b968f725df34ab36d732"
+        );
     }
 
     /// Test real Poseidon2 against circomlibjs expected output
     /// circomlibjs: poseidon([1n, 2n]) = 115cc0f5e7d690413df64c6b9662e9cf2a3617f2743245519e19607a4417189a
     #[test]
     fn test_poseidon2_vs_circomlibjs() {
-        let mut a = [0u8; 32]; a[31] = 1;
-        let mut b = [0u8; 32]; b[31] = 2;
+        let mut a = [0u8; 32];
+        a[31] = 1;
+        let mut b = [0u8; 32];
+        b[31] = 2;
         let hash = poseidon2_hash(&a, &b).unwrap();
         let hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
         println!("Poseidon2(1,2) = {}", hex);
-        assert_eq!(hex, "115cc0f5e7d690413df64c6b9662e9cf2a3617f2743245519e19607a4417189a");
+        assert_eq!(
+            hex,
+            "115cc0f5e7d690413df64c6b9662e9cf2a3617f2743245519e19607a4417189a"
+        );
     }
 
     #[test]
@@ -601,7 +668,10 @@ mod tests {
         let unshield = compute_bound_params_hash_unshield(103, &addr, &stealth);
         let redeem = compute_bound_params_hash_redeem(103, &[], &stealth);
         // At minimum, transfer and unshield should differ (different flag byte)
-        assert_ne!(transfer, unshield, "Transfer and unshield hashes must differ");
+        assert_ne!(
+            transfer, unshield,
+            "Transfer and unshield hashes must differ"
+        );
         // Note: redeem with empty script may fail in production (btc_script_len=0 check),
         // but the hash function itself should still work and produce a different result
         assert_ne!(transfer, redeem, "Transfer and redeem hashes must differ");

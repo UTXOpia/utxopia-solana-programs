@@ -3,7 +3,7 @@
 use pinocchio::{
     account_info::AccountInfo,
     cpi::{invoke, invoke_signed},
-    instruction::{AccountMeta, Instruction, Signer, Seed},
+    instruction::{AccountMeta, Instruction, Seed, Signer},
     program_error::ProgramError,
     pubkey::Pubkey,
     ProgramResult,
@@ -48,10 +48,7 @@ pub fn mint_zkbtc(
         data: &data,
     };
 
-    let seeds: [Seed; 2] = [
-        Seed::from(signer_seeds[0]),
-        Seed::from(signer_seeds[1]),
-    ];
+    let seeds: [Seed; 2] = [Seed::from(signer_seeds[0]), Seed::from(signer_seeds[1])];
     let signer = Signer::from(&seeds[..]);
     let signers = [signer];
 
@@ -123,10 +120,7 @@ pub fn burn_zkbtc_signed(
         data: &data,
     };
 
-    let seeds: [Seed; 2] = [
-        Seed::from(signer_seeds[0]),
-        Seed::from(signer_seeds[1]),
-    ];
+    let seeds: [Seed; 2] = [Seed::from(signer_seeds[0]), Seed::from(signer_seeds[1])];
     let signer = Signer::from(&seeds[..]);
     let signers = [signer];
 
@@ -163,10 +157,7 @@ pub fn transfer_zkbtc(
     if signer_seeds.is_empty() {
         invoke(&instruction, &[source, destination, authority])
     } else {
-        let seeds: [Seed; 2] = [
-            Seed::from(signer_seeds[0]),
-            Seed::from(signer_seeds[1]),
-        ];
+        let seeds: [Seed; 2] = [Seed::from(signer_seeds[0]), Seed::from(signer_seeds[1])];
         let signer = Signer::from(&seeds[..]);
         let signers = [signer];
         invoke_signed(&instruction, &[source, destination, authority], &signers)
@@ -207,7 +198,7 @@ pub fn transfer_token_user(
 pub fn is_token_account(account: &AccountInfo) -> bool {
     use crate::constants::{TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID};
     let owner = account.owner().as_ref();
-    owner == &TOKEN_2022_PROGRAM_ID || owner == &TOKEN_PROGRAM_ID
+    owner == TOKEN_2022_PROGRAM_ID || owner == TOKEN_PROGRAM_ID
 }
 
 /// Validate token account basics (works with both Token and Token-2022)

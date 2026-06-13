@@ -70,20 +70,16 @@ mod tests {
     fn accepts_amount_and_fee_at_limit() {
         let buf = unpaused_pool();
         let pool = PoolState::from_bytes(&buf).unwrap();
-        assert!(check_redemption_signing(
-            pool,
-            MAX_REDEMPTION_AMOUNT_SATS,
-            MAX_MINER_FEE_SATS,
-        )
-        .is_ok());
+        assert!(
+            check_redemption_signing(pool, MAX_REDEMPTION_AMOUNT_SATS, MAX_MINER_FEE_SATS,).is_ok()
+        );
     }
 
     #[test]
     fn rejects_amount_over_limit() {
         let buf = unpaused_pool();
         let pool = PoolState::from_bytes(&buf).unwrap();
-        let err =
-            check_redemption_signing(pool, MAX_REDEMPTION_AMOUNT_SATS + 1, 0).unwrap_err();
+        let err = check_redemption_signing(pool, MAX_REDEMPTION_AMOUNT_SATS + 1, 0).unwrap_err();
         assert_eq!(err, UTXOpiaError::RedemptionAmountExceedsLimit.into());
     }
 

@@ -21,7 +21,7 @@ pub enum RedemptionStatus {
 
 /// Redemption request - pending BTC withdrawal (zero-copy layout)
 ///
-/// Layout (106 bytes):
+/// Layout (138 bytes):
 /// - discriminator:     1 byte
 /// - status:            1 byte
 /// - btc_script_len:    1 byte
@@ -33,6 +33,7 @@ pub enum RedemptionStatus {
 /// - service_fee:       8 bytes (locked at request time from pool config)
 /// - total_input_sats:  8 bytes (sum of BTC input UTXOs, set at mark_processing by backend)
 /// - btc_script:        34 bytes (raw scriptPubKey for BTC withdrawal, not bech32 string)
+/// - token_id:          32 bytes (the redeemed token, recorded at redeem; cancel re-mints the same token)
 #[repr(C)]
 pub struct RedemptionRequest {
     /// Account discriminator
@@ -70,6 +71,10 @@ pub struct RedemptionRequest {
 
     /// Bitcoin scriptPubKey for withdrawal (fixed buffer)
     pub btc_script: [u8; MAX_BTC_SCRIPT_LEN],
+
+    /// Token id of the redeemed note, recorded at redeem; cancel_redemption
+    /// re-mints with this and rejects a token_config whose token_id differs.
+    pub token_id: [u8; 32],
 }
 
 impl RedemptionRequest {
@@ -142,6 +147,10 @@ impl RedemptionRequest {
         &self.btc_script[..self.btc_script_len as usize]
     }
 
+    pub fn token_id(&self) -> &[u8; 32] {
+        &self.token_id
+    }
+
     // Setters
     pub fn set_status(&mut self, status: RedemptionStatus) {
         self.status = status as u8;
@@ -174,5 +183,9 @@ impl RedemptionRequest {
         self.btc_script[..script.len()].copy_from_slice(script);
         self.btc_script_len = script.len() as u8;
         Ok(())
+    }
+
+    pub fn set_token_id(&mut self, token_id: &[u8; 32]) {
+        self.token_id = *token_id;
     }
 }

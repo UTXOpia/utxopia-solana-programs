@@ -1,4 +1,4 @@
-use super::u256::{u256_from_le_bytes, u256_to_le_bytes, u256_add, u256_div};
+use super::u256::{u256_add, u256_div, u256_from_le_bytes, u256_to_le_bytes};
 
 /// Check if a hash meets the difficulty target (LE comparison)
 pub fn hash_meets_target(hash: &[u8; 32], target: &[u8; 32]) -> bool {

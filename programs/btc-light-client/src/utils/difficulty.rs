@@ -11,13 +11,7 @@ const MAX_TARGET_BITS: u32 = 0x1d00ffff;
 /// Matches Bitcoin Core's GetNextWorkRequired algorithm.
 pub fn calculate_new_bits(old_bits: u32, actual_timespan: u32) -> u32 {
     // Clamp timespan to [TARGET_TIMESPAN/4, TARGET_TIMESPAN*4]
-    let clamped = if actual_timespan < TARGET_TIMESPAN / 4 {
-        TARGET_TIMESPAN / 4
-    } else if actual_timespan > TARGET_TIMESPAN * 4 {
-        TARGET_TIMESPAN * 4
-    } else {
-        actual_timespan
-    };
+    let clamped = actual_timespan.clamp(TARGET_TIMESPAN / 4, TARGET_TIMESPAN * 4);
 
     // Expand old_bits to 256-bit target
     let old_target = target_from_bits(old_bits);
@@ -58,7 +52,7 @@ pub fn required_bits_for_next_block(
         return 0;
     }
 
-    if block_height % BLOCKS_PER_EPOCH == 0 {
+    if block_height.is_multiple_of(BLOCKS_PER_EPOCH) {
         let actual_timespan = parent_timestamp.wrapping_sub(epoch_start_time);
         return calculate_new_bits(epoch_bits, actual_timespan);
     }

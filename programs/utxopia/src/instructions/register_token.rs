@@ -11,21 +11,15 @@
 //! 5. `[]`         System program
 
 use pinocchio::{
-    account_info::AccountInfo,
-    program_error::ProgramError,
-    pubkey::find_program_address,
-    sysvars::rent::Rent,
-    sysvars::Sysvar,
-    ProgramResult,
+    account_info::AccountInfo, program_error::ProgramError, pubkey::find_program_address,
+    sysvars::rent::Rent, sysvars::Sysvar, ProgramResult,
 };
 
 use crate::error::UTXOpiaError;
 use crate::state::{PoolState, TokenConfig};
 use crate::utils::{
-    create_pda_account,
-    crypto::compute_token_id,
-    validate_account_writable, validate_program_owner,
-    validate_system_program, validate_token_owner,
+    create_pda_account, crypto::compute_token_id, validate_account_writable,
+    validate_program_owner, validate_system_program, validate_token_owner,
 };
 
 /// Instruction data layout:
@@ -111,6 +105,11 @@ pub fn process_register_token(
     let min_deposit = u64::from_le_bytes(data[8..16].try_into().unwrap());
     let max_deposit = u64::from_le_bytes(data[16..24].try_into().unwrap());
     let deposit_cap = u64::from_le_bytes(data[24..32].try_into().unwrap());
+
+    // Validate limits: a deposit must be possible and bounded by the cap.
+    if min_deposit == 0 || min_deposit > max_deposit || max_deposit > deposit_cap {
+        return Err(UTXOpiaError::InvalidTokenConfig.into());
+    }
 
     // Initialize TokenConfig
     {

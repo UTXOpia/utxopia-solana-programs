@@ -128,7 +128,7 @@ pub fn validate_program_owner(
 /// Validate that an account is owned by Token-2022 program
 #[inline(always)]
 pub fn validate_token_2022_owner(account: &AccountInfo) -> Result<(), ProgramError> {
-    if account.owner().as_ref() != &TOKEN_2022_PROGRAM_ID {
+    if account.owner().as_ref() != TOKEN_2022_PROGRAM_ID {
         return Err(ProgramError::InvalidAccountOwner);
     }
     Ok(())
@@ -138,7 +138,7 @@ pub fn validate_token_2022_owner(account: &AccountInfo) -> Result<(), ProgramErr
 #[inline(always)]
 pub fn validate_token_owner(account: &AccountInfo) -> Result<(), ProgramError> {
     let owner = account.owner().as_ref();
-    if owner != &TOKEN_2022_PROGRAM_ID && owner != &TOKEN_PROGRAM_ID {
+    if owner != TOKEN_2022_PROGRAM_ID && owner != TOKEN_PROGRAM_ID {
         return Err(ProgramError::InvalidAccountOwner);
     }
     Ok(())
@@ -147,7 +147,7 @@ pub fn validate_token_owner(account: &AccountInfo) -> Result<(), ProgramError> {
 /// Validate that an account key matches the Token-2022 program ID
 #[inline(always)]
 pub fn validate_token_program_key(account: &AccountInfo) -> Result<(), ProgramError> {
-    if account.key().as_ref() != &TOKEN_2022_PROGRAM_ID {
+    if account.key().as_ref() != TOKEN_2022_PROGRAM_ID {
         return Err(ProgramError::IncorrectProgramId);
     }
     Ok(())
@@ -157,7 +157,7 @@ pub fn validate_token_program_key(account: &AccountInfo) -> Result<(), ProgramEr
 #[inline(always)]
 pub fn validate_any_token_program_key(account: &AccountInfo) -> Result<(), ProgramError> {
     let key = account.key().as_ref();
-    if key != &TOKEN_2022_PROGRAM_ID && key != &TOKEN_PROGRAM_ID {
+    if key != TOKEN_2022_PROGRAM_ID && key != TOKEN_PROGRAM_ID {
         return Err(ProgramError::IncorrectProgramId);
     }
     Ok(())
@@ -167,7 +167,7 @@ pub fn validate_any_token_program_key(account: &AccountInfo) -> Result<(), Progr
 #[inline(always)]
 pub fn validate_system_program(account: &AccountInfo) -> Result<(), ProgramError> {
     const SYSTEM_PROGRAM_ID: [u8; 32] = [0; 32];
-    if account.key().as_ref() != &SYSTEM_PROGRAM_ID {
+    if account.key().as_ref() != SYSTEM_PROGRAM_ID {
         return Err(ProgramError::IncorrectProgramId);
     }
     Ok(())

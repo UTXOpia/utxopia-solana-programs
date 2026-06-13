@@ -271,12 +271,12 @@ mod tests {
         utxo.set_amount_sats(12345);
 
         // Check raw bytes at documented offsets
-        assert_eq!(buf[0], 0x09);      // discriminator
-        assert_eq!(buf[1], 1);         // status = Reserved
-        assert_eq!(buf[2], 0);         // padding
-        assert_eq!(buf[3], 0);         // padding
+        assert_eq!(buf[0], 0x09); // discriminator
+        assert_eq!(buf[1], 1); // status = Reserved
+        assert_eq!(buf[2], 0); // padding
+        assert_eq!(buf[3], 0); // padding
         assert_eq!(buf[4..8], 7u32.to_le_bytes()); // vout
-        assert_eq!(&buf[8..40], &txid);  // txid
+        assert_eq!(&buf[8..40], &txid); // txid
         assert_eq!(buf[40..48], 12345u64.to_le_bytes()); // amount_sats
     }
 }

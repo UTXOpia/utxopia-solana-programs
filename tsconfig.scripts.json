@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "target": "ES2022",
+    "noEmit": true
+  },
+  "include": [
+    "scripts/e2e-localnet.ts",
+    "scripts/regtest-flow.ts",
+    "scripts/relay-deposit.ts",
+    "scripts/test-flow/**/*.ts",
+    "scripts/test-helpers.ts",
+    "scripts/regtest-helpers.ts"
+  ]
+}

@@ -186,10 +186,7 @@ pub fn approve_message(
     };
 
     let bump_bytes = [cpi_authority_bump];
-    let signer_seeds: [Seed; 2] = [
-        Seed::from(CPI_AUTHORITY_SEED),
-        Seed::from(&bump_bytes),
-    ];
+    let signer_seeds: [Seed; 2] = [Seed::from(CPI_AUTHORITY_SEED), Seed::from(&bump_bytes)];
     let signers = [Signer::from(&signer_seeds)];
 
     invoke_signed(
@@ -279,13 +276,8 @@ mod tests {
         let meta = [0xBBu8; 32];
         let user = [0xCCu8; 32];
 
-        let data = build_approve_message_ix_data(
-            7,
-            &sighash,
-            &meta,
-            &user,
-            SIG_SCHEME_TAPROOT_SHA256,
-        );
+        let data =
+            build_approve_message_ix_data(7, &sighash, &meta, &user, SIG_SCHEME_TAPROOT_SHA256);
 
         assert_eq!(data[2..34], [0xAAu8; 32]);
         assert_eq!(data[34..66], [0xBBu8; 32]);

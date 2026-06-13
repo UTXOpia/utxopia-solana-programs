@@ -11,19 +11,17 @@
 //! Instruction data: amount(8) — allows partial claims
 
 use pinocchio::{
-    account_info::AccountInfo,
-    program_error::ProgramError,
-    pubkey::find_program_address,
+    account_info::AccountInfo, program_error::ProgramError, pubkey::find_program_address,
     ProgramResult,
 };
 
 use crate::error::UTXOpiaError;
 use crate::state::{PoolState, TokenConfig};
-use crate::utils::{
-    validate_account_writable, validate_program_owner,
-    validate_token_owner, validate_any_token_program_key,
-};
 use crate::utils::token::transfer_zkbtc;
+use crate::utils::{
+    validate_account_writable, validate_any_token_program_key, validate_program_owner,
+    validate_token_owner,
+};
 
 pub fn process_claim_fees(
     program_id: &pinocchio::pubkey::Pubkey,
@@ -76,8 +74,8 @@ pub fn process_claim_fees(
         return Err(ProgramError::InvalidSeeds);
     }
 
-    // Validate amount against accumulated_fees
-    {
+    // Validate amount against accumulated_fees; capture token_id for the event.
+    let token_id = {
         let tc_data = token_config_info.try_borrow_data()?;
         let tc = TokenConfig::from_bytes(&tc_data)?;
 
@@ -89,7 +87,8 @@ pub fn process_claim_fees(
         if amount > tc.accumulated_fees() {
             return Err(UTXOpiaError::InsufficientFees.into());
         }
-    }
+        tc.token_id
+    };
 
     // Transfer from vault to admin (signed by pool PDA)
     let pool_bump_bytes = [pool_bump];
@@ -110,6 +109,12 @@ pub fn process_claim_fees(
         let tc = TokenConfig::from_bytes_mut(&mut tc_data)?;
         tc.sub_fees(amount)?;
     }
+
+    crate::utils::events::emit_fees_claimed(
+        &token_id,
+        amount,
+        admin_token_account.key().as_ref().try_into().unwrap(),
+    );
 
     pinocchio::msg!("UTXOpia: claimed fees");
     Ok(())

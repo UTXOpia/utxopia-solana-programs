@@ -112,7 +112,7 @@ pub fn process_set_pool_config(
         None
     };
 
-    let cpi_authority_bump: Option<u8> = if data.len() >= cursor + 1 {
+    let cpi_authority_bump: Option<u8> = if data.len() > cursor {
         let bump = data[cursor];
         cursor += 1;
         Some(bump)

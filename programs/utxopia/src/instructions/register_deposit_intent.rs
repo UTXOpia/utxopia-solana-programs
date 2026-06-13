@@ -7,12 +7,12 @@ use pinocchio::{
     account_info::AccountInfo,
     program_error::ProgramError,
     pubkey::{find_program_address, Pubkey},
-    ProgramResult,
     sysvars::{rent::Rent, Sysvar},
+    ProgramResult,
 };
 
 use crate::state::DepositIntent;
-use crate::utils::{create_pda_account, validate_system_program, validate_account_writable};
+use crate::utils::{create_pda_account, validate_account_writable, validate_system_program};
 
 pub fn process_register_deposit_intent(
     program_id: &Pubkey,
@@ -53,7 +53,9 @@ pub fn process_register_deposit_intent(
     // Check PDA doesn't already exist
     {
         let intent_data = deposit_intent_info.try_borrow_data()?;
-        if !intent_data.is_empty() && intent_data[0] == crate::state::deposit_intent::DEPOSIT_INTENT_DISCRIMINATOR {
+        if !intent_data.is_empty()
+            && intent_data[0] == crate::state::deposit_intent::DEPOSIT_INTENT_DISCRIMINATOR
+        {
             // Already exists — idempotent, just return Ok
             return Ok(());
         }

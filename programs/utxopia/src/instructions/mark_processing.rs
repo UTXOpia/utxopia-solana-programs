@@ -33,7 +33,7 @@ const MAX_UTXOS_PER_MARK: usize = 20;
 /// 0. `[writable]` Pool state
 /// 1. `[writable]` Redemption request
 /// 2. `[signer]`   Authority (pool authority)
-/// 3..3+N `[writable]` UTXO record PDAs (N = utxo_count from instruction data)
+///    3..3+N `[writable]` UTXO record PDAs (N = utxo_count from instruction data)
 pub fn process_mark_processing(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -130,8 +130,8 @@ pub fn process_mark_processing(
         let mut pool_data = pool_state_info.try_borrow_mut_data()?;
         let pool = PoolState::from_bytes_mut(&mut pool_data)?;
 
-        for i in 0..utxo_count {
-            pool.remove_utxo(utxo_amounts[i])?;
+        for amount in utxo_amounts.iter().take(utxo_count) {
+            pool.remove_utxo(*amount)?;
         }
     }
 

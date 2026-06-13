@@ -215,11 +215,11 @@ impl CommitmentTree {
         let mut current_index = leaf_index as usize;
 
         // Walk up the tree from leaf to root
-        for level in 0..TREE_DEPTH {
-            if current_index % 2 == 0 {
+        for (level, zero_hash) in ZERO_HASHES.iter().enumerate().take(TREE_DEPTH) {
+            if current_index.is_multiple_of(2) {
                 // This is a left child - save to frontier and pair with zero hash
                 self.frontier[level] = current_hash;
-                current_hash = poseidon2_hash(&current_hash, &ZERO_HASHES[level])?;
+                current_hash = poseidon2_hash(&current_hash, zero_hash)?;
             } else {
                 // This is a right child - pair with frontier (left sibling)
                 current_hash = poseidon2_hash(&self.frontier[level], &current_hash)?;

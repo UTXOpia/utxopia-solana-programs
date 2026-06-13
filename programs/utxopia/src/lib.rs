@@ -25,11 +25,11 @@
 //!                              Withdraw → ZK Proof → Burn from Pool → BTC
 //! ```
 
+#[cfg(not(feature = "no-entrypoint"))]
+use pinocchio::entrypoint;
 use pinocchio::{
     account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, ProgramResult,
 };
-#[cfg(not(feature = "no-entrypoint"))]
-use pinocchio::entrypoint;
 
 pub mod constants;
 pub mod cpi;
@@ -40,10 +40,8 @@ pub mod utils;
 
 /// Program ID (update after deployment)
 pub const ID: Pubkey = [
-    0x0a, 0x6a, 0x3c, 0x1e, 0x87, 0x32, 0x1a, 0x5c,
-    0x7f, 0x4b, 0x2d, 0x9e, 0x8a, 0x6c, 0x3f, 0x1b,
-    0x5d, 0x2a, 0x8e, 0x4c, 0x7b, 0x3a, 0x1f, 0x6d,
-    0x9c, 0x5e, 0x2b, 0x8f, 0x4a, 0x7d, 0x3c, 0x1e,
+    0x0a, 0x6a, 0x3c, 0x1e, 0x87, 0x32, 0x1a, 0x5c, 0x7f, 0x4b, 0x2d, 0x9e, 0x8a, 0x6c, 0x3f, 0x1b,
+    0x5d, 0x2a, 0x8e, 0x4c, 0x7b, 0x3a, 0x1f, 0x6d, 0x9c, 0x5e, 0x2b, 0x8f, 0x4a, 0x7d, 0x3c, 0x1e,
 ];
 
 /// Instruction discriminators — sequential 0-19, grouped by category
@@ -104,6 +102,13 @@ pub mod instruction {
 
     // Ika pre-broadcast signing approval (27)
     pub const APPROVE_REDEMPTION_SIGNING: u8 = 27;
+
+    // Tree management (28) — create the active-index tree PDA when missing
+    // (migration aid for pools initialized under the legacy plain-seed scheme).
+    pub const INIT_TREE: u8 = 28;
+
+    // Custody migration (29) — repoint pool_script on an initialized PoolConfig.
+    pub const SET_POOL_SCRIPT: u8 = 29;
 }
 
 #[cfg(not(feature = "no-entrypoint"))]
@@ -123,20 +128,38 @@ pub fn process_instruction(
         // Core (0-2)
         instruction::INITIALIZE => instructions::process_initialize(program_id, accounts, data),
         instruction::SET_PAUSED => process_set_paused(program_id, accounts, data),
-        instruction::SET_POOL_CONFIG => instructions::process_set_pool_config(program_id, accounts, data),
+        instruction::SET_POOL_CONFIG => {
+            instructions::process_set_pool_config(program_id, accounts, data)
+        }
         // Pool updates (3-5)
-        instruction::PROPOSE_POOL_UPDATE => instructions::process_propose_pool_update(program_id, accounts, data),
-        instruction::EXECUTE_POOL_UPDATE => instructions::process_execute_pool_update(program_id, accounts, data),
-        instruction::CANCEL_POOL_UPDATE => instructions::process_cancel_pool_update(program_id, accounts, data),
+        instruction::PROPOSE_POOL_UPDATE => {
+            instructions::process_propose_pool_update(program_id, accounts, data)
+        }
+        instruction::EXECUTE_POOL_UPDATE => {
+            instructions::process_execute_pool_update(program_id, accounts, data)
+        }
+        instruction::CANCEL_POOL_UPDATE => {
+            instructions::process_cancel_pool_update(program_id, accounts, data)
+        }
         // VK admin (6-7)
-        instruction::INIT_VK_REGISTRY => instructions::process_init_vk_registry(program_id, accounts, data),
-        instruction::UPDATE_VK_REGISTRY => instructions::process_update_vk_registry(program_id, accounts, data),
+        instruction::INIT_VK_REGISTRY => {
+            instructions::process_init_vk_registry(program_id, accounts, data)
+        }
+        instruction::UPDATE_VK_REGISTRY => {
+            instructions::process_update_vk_registry(program_id, accounts, data)
+        }
         // Multi-token (8-10)
-        instruction::REGISTER_TOKEN => instructions::process_register_token(program_id, accounts, data),
-        instruction::UPDATE_TOKEN_CONFIG => instructions::process_update_token_config(program_id, accounts, data),
+        instruction::REGISTER_TOKEN => {
+            instructions::process_register_token(program_id, accounts, data)
+        }
+        instruction::UPDATE_TOKEN_CONFIG => {
+            instructions::process_update_token_config(program_id, accounts, data)
+        }
         instruction::CLAIM_FEES => instructions::process_claim_fees(program_id, accounts, data),
         // Deposit (11-12)
-        instruction::COMPLETE_DEPOSIT => instructions::process_complete_deposit(program_id, accounts, data),
+        instruction::COMPLETE_DEPOSIT => {
+            instructions::process_complete_deposit(program_id, accounts, data)
+        }
         instruction::SHIELD => instructions::process_shield(program_id, accounts, data),
         // JoinSplit (13-15)
         instruction::TRANSACT => instructions::process_transact(program_id, accounts, data),
@@ -144,26 +167,38 @@ pub fn process_instruction(
         instruction::REDEEM => instructions::process_redeem(program_id, accounts, data),
         // Redemption lifecycle (17-19). Discriminator 16 is reserved/invalid;
         // proof-checked BTC withdrawals enter through REDEEM.
-        instruction::COMPLETE_REDEMPTION => instructions::process_complete_redemption(program_id, accounts, data),
-        instruction::MARK_PROCESSING => instructions::process_mark_processing(program_id, accounts, data),
-        instruction::CANCEL_REDEMPTION => instructions::process_cancel_redemption(program_id, accounts, data),
-        // Tree management (20)
+        instruction::COMPLETE_REDEMPTION => {
+            instructions::process_complete_redemption(program_id, accounts, data)
+        }
+        instruction::MARK_PROCESSING => {
+            instructions::process_mark_processing(program_id, accounts, data)
+        }
+        instruction::CANCEL_REDEMPTION => {
+            instructions::process_cancel_redemption(program_id, accounts, data)
+        }
+        // Tree management (20, 28)
         instruction::ROTATE_TREE => instructions::process_rotate_tree(program_id, accounts, data),
+        instruction::INIT_TREE => instructions::process_init_tree(program_id, accounts, data),
+        instruction::SET_POOL_SCRIPT => {
+            instructions::process_set_pool_script(program_id, accounts, data)
+        }
         // OP_RETURN-free deposits (24-25)
-        instruction::REGISTER_DEPOSIT_INTENT => instructions::process_register_deposit_intent(program_id, accounts, data),
-        instruction::VERIFY_DEPOSIT => instructions::process_verify_deposit(program_id, accounts, data),
+        instruction::REGISTER_DEPOSIT_INTENT => {
+            instructions::process_register_deposit_intent(program_id, accounts, data)
+        }
+        instruction::VERIFY_DEPOSIT => {
+            instructions::process_verify_deposit(program_id, accounts, data)
+        }
         // Ika pre-broadcast signing approval (27)
-        instruction::APPROVE_REDEMPTION_SIGNING => instructions::process_approve_redemption_signing(program_id, accounts, data),
+        instruction::APPROVE_REDEMPTION_SIGNING => {
+            instructions::process_approve_redemption_signing(program_id, accounts, data)
+        }
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
 
 /// Set pool paused state (admin only)
-fn process_set_paused(
-    program_id: &Pubkey,
-    accounts: &[AccountInfo],
-    data: &[u8],
-) -> ProgramResult {
+fn process_set_paused(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]) -> ProgramResult {
     use crate::error::UTXOpiaError;
     use crate::state::PoolState;
     use crate::utils::validate_program_owner;
@@ -243,37 +278,41 @@ mod tests {
 
     #[test]
     fn test_account_discriminators_unique() {
-        use crate::state::pool::POOL_STATE_DISCRIMINATOR;
-        use crate::state::nullifier::NULLIFIER_RECORD_DISCRIMINATOR;
-        use crate::state::redemption::REDEMPTION_REQUEST_DISCRIMINATOR;
         use crate::state::commitment_tree::COMMITMENT_TREE_DISCRIMINATOR;
-        use crate::state::deposit_receipt::DEPOSIT_RECEIPT_DISCRIMINATOR;
-        use crate::state::deposit_intent::DEPOSIT_INTENT_DISCRIMINATOR;
         use crate::state::completion_receipt::COMPLETION_RECEIPT_DISCRIMINATOR;
+        use crate::state::deposit_intent::DEPOSIT_INTENT_DISCRIMINATOR;
+        use crate::state::deposit_receipt::DEPOSIT_RECEIPT_DISCRIMINATOR;
+        use crate::state::nullifier::NULLIFIER_RECORD_DISCRIMINATOR;
+        use crate::state::pool::POOL_STATE_DISCRIMINATOR;
+        use crate::state::pool_config::POOL_CONFIG_DISCRIMINATOR;
+        use crate::state::redemption::REDEMPTION_REQUEST_DISCRIMINATOR;
+        use crate::state::token_config::TOKEN_CONFIG_DISCRIMINATOR;
         use crate::state::utxo::UTXO_RECORD_DISCRIMINATOR;
         use crate::state::vk_registry::VK_REGISTRY_DISCRIMINATOR;
-        use crate::state::pool_config::POOL_CONFIG_DISCRIMINATOR;
-        use crate::state::token_config::TOKEN_CONFIG_DISCRIMINATOR;
 
         // All UTXOpia-owned account discriminators must be unique
         let discs: &[u8] = &[
-            POOL_STATE_DISCRIMINATOR,           // 0x01
-            NULLIFIER_RECORD_DISCRIMINATOR,     // 0x03
-            REDEMPTION_REQUEST_DISCRIMINATOR,   // 0x04
-            COMMITMENT_TREE_DISCRIMINATOR,      // 0x05
-            DEPOSIT_RECEIPT_DISCRIMINATOR,       // 0x06
-            DEPOSIT_INTENT_DISCRIMINATOR,        // 0x07
-            COMPLETION_RECEIPT_DISCRIMINATOR,    // 0x08
-            UTXO_RECORD_DISCRIMINATOR,          // 0x09
-            POOL_CONFIG_DISCRIMINATOR,          // 0x0A
-            TOKEN_CONFIG_DISCRIMINATOR,         // 0x0B
-            VK_REGISTRY_DISCRIMINATOR,          // 0x14
+            POOL_STATE_DISCRIMINATOR,         // 0x01
+            NULLIFIER_RECORD_DISCRIMINATOR,   // 0x03
+            REDEMPTION_REQUEST_DISCRIMINATOR, // 0x04
+            COMMITMENT_TREE_DISCRIMINATOR,    // 0x05
+            DEPOSIT_RECEIPT_DISCRIMINATOR,    // 0x06
+            DEPOSIT_INTENT_DISCRIMINATOR,     // 0x07
+            COMPLETION_RECEIPT_DISCRIMINATOR, // 0x08
+            UTXO_RECORD_DISCRIMINATOR,        // 0x09
+            POOL_CONFIG_DISCRIMINATOR,        // 0x0A
+            TOKEN_CONFIG_DISCRIMINATOR,       // 0x0B
+            VK_REGISTRY_DISCRIMINATOR,        // 0x14
         ];
 
         for (i, &d1) in discs.iter().enumerate() {
             for (j, &d2) in discs.iter().enumerate() {
                 if i != j {
-                    assert_ne!(d1, d2, "Duplicate account discriminator at {} (0x{:02x}) and {} (0x{:02x})", i, d1, j, d2);
+                    assert_ne!(
+                        d1, d2,
+                        "Duplicate account discriminator at {} (0x{:02x}) and {} (0x{:02x})",
+                        i, d1, j, d2
+                    );
                 }
             }
         }

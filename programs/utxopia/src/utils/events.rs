@@ -89,6 +89,10 @@ pub const EVENT_SENDER_MEMO: u8 = 0x12;
 ///       + sweep_vout(4 LE) + commitment(32) + amount_sats(8 LE) = 85 bytes
 pub const EVENT_BTC_ORIGIN_ATTESTATION: u8 = 0x15;
 
+/// Emit when protocol fees are claimed for a token.
+/// Layout: disc(1) + token_id(32) + amount(8 LE) + recipient(32) = 73 bytes
+const EVENT_FEES_CLAIMED: u8 = 0x19;
+
 // Event discriminators 0x16 (POI_HIDDEN_ATTESTED) and 0x17 (TRANSACT_WITH_POI)
 // were PoI machinery, now removed. The compliance event stream is built on
 // disc 0x15 (EVENT_BTC_ORIGIN_ATTESTATION) plus a planned 0x18
@@ -100,11 +104,7 @@ const MAX_BATCH: usize = 14;
 /// Emit when a nullifier is spent.
 ///
 /// Layout: disc(1) + nullifier_hash(32) + op_type(1) + ix_disc(1) = 35 bytes
-pub fn emit_nullifier_spent(
-    nullifier_hash: &[u8; 32],
-    operation_type: u8,
-    instruction_disc: u8,
-) {
+pub fn emit_nullifier_spent(nullifier_hash: &[u8; 32], operation_type: u8, instruction_disc: u8) {
     let disc = [EVENT_NULLIFIER_SPENT];
     let op = [operation_type];
     let ix = [instruction_disc];
@@ -126,7 +126,15 @@ pub fn emit_stealth_announcement(
     let disc = [EVENT_STEALTH_ANNOUNCEMENT];
     let atype = [announcement_type];
     let li = leaf_index.to_le_bytes();
-    sol_log_data(&[&disc, &atype, ephemeral_pub, encrypted_amount, commitment, &li, token_id]);
+    sol_log_data(&[
+        &disc,
+        &atype,
+        ephemeral_pub,
+        encrypted_amount,
+        commitment,
+        &li,
+        token_id,
+    ]);
 }
 
 /// Emit when a redemption is completed (before PDA is closed).
@@ -139,6 +147,7 @@ pub fn emit_stealth_announcement(
 ///   miner_fee        = total_input_sats - sum(tx_outputs)  [computed on-chain from raw BTC tx]
 ///   burn_amount      = actual_received + miner_fee          [BTC that left the pool]
 ///   protocol_revenue = service_fee - miner_fee              [net profit kept in vault]
+#[allow(clippy::too_many_arguments)]
 pub fn emit_redemption_completed(
     requester: &[u8; 32],
     amount_sats: u64,
@@ -158,7 +167,19 @@ pub fn emit_redemption_completed(
     let burn_bytes = burn_amount.to_le_bytes();
     let proto_bytes = protocol_revenue.to_le_bytes();
     let script_len = [btc_script.len() as u8];
-    sol_log_data(&[&disc, requester, &amt, &recv, &sfee, &rid, btc_txid, &burn_bytes, &proto_bytes, &script_len, btc_script]);
+    sol_log_data(&[
+        &disc,
+        requester,
+        &amt,
+        &recv,
+        &sfee,
+        &rid,
+        btc_txid,
+        &burn_bytes,
+        &proto_bytes,
+        &script_len,
+        btc_script,
+    ]);
 }
 
 /// Emit when a redemption request is created (PDA initialized).
@@ -180,7 +201,16 @@ pub fn emit_redemption_requested(
     let sfb = service_fee_base.to_le_bytes();
     let sbps = service_fee_bps.to_le_bytes();
     let script_len = [btc_script.len() as u8];
-    sol_log_data(&[&disc, requester, &amt, &rid, &sfb, &sbps, &script_len, btc_script]);
+    sol_log_data(&[
+        &disc,
+        requester,
+        &amt,
+        &rid,
+        &sfb,
+        &sbps,
+        &script_len,
+        btc_script,
+    ]);
 }
 
 /// Emit when a redemption transitions to Processing state.
@@ -202,11 +232,7 @@ pub fn emit_redemption_processing(
 /// Emit a batch of nullifier spent events in a single sol_log_data call.
 ///
 /// Layout: disc(1) + count(1) + op_type(1) + ix_disc(1) + [nullifier_hash(32)] x count
-pub fn emit_nullifiers_batch(
-    nullifiers: &[&[u8; 32]],
-    operation_type: u8,
-    instruction_disc: u8,
-) {
+pub fn emit_nullifiers_batch(nullifiers: &[&[u8; 32]], operation_type: u8, instruction_disc: u8) {
     // For single nullifier, use the non-batch version (simpler parsing)
     if nullifiers.len() == 1 {
         emit_nullifier_spent(nullifiers[0], operation_type, instruction_disc);
@@ -288,14 +314,17 @@ pub fn emit_unshield_meta(
     sol_log_data(&[&disc, &gross, &f, &p, recipient, token_id]);
 }
 
+/// Emit when protocol fees are claimed for a token.
+pub fn emit_fees_claimed(token_id: &[u8; 32], amount: u64, recipient: &[u8; 32]) {
+    let disc = [EVENT_FEES_CLAIMED];
+    let amt = amount.to_le_bytes();
+    sol_log_data(&[&disc, token_id, &amt, recipient]);
+}
+
 /// Emit when a UTXO is created (deposit or change output).
 ///
 /// Layout: disc(1) + txid(32) + vout(4) + amount_sats(8) = 45 bytes
-pub fn emit_utxo_created(
-    txid: &[u8; 32],
-    vout: u32,
-    amount_sats: u64,
-) {
+pub fn emit_utxo_created(txid: &[u8; 32], vout: u32, amount_sats: u64) {
     let disc = [EVENT_UTXO_CREATED];
     let v = vout.to_le_bytes();
     let amt = amount_sats.to_le_bytes();
@@ -305,11 +334,7 @@ pub fn emit_utxo_created(
 /// Emit when a UTXO is consumed (spent in a withdrawal tx).
 ///
 /// Layout: disc(1) + txid(32) + vout(4) + amount_sats(8) = 45 bytes
-pub fn emit_utxo_consumed(
-    txid: &[u8; 32],
-    vout: u32,
-    amount_sats: u64,
-) {
+pub fn emit_utxo_consumed(txid: &[u8; 32], vout: u32, amount_sats: u64) {
     let disc = [EVENT_UTXO_CONSUMED];
     let v = vout.to_le_bytes();
     let amt = amount_sats.to_le_bytes();
@@ -319,11 +344,7 @@ pub fn emit_utxo_consumed(
 /// Emit shield metadata so indexer can record gross amount and fee.
 ///
 /// Layout: disc(1) + gross_amount(8) + fee(8) + token_id(32) = 49 bytes
-pub fn emit_shield_meta(
-    gross_amount: u64,
-    fee: u64,
-    token_id: &[u8; 32],
-) {
+pub fn emit_shield_meta(gross_amount: u64, fee: u64, token_id: &[u8; 32]) {
     let disc = [EVENT_SHIELD_META];
     let gross = gross_amount.to_le_bytes();
     let f = fee.to_le_bytes();
@@ -384,19 +405,19 @@ pub fn emit_announcements_batch(items: &[AnnouncementItem]) {
     buf[0] = EVENT_ANNOUNCEMENTS_BATCH;
     buf[1] = n as u8;
     let mut offset = 2;
-    for i in 0..n {
-        buf[offset] = items[i].announcement_type;
+    for item in items.iter().take(n) {
+        buf[offset] = item.announcement_type;
         offset += 1;
-        buf[offset..offset + 32].copy_from_slice(items[i].ephemeral_pub);
+        buf[offset..offset + 32].copy_from_slice(item.ephemeral_pub);
         offset += 32;
-        buf[offset..offset + 8].copy_from_slice(items[i].encrypted_amount);
+        buf[offset..offset + 8].copy_from_slice(item.encrypted_amount);
         offset += 8;
-        buf[offset..offset + 32].copy_from_slice(items[i].commitment);
+        buf[offset..offset + 32].copy_from_slice(item.commitment);
         offset += 32;
-        let li = items[i].leaf_index.to_le_bytes();
+        let li = item.leaf_index.to_le_bytes();
         buf[offset..offset + 4].copy_from_slice(&li);
         offset += 4;
-        buf[offset..offset + 32].copy_from_slice(items[i].token_id);
+        buf[offset..offset + 32].copy_from_slice(item.token_id);
         offset += 32;
     }
 
