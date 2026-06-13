@@ -193,15 +193,6 @@ pub fn verify_vk_merkle_and_proof(
     prefix: &JoinSplitPrefix<'_>,
 ) -> ProgramResult {
     {
-        let vk_data = vk_registry_info.try_borrow_data()?;
-        let vk = VkRegistry::from_bytes(&vk_data)?;
-
-        if vk.n_inputs != header.n_inputs as u8 || vk.n_outputs != header.n_outputs as u8 {
-            return Err(UTXOpiaError::InvalidVkRegistry.into());
-        }
-    }
-
-    {
         let tree_data = commitment_tree_info.try_borrow_data()?;
         let tree = CommitmentTree::from_bytes(&tree_data)?;
         if !tree.is_valid_root(prefix.merkle_root) {
@@ -225,12 +216,17 @@ pub fn verify_vk_merkle_and_proof(
         pi_len += 1;
     }
 
-    let (delta_g2, ic) =
-        crate::utils::groth16::load_joinsplit_vk(header.n_inputs as u8, header.n_outputs as u8)?;
+    let vk_data = vk_registry_info.try_borrow_data()?;
+    let vk = VkRegistry::from_bytes(&vk_data)?;
+    if vk.n_inputs != header.n_inputs as u8 || vk.n_outputs != header.n_outputs as u8 {
+        return Err(UTXOpiaError::InvalidVkRegistry.into());
+    }
+    let ic = vk.get_ic()?;
+
     crate::utils::groth16::verify_groth16_joinsplit_proof(
         prefix.proof_bytes,
         &public_inputs[..pi_len],
-        delta_g2,
+        vk.get_delta_g2(),
         ic,
     )
 }

@@ -39,7 +39,7 @@ pub const BTC_LIGHT_CLIENT_PROGRAM_ID: [u8; 32] = [
     0x9a, 0x2e, 0x83, 0xd2, 0xbe, 0xf4, 0x78, 0x48, 0x02, 0x46, 0xb5, 0x87, 0x45, 0xea, 0x9d, 0xb0,
 ];
 
-/// Audited JoinSplit scope (N + M). VKs are embedded for all variants up to 10.
+/// Audited JoinSplit scope (N + M). VK registry accounts support variants up to 10.
 pub const MAX_SAFE_JOINSPLIT_SIZE: usize = 10;
 
 /// Chain ID for bound params hash verification (prevents cross-chain replay).

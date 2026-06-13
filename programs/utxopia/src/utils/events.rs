@@ -98,8 +98,8 @@ const EVENT_FEES_CLAIMED: u8 = 0x19;
 // disc 0x15 (EVENT_BTC_ORIGIN_ATTESTATION) plus a planned 0x18
 // (EVENT_ORIGIN_SCREENED) for passive attestation — see docs/COMPLIANCE.md.
 
-/// Max batch items for stack-allocated buffer (MAX_SAFE_JOINSPLIT_SIZE = 14)
-const MAX_BATCH: usize = 14;
+/// Max batch items for stack-allocated buffers.
+const MAX_BATCH: usize = crate::constants::MAX_SAFE_JOINSPLIT_SIZE;
 
 /// Emit when a nullifier is spent.
 ///
