@@ -5,6 +5,7 @@
   "scripts": {
     "build": "cargo build-sbf --features devnet",
     "build:devnet": "cargo build-sbf --features devnet",
+    "build:devnet-regtest": "cargo build-sbf --features devnet-regtest",
     "build:localnet": "cargo build-sbf --features localnet",
     "build:mainnet": "cargo build-sbf",
     "check:scripts": "tsc -p tsconfig.scripts.json --noEmit",

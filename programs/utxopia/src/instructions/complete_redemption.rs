@@ -414,19 +414,11 @@ pub fn process_complete_redemption(
         .ok_or(ProgramError::ArithmeticOverflow)?;
     let min_amount = expected_send.saturating_sub(MAX_FEE_SATS);
 
-    // Find the matching output and capture the actual value sent
-    let mut actual_received: u64 = 0;
-    let mut found = false;
-    for output in parsed_tx.outputs() {
-        if output.script_pubkey == expected_script_slice && output.value >= min_amount {
-            actual_received = output.value;
-            found = true;
-            break;
-        }
-    }
-    if !found {
-        return Err(UTXOpiaError::RedemptionOutputMismatch.into());
-    }
+    let actual_received = parsed_tx
+        .outputs()
+        .find(|output| output.script_pubkey == expected_script_slice && output.value >= min_amount)
+        .ok_or(UTXOpiaError::RedemptionOutputMismatch)?
+        .value;
 
     // --- Compute miner fee trustlessly from on-chain data ---
     // Require total_input_sats > 0: mark_processing MUST set this from UTXO PDAs.

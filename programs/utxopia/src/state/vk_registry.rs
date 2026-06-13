@@ -126,7 +126,7 @@ impl VkRegistry {
         delta_g2: &[u8; 128],
         ic: &[[u8; 64]],
     ) -> Result<(), ProgramError> {
-        if ic.len() == 0 || ic.len() > MAX_IC_POINTS || ic.len() != self.num_public_inputs() + 1 {
+        if ic.is_empty() || ic.len() > MAX_IC_POINTS || ic.len() != self.num_public_inputs() + 1 {
             return Err(ProgramError::InvalidInstructionData);
         }
 
