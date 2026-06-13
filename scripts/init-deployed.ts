@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * Initialize an already-deployed UTXOpia program.
- * Creates mint, vault, frost vault, and calls initialize instruction.
+ * Creates mint, vault, deposit vault, and calls initialize instruction.
  */
 
 import { Connection, Keypair, PublicKey, SystemProgram, Transaction, TransactionInstruction, sendAndConfirmTransaction } from "@solana/web3.js";
@@ -27,7 +27,7 @@ function loadKeypair(keyPath: string): Keypair {
 
 function buildInitializeIx(
   poolState: PublicKey, commitmentTree: PublicKey, zkbtcMint: PublicKey,
-  poolVault: PublicKey, frostVault: PublicKey, authority: PublicKey,
+  poolVault: PublicKey, depositVault: PublicKey, authority: PublicKey,
   programId: PublicKey, poolBump: number, treeBump: number
 ): TransactionInstruction {
   const data = Buffer.alloc(7);
@@ -42,7 +42,7 @@ function buildInitializeIx(
       { pubkey: commitmentTree, isSigner: false, isWritable: true },
       { pubkey: zkbtcMint, isSigner: false, isWritable: false },
       { pubkey: poolVault, isSigner: false, isWritable: false },
-      { pubkey: frostVault, isSigner: false, isWritable: false },
+      { pubkey: depositVault, isSigner: false, isWritable: false },
       { pubkey: authority, isSigner: true, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
@@ -83,19 +83,19 @@ async function main() {
   );
   console.log(`✓ Pool Vault: ${poolVaultAccount.address.toBase58()}`);
 
-  // Create frost vault
-  console.log("Creating frost vault...");
-  const frostVaultAccount = await getOrCreateAssociatedTokenAccount(
+  // Create deposit vault
+  console.log("Creating deposit vault...");
+  const depositVaultAccount = await getOrCreateAssociatedTokenAccount(
     connection, authority, zkbtcMint, authority.publicKey, false,
     undefined, undefined, TOKEN_2022_PROGRAM_ID
   );
-  console.log(`✓ Frost Vault: ${frostVaultAccount.address.toBase58()}`);
+  console.log(`✓ Deposit Vault: ${depositVaultAccount.address.toBase58()}`);
 
   // Initialize UTXOpia
   console.log("\nInitializing UTXOpia pool...");
   const ix = buildInitializeIx(
     poolStatePda, commitmentTreePda, zkbtcMint,
-    poolVaultAccount.address, frostVaultAccount.address,
+    poolVaultAccount.address, depositVaultAccount.address,
     authority.publicKey, PROGRAM_ID, poolBump, treeBump
   );
   const tx = new Transaction().add(ix);

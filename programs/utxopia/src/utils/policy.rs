@@ -1,10 +1,8 @@
 //! Pure on-chain signing policy for redemptions.
 //!
-//! This is the *minimal* port of `frost_server/src/policy.rs` — only the
-//! validation predicates that (a) are computable from on-chain data alone,
-//! and (b) are not already covered elsewhere in `complete_redemption`.
-//!
-//! Surviving from the FROST policy:
+//! This module keeps only validation predicates that (a) are computable from
+//! on-chain data alone, and (b) are not already covered elsewhere in
+//! `complete_redemption`:
 //! - amount limit (max gross redemption per signing operation)
 //! - fee limit  (max miner fee per signing operation)
 //! - paused state (pool-wide kill switch)
@@ -34,10 +32,8 @@ pub const MAX_MINER_FEE_SATS: u64 = 50_000;
 /// Run all pre-CPI signing policy checks.
 ///
 /// Called from `complete_redemption` *before* the Ika `approve_message` CPI.
-/// Symmetric with the FROST signers' independent verification: even though
-/// Ika is one entity, we still gate the on-chain CPI so that a compromised
-/// backend cannot drain funds by submitting forged sighashes for sky-high
-/// amounts.
+/// Gate the on-chain Ika CPI so a compromised backend cannot drain funds by
+/// submitting forged sighashes for sky-high amounts.
 pub fn check_redemption_signing(
     pool: &PoolState,
     amount_sats: u64,

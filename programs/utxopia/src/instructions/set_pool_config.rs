@@ -1,20 +1,18 @@
 //! Set pool config instruction (disc 2)
 //!
 //! Authority-only initialization instruction for the pool's BTC scriptPubKey
-//! and either the legacy FROST group public key or the new Ika dWallet custody
-//! fields in the PoolConfig PDA.
+//! and Ika dWallet custody fields in the PoolConfig PDA.
 //!
 //! PoolConfig is custody-critical: the pool script and Ika dWallet define
 //! where BTC is controlled. This instruction creates and initializes the PDA
 //! once; it does not mutate an initialized config.
 //!
-//! Instruction Data Layout (all post-script fields optional, append-only):
+//! Instruction Data Layout:
 //! - [0]                pool_script_len: u8 (max 34)
 //! - [1..1+N]           pool_script:    [u8; N]
-//! - [+32]              group_pub_key: [u8; 32]              (optional, legacy FROST)
-//! - [+32]              ika_dwallet:   [u8; 32]              (optional, Ika)
-//! - [+32]              ika_dwallet_xonly_pubkey: [u8; 32]   (optional, Ika)
-//! - [+1]               cpi_authority_bump: u8               (optional, Ika)
+//! - [+32]              ika_dwallet:   [u8; 32]
+//! - [+32]              ika_dwallet_xonly_pubkey: [u8; 32]
+//! - [+1]               cpi_authority_bump: u8
 //!
 //! Accounts:
 //! 0. pool_state       (read)
@@ -68,7 +66,7 @@ pub fn process_set_pool_config(
         }
     }
 
-    // Parse instruction data: pool_script_len(1) + pool_script(N) + optional group_pub_key(32)
+    // Parse instruction data: pool_script_len(1) + pool_script(N) + Ika custody fields.
     if data.is_empty() {
         return Err(ProgramError::InvalidInstructionData);
     }
@@ -81,52 +79,26 @@ pub fn process_set_pool_config(
     }
     let pool_script = &data[1..1 + script_len];
 
-    // Optional fields after pool_script: append-only.
-    // Each subsequent field requires the previous one to be present.
-    let mut cursor = 1 + script_len;
-
-    let group_pub_key: Option<[u8; 32]> = if data.len() >= cursor + 32 {
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&data[cursor..cursor + 32]);
-        cursor += 32;
-        Some(key)
-    } else {
-        None
-    };
-
-    let ika_dwallet: Option<[u8; 32]> = if data.len() >= cursor + 32 {
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&data[cursor..cursor + 32]);
-        cursor += 32;
-        Some(key)
-    } else {
-        None
-    };
-
-    let ika_dwallet_xonly: Option<[u8; 32]> = if data.len() >= cursor + 32 {
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&data[cursor..cursor + 32]);
-        cursor += 32;
-        Some(key)
-    } else {
-        None
-    };
-
-    let cpi_authority_bump: Option<u8> = if data.len() > cursor {
-        let bump = data[cursor];
-        cursor += 1;
-        Some(bump)
-    } else {
-        None
-    };
-    if cursor != data.len() {
+    const IKA_TAIL_LEN: usize = 32 + 32 + 1;
+    if data.len() != 1 + script_len + IKA_TAIL_LEN {
         return Err(ProgramError::InvalidInstructionData);
     }
-    validate_ika_fields(
-        ika_dwallet.as_ref(),
-        ika_dwallet_xonly.as_ref(),
-        cpi_authority_bump,
-    )?;
+
+    let mut cursor = 1 + script_len;
+
+    let mut ika_dwallet = [0u8; 32];
+    ika_dwallet.copy_from_slice(&data[cursor..cursor + 32]);
+    cursor += 32;
+
+    let mut ika_dwallet_xonly = [0u8; 32];
+    ika_dwallet_xonly.copy_from_slice(&data[cursor..cursor + 32]);
+    cursor += 32;
+
+    let cpi_authority_bump = data[cursor];
+
+    if ika_dwallet == [0u8; 32] || ika_dwallet_xonly == [0u8; 32] {
+        return Err(ProgramError::InvalidInstructionData);
+    }
 
     // Verify PoolConfig PDA
     let config_seeds: &[&[u8]] = &[PoolConfig::SEED];
@@ -156,9 +128,8 @@ pub fn process_set_pool_config(
         apply_fields(
             config,
             pool_script,
-            group_pub_key.as_ref(),
-            ika_dwallet.as_ref(),
-            ika_dwallet_xonly.as_ref(),
+            &ika_dwallet,
+            &ika_dwallet_xonly,
             cpi_authority_bump,
         )?;
     } else {
@@ -194,9 +165,8 @@ pub fn process_set_pool_config(
         apply_fields(
             config,
             pool_script,
-            group_pub_key.as_ref(),
-            ika_dwallet.as_ref(),
-            ika_dwallet_xonly.as_ref(),
+            &ika_dwallet,
+            &ika_dwallet_xonly,
             cpi_authority_bump,
         )?;
     }
@@ -205,71 +175,17 @@ pub fn process_set_pool_config(
     Ok(())
 }
 
-/// Apply parsed instruction fields to the PoolConfig PDA. Each `Option`
-/// is "set if present" — passing `None` leaves the existing value alone.
 #[inline]
 fn apply_fields(
     config: &mut PoolConfig,
     pool_script: &[u8],
-    group_pub_key: Option<&[u8; 32]>,
-    ika_dwallet: Option<&[u8; 32]>,
-    ika_dwallet_xonly: Option<&[u8; 32]>,
-    cpi_authority_bump: Option<u8>,
+    ika_dwallet: &[u8; 32],
+    ika_dwallet_xonly: &[u8; 32],
+    cpi_authority_bump: u8,
 ) -> ProgramResult {
     config.set_pool_script(pool_script)?;
-    if let Some(key) = group_pub_key {
-        config.set_group_pub_key(key);
-    }
-    if let Some(key) = ika_dwallet {
-        config.set_ika_dwallet(key);
-    }
-    if let Some(key) = ika_dwallet_xonly {
-        config.set_ika_dwallet_xonly_pubkey(key);
-    }
-    if let Some(bump) = cpi_authority_bump {
-        config.set_cpi_authority_bump(bump);
-    }
+    config.set_ika_dwallet(ika_dwallet);
+    config.set_ika_dwallet_xonly_pubkey(ika_dwallet_xonly);
+    config.set_cpi_authority_bump(cpi_authority_bump);
     Ok(())
-}
-
-#[inline]
-fn validate_ika_fields(
-    ika_dwallet: Option<&[u8; 32]>,
-    ika_dwallet_xonly: Option<&[u8; 32]>,
-    cpi_authority_bump: Option<u8>,
-) -> ProgramResult {
-    let any_ika =
-        ika_dwallet.is_some() || ika_dwallet_xonly.is_some() || cpi_authority_bump.is_some();
-    if !any_ika {
-        return Ok(());
-    }
-    let Some(dwallet) = ika_dwallet else {
-        return Err(ProgramError::InvalidInstructionData);
-    };
-    let Some(xonly) = ika_dwallet_xonly else {
-        return Err(ProgramError::InvalidInstructionData);
-    };
-    if cpi_authority_bump.is_none() || *dwallet == [0u8; 32] || *xonly == [0u8; 32] {
-        return Err(ProgramError::InvalidInstructionData);
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn ika_fields_are_all_or_nothing() {
-        let dwallet = [1u8; 32];
-        let xonly = [2u8; 32];
-
-        assert!(validate_ika_fields(None, None, None).is_ok());
-        assert!(validate_ika_fields(Some(&dwallet), Some(&xonly), Some(255)).is_ok());
-        assert!(validate_ika_fields(Some(&dwallet), None, Some(255)).is_err());
-        assert!(validate_ika_fields(Some(&dwallet), Some(&xonly), None).is_err());
-        assert!(validate_ika_fields(None, Some(&xonly), Some(255)).is_err());
-        assert!(validate_ika_fields(Some(&[0u8; 32]), Some(&xonly), Some(255)).is_err());
-        assert!(validate_ika_fields(Some(&dwallet), Some(&[0u8; 32]), Some(255)).is_err());
-    }
 }

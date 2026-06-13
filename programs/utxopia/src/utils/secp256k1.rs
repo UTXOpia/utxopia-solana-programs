@@ -8,7 +8,7 @@
 //! The trick: ecrecover(hash, recovery_id, (r, s)) returns pubkey where
 //!   pubkey = (-hash/r)*G + (s/r)*R
 //!
-//! Setting R = P (groupPubKey), r = s = P.x, hash = -(tweak * P.x) mod n:
+//! Setting R = P (internal key), r = s = P.x, hash = -(tweak * P.x) mod n:
 //!   pubkey = tweak*G + P = expected output key
 
 use pinocchio::program_error::ProgramError;
@@ -150,39 +150,39 @@ pub fn compute_taptweak_hash(internal_key: &[u8; 32], commitment: &[u8; 32]) -> 
 // Taproot Output Key Verification (ecrecover trick)
 // ============================================================================
 
-/// Verify that `expected_output_key` equals `x_only(groupPubKey + H_TapTweak(groupPubKey || npk) * G)`
+/// Verify that `expected_output_key` equals `x_only(internal_key + H_TapTweak(internal_key || npk) * G)`
 ///
 /// Uses sol_secp256k1_recover syscall to compute the point addition efficiently:
 ///   ecrecover(hash, 0, (P.x, P.x)) with hash = -(tweak * P.x) mod n
 ///   → returns tweak*G + P
 ///
 /// # Arguments
-/// * `group_pub_key` - 32-byte x-only FROST group public key (big-endian)
+/// * `internal_key` - 32-byte x-only Taproot internal key (big-endian)
 /// * `npk` - 32-byte note public key (big-endian)
 /// * `expected_output_key` - 32-byte x-only key from deposit TX P2TR output (big-endian)
 ///
 /// # Returns
 /// Ok(()) if verification passes, Err otherwise
 pub fn verify_taproot_output_key(
-    group_pub_key: &[u8; 32],
+    internal_key: &[u8; 32],
     npk: &[u8; 32],
     expected_output_key: &[u8; 32],
 ) -> Result<(), ProgramError> {
-    // 1. Compute tweak = H_TapTweak(groupPubKey || npk)
-    let tweak = compute_taptweak_hash(group_pub_key, npk);
+    // 1. Compute tweak = H_TapTweak(internal_key || npk)
+    let tweak = compute_taptweak_hash(internal_key, npk);
 
-    verify_taproot_tweak(group_pub_key, &tweak, expected_output_key)
+    verify_taproot_tweak(internal_key, &tweak, expected_output_key)
 }
 
 /// Lower-level verification: given a precomputed tweak, verify the output key.
 /// Separated so it can be reused for script-path Taproot (where tweak includes merkle root).
 pub fn verify_taproot_tweak(
-    group_pub_key: &[u8; 32],
+    internal_key: &[u8; 32],
     tweak: &[u8; 32],
     expected_output_key: &[u8; 32],
 ) -> Result<(), ProgramError> {
     let n = u256_from_be(&SECP256K1_N);
-    let r = u256_from_be(group_pub_key);
+    let r = u256_from_be(internal_key);
     let t = u256_from_be(tweak);
 
     // Validate r < n (extremely rare for r >= n, but check for safety)
@@ -200,10 +200,10 @@ pub fn verify_taproot_tweak(
     let hash = u256_negmod(&tweak_times_r, &n);
     let hash_bytes = u256_to_be(&hash);
 
-    // 3. Build signature: r || s where r = s = group_pub_key.x
+    // 3. Build signature: r || s where r = s = internal_key.x
     let mut signature = [0u8; 64];
-    signature[0..32].copy_from_slice(group_pub_key);
-    signature[32..64].copy_from_slice(group_pub_key);
+    signature[0..32].copy_from_slice(internal_key);
+    signature[32..64].copy_from_slice(internal_key);
 
     // 4. Call ecrecover: recovery_id = 0 (even y, per BIP-340 lift_x)
     let mut recovered = [0u8; 64]; // x(32) || y(32), big-endian
@@ -435,15 +435,15 @@ mod tests {
     #[test]
     fn test_verify_taproot_output_key_with_known_vectors() {
         // Use the SDK's deriveTaprootAddress logic:
-        // groupPubKey = secp256k1 generator x-coordinate (used as default internal key in SDK)
+        // internal_key = secp256k1 generator x-coordinate
         // npk = some 32-byte value
-        // tweak = H_TapTweak(groupPubKey || npk)
-        // outputKey = (groupPubKey_point + tweak*G).x
+        // tweak = H_TapTweak(internal_key || npk)
+        // outputKey = (internal_key_point + tweak*G).x
         //
         // We verify the ecrecover trick produces the correct result by using
-        // a known FROST group pubkey and checking the math is self-consistent.
+        // a known internal key and checking the math is self-consistent.
 
-        let group_pub_key: [u8; 32] = [
+        let internal_key: [u8; 32] = [
             0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB, 0xAC, 0x55, 0xA0, 0x62, 0x95, 0xCE, 0x87,
             0x0B, 0x07, 0x02, 0x9B, 0xFC, 0xDB, 0x2D, 0xCE, 0x28, 0xD9, 0x59, 0xF2, 0x81, 0x5B,
             0x16, 0xF8, 0x17, 0x98,
@@ -451,12 +451,12 @@ mod tests {
         let npk = [0x42u8; 32];
 
         // Compute tweak
-        let tweak = compute_taptweak_hash(&group_pub_key, &npk);
+        let tweak = compute_taptweak_hash(&internal_key, &npk);
 
         // Use ecrecover to compute the expected output key
         // (this tests the internal consistency of the ecrecover trick)
         let n = u256_from_be(&SECP256K1_N);
-        let r = u256_from_be(&group_pub_key);
+        let r = u256_from_be(&internal_key);
         let t = u256_from_be(&tweak);
 
         let tweak_times_r = u256_mulmod(&t, &r, &n);
@@ -464,8 +464,8 @@ mod tests {
         let hash_bytes = u256_to_be(&hash);
 
         let mut signature = [0u8; 64];
-        signature[0..32].copy_from_slice(&group_pub_key);
-        signature[32..64].copy_from_slice(&group_pub_key);
+        signature[0..32].copy_from_slice(&internal_key);
+        signature[32..64].copy_from_slice(&internal_key);
 
         let mut recovered = [0u8; 64];
         test_secp256k1_recover(&hash_bytes, 0, &signature, &mut recovered).unwrap();
@@ -474,7 +474,7 @@ mod tests {
         let expected_output_key: [u8; 32] = recovered[0..32].try_into().unwrap();
 
         // Now verify using the public API
-        let result = verify_taproot_output_key(&group_pub_key, &npk, &expected_output_key);
+        let result = verify_taproot_output_key(&internal_key, &npk, &expected_output_key);
         assert!(
             result.is_ok(),
             "Taproot verification should pass with correct output key"
@@ -483,7 +483,7 @@ mod tests {
         // Verify with wrong output key should fail
         let mut wrong_key = expected_output_key;
         wrong_key[0] ^= 0xFF;
-        let result = verify_taproot_output_key(&group_pub_key, &npk, &wrong_key);
+        let result = verify_taproot_output_key(&internal_key, &npk, &wrong_key);
         assert!(
             result.is_err(),
             "Taproot verification should fail with wrong output key"
@@ -492,7 +492,7 @@ mod tests {
 
     #[test]
     fn test_verify_rejects_wrong_npk() {
-        let group_pub_key: [u8; 32] = [
+        let internal_key: [u8; 32] = [
             0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB, 0xAC, 0x55, 0xA0, 0x62, 0x95, 0xCE, 0x87,
             0x0B, 0x07, 0x02, 0x9B, 0xFC, 0xDB, 0x2D, 0xCE, 0x28, 0xD9, 0x59, 0xF2, 0x81, 0x5B,
             0x16, 0xF8, 0x17, 0x98,
@@ -501,22 +501,22 @@ mod tests {
         let npk_fake = [0x43u8; 32];
 
         // Compute output key from real npk
-        let tweak = compute_taptweak_hash(&group_pub_key, &npk_real);
+        let tweak = compute_taptweak_hash(&internal_key, &npk_real);
         let n = u256_from_be(&SECP256K1_N);
-        let r = u256_from_be(&group_pub_key);
+        let r = u256_from_be(&internal_key);
         let t = u256_from_be(&tweak);
         let tweak_times_r = u256_mulmod(&t, &r, &n);
         let hash = u256_negmod(&tweak_times_r, &n);
         let hash_bytes = u256_to_be(&hash);
         let mut signature = [0u8; 64];
-        signature[0..32].copy_from_slice(&group_pub_key);
-        signature[32..64].copy_from_slice(&group_pub_key);
+        signature[0..32].copy_from_slice(&internal_key);
+        signature[32..64].copy_from_slice(&internal_key);
         let mut recovered = [0u8; 64];
         test_secp256k1_recover(&hash_bytes, 0, &signature, &mut recovered).unwrap();
         let real_output_key: [u8; 32] = recovered[0..32].try_into().unwrap();
 
         // Verification with wrong npk should fail
-        let result = verify_taproot_output_key(&group_pub_key, &npk_fake, &real_output_key);
+        let result = verify_taproot_output_key(&internal_key, &npk_fake, &real_output_key);
         assert!(result.is_err(), "Wrong npk should fail verification");
     }
 }

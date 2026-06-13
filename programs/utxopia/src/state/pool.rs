@@ -21,7 +21,7 @@ pub struct PoolState {
     /// Padding for alignment
     _padding: u8,
 
-    /// Authority that can update state (FROST relayer)
+    /// Authority that can update pool state
     pub authority: [u8; 32],
 
     /// zkBTC Token-2022 mint address
@@ -30,8 +30,8 @@ pub struct PoolState {
     /// Pool vault that holds zkBTC (PDA-controlled)
     pub pool_vault: [u8; 32],
 
-    /// FROST vault that holds zkBTC pending Privacy Cash deposit
-    pub frost_vault: [u8; 32],
+    /// Deposit vault used by the bridge flow
+    pub deposit_vault: [u8; 32],
 
     /// Total number of deposits recorded (u64 as bytes)
     deposit_count: [u8; 8],
@@ -79,17 +79,15 @@ pub struct PoolState {
     pending_execute_after: [u8; 8],
 
     /// Percentage fee on all deposits (basis points, u16 LE). E.g., 50 = 0.5%.
-    /// Fresh deploy: replaces old service_fee_bps field.
     deposit_fee_bps: [u8; 2],
 
     /// Percentage fee on all withdrawals (basis points, u16 LE). E.g., 100 = 1.0%.
-    /// Fresh deploy: replaces old pending_service_fee_bps field.
     withdrawal_fee_bps: [u8; 2],
 
-    /// Sum of all Unspent UTXO amounts (satoshis). Carved from _reserved.
+    /// Sum of all Unspent UTXO amounts (satoshis).
     total_btc_held: [u8; 8],
 
-    /// Number of Unspent UTXOs. Carved from _reserved.
+    /// Number of Unspent UTXOs.
     utxo_count: [u8; 2],
 
     /// Active commitment tree index for tree rotation.

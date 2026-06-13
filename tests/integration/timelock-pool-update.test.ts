@@ -42,7 +42,7 @@ const DISC_EXECUTE_POOL_UPDATE = 4;
 const DISC_CANCEL_POOL_UPDATE = 5;
 
 // PoolState offsets (must match pool.rs repr(C) layout)
-// 0:disc 1:bump 2:flags 3:pad 4:authority(32) 36:mint(32) 68:poolVault(32) 100:frostVault(32)
+// 0:disc 1:bump 2:flags 3:pad 4:authority(32) 36:mint(32) 68:poolVault(32) 100:depositVault(32)
 // 132:deposit_count(8) 140:total_minted(8) 148:total_burned(8) 156:pending_redemptions(8)
 // 164:last_update(8) 172:min_deposit(8) 180:max_deposit(8) 188:total_shielded(8)
 // 196:service_fee_sats(8) 204:fee_pool(8) 212:pending_min(8) 220:pending_max(8)
@@ -77,15 +77,17 @@ function buildInitializeIx(
   commitmentTree: PublicKey,
   zkbtcMint: PublicKey,
   poolVault: PublicKey,
-  frostVault: PublicKey,
+  depositVault: PublicKey,
   authority: PublicKey,
   poolBump: number,
   treeBump: number,
 ): TransactionInstruction {
-  const data = Buffer.alloc(3);
+  const data = Buffer.alloc(7);
   data[0] = DISC_INITIALIZE;
   data[1] = poolBump;
   data[2] = treeBump;
+  data.writeUInt16LE(0, 3); // deposit_fee_bps
+  data.writeUInt16LE(0, 5); // withdrawal_fee_bps;
 
   return new TransactionInstruction({
     keys: [
@@ -93,7 +95,7 @@ function buildInitializeIx(
       { pubkey: commitmentTree, isSigner: false, isWritable: true },
       { pubkey: zkbtcMint, isSigner: false, isWritable: false },
       { pubkey: poolVault, isSigner: false, isWritable: false },
-      { pubkey: frostVault, isSigner: false, isWritable: false },
+      { pubkey: depositVault, isSigner: false, isWritable: false },
       { pubkey: authority, isSigner: true, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
@@ -204,7 +206,7 @@ describe("Timelocked Pool Update E2E", () => {
   let treeBump: number;
   let zkbtcMint: PublicKey;
   let poolVault: PublicKey;
-  let frostVault: PublicKey;
+  let depositVault: PublicKey;
   let initialized = false;
 
   beforeAll(async () => {
@@ -253,7 +255,7 @@ describe("Timelocked Pool Update E2E", () => {
       undefined,
       TOKEN_2022_PROGRAM_ID,
     );
-    frostVault = await createAccount(
+    depositVault = await createAccount(
       connection,
       authority,
       zkbtcMint,
@@ -269,7 +271,7 @@ describe("Timelocked Pool Update E2E", () => {
       commitmentTreePDA,
       zkbtcMint,
       poolVault,
-      frostVault,
+      depositVault,
       authority.publicKey,
       poolBump,
       treeBump,

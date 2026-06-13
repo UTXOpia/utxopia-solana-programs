@@ -1,8 +1,7 @@
 //! Pool configuration PDA — extended fields that don't fit in PoolState
 //!
-//! Stores the pool's BTC scriptPubKey (P2TR) and FROST group public key
-//! on-chain for trustless verification in `complete_redemption` and
-//! `verify_deposit`.
+//! Stores the pool's BTC scriptPubKey (P2TR) and Ika custody keys on-chain for
+//! trustless verification in `complete_redemption` and `verify_deposit`.
 //!
 //! PDA seeds: ["pool_config"]
 
@@ -11,13 +10,7 @@ use pinocchio::program_error::ProgramError;
 /// Discriminator for PoolConfig account
 pub const POOL_CONFIG_DISCRIMINATOR: u8 = 0x0A;
 
-/// Pool configuration account (zero-copy layout, 161 bytes)
-///
-/// Field history:
-/// - `group_pub_key` is the legacy FROST group key. New pools (Ika-controlled)
-///   leave it zero; `verify_deposit` falls back to the Ika x-only pubkey.
-/// - `ika_dwallet`, `ika_dwallet_xonly_pubkey`, `cpi_authority_bump` are the
-///   Ika-era custody fields (2026-05).
+/// Pool configuration account (zero-copy layout, 129 bytes)
 #[repr(C)]
 pub struct PoolConfig {
     /// Account discriminator (1 byte)
@@ -28,9 +21,6 @@ pub struct PoolConfig {
 
     /// Pool wallet's BTC scriptPubKey (P2TR = 0x5120 + 32-byte x-only pubkey)
     pub pool_script: [u8; 34],
-
-    /// FROST group x-only public key (legacy; zero for Ika-controlled pools)
-    pub group_pub_key: [u8; 32],
 
     /// Solana account address of the Ika dWallet controlling pool BTC custody
     pub ika_dwallet: [u8; 32],
@@ -46,7 +36,7 @@ pub struct PoolConfig {
 }
 
 impl PoolConfig {
-    pub const LEN: usize = core::mem::size_of::<Self>(); // 161 bytes
+    pub const LEN: usize = core::mem::size_of::<Self>(); // 129 bytes
     pub const SEED: &'static [u8] = b"pool_config";
 
     /// Maximum pool_script length (P2TR scriptPubKey)
@@ -104,23 +94,6 @@ impl PoolConfig {
         Ok(())
     }
 
-    /// Get the FROST group public key (returns zeros if not set)
-    pub fn get_group_pub_key(&self) -> &[u8; 32] {
-        &self.group_pub_key
-    }
-
-    /// Check if group_pub_key is set (non-zero)
-    pub fn has_group_pub_key(&self) -> bool {
-        self.group_pub_key != [0u8; 32]
-    }
-
-    /// Set the FROST group public key
-    pub fn set_group_pub_key(&mut self, key: &[u8; 32]) {
-        self.group_pub_key = *key;
-    }
-
-    // ── Ika-era accessors ──
-
     /// Get the Ika dWallet's Solana account address (zeros if not set).
     pub fn get_ika_dwallet(&self) -> &[u8; 32] {
         &self.ika_dwallet
@@ -163,9 +136,9 @@ mod tests {
 
     #[test]
     fn test_pool_config_size() {
-        // 1 disc + 1 len + 34 script + 32 group + 32 ika_dwallet
-        // + 32 ika_xonly + 1 bump + 28 reserved = 161
-        assert_eq!(PoolConfig::LEN, 161);
+        // 1 disc + 1 len + 34 script + 32 ika_dwallet
+        // + 32 ika_xonly + 1 bump + 28 reserved = 129
+        assert_eq!(PoolConfig::LEN, 129);
     }
 
     #[test]
@@ -175,7 +148,6 @@ mod tests {
 
         assert_eq!(config.pool_script_len, 0);
         assert_eq!(config.get_pool_script(), &[] as &[u8]);
-        assert!(!config.has_group_pub_key());
 
         // P2TR script: 0x5120 + 32 bytes
         let mut script = [0u8; 34];
@@ -186,12 +158,6 @@ mod tests {
         config.set_pool_script(&script).unwrap();
         assert_eq!(config.pool_script_len, 34);
         assert_eq!(config.get_pool_script(), &script);
-
-        // Group pub key
-        let key = [0x42u8; 32];
-        config.set_group_pub_key(&key);
-        assert!(config.has_group_pub_key());
-        assert_eq!(config.get_group_pub_key(), &key);
     }
 
     #[test]
@@ -210,11 +176,9 @@ mod tests {
             let config = PoolConfig::init(&mut buf).unwrap();
             let script = [0x51, 0x20, 0x01, 0x02];
             config.set_pool_script(&script).unwrap();
-            config.set_group_pub_key(&[0xBB; 32]);
         }
         let config = PoolConfig::from_bytes(&buf).unwrap();
         assert_eq!(config.get_pool_script(), &[0x51, 0x20, 0x01, 0x02]);
-        assert_eq!(config.get_group_pub_key(), &[0xBB; 32]);
     }
 
     #[test]
@@ -233,9 +197,6 @@ mod tests {
         assert_eq!(config.get_ika_dwallet_xonly_pubkey(), &[0x42u8; 32]);
         assert_eq!(config.get_cpi_authority_bump(), 255);
         assert!(config.has_ika_dwallet());
-
-        // group_pub_key remains zero — these are independent fields.
-        assert!(!config.has_group_pub_key());
     }
 
     #[test]

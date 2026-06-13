@@ -110,14 +110,14 @@ impl VerifyDepositData {
 /// 10. `[writable]` DepositIntent PDA
 /// 11. `[writable]` Deposit receipt PDA (prevents duplicate verification)
 /// 12. `[]`         TokenConfig PDA (for token_id)
-/// 13. `[]`         PoolConfig PDA (optional, for Taproot npk verification)
-/// 14. `[]`         Deposit TX buffer (ChadBuffer, optional, for Taproot verification)
+/// 13. `[]`         PoolConfig PDA (for Taproot npk verification)
+/// 14. `[]`         Deposit TX buffer (ChadBuffer, for Taproot verification)
 pub fn process_verify_deposit(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     data: &[u8],
 ) -> ProgramResult {
-    if accounts.len() < 13 {
+    if accounts.len() < 15 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
@@ -287,7 +287,7 @@ pub fn process_verify_deposit(
     // The txid-only check is insufficient when a BTC transaction has
     // multiple outputs. Require the raw deposit tx, identify the exact credited
     // output, then prove the sweep spends that output index.
-    if ix_data.deposit_tx_size == 0 || accounts.len() < 15 {
+    if ix_data.deposit_tx_size == 0 {
         return Err(UTXOpiaError::InvalidSpvProof.into());
     }
     let pool_config_info = &accounts[13];
@@ -296,18 +296,16 @@ pub fn process_verify_deposit(
     validate_program_owner(pool_config_info, program_id)?;
     crate::utils::chadbuffer::validate_chadbuffer_owner(deposit_tx_buffer_info)?;
 
-    let group_pub_key = {
+    let ika_xonly = {
         let config_data = pool_config_info.try_borrow_data()?;
-        if config_data.len() >= PoolConfig::LEN && config_data[0] == POOL_CONFIG_DISCRIMINATOR {
-            let config = PoolConfig::from_bytes(&config_data)?;
-            if config.has_group_pub_key() {
-                Some(*config.get_group_pub_key())
-            } else {
-                None
-            }
-        } else {
-            None
+        if config_data.len() < PoolConfig::LEN || config_data[0] != POOL_CONFIG_DISCRIMINATOR {
+            return Err(ProgramError::UninitializedAccount);
         }
+        let config = PoolConfig::from_bytes(&config_data)?;
+        if !config.has_ika_dwallet() || *config.get_ika_dwallet_xonly_pubkey() == [0u8; 32] {
+            return Err(UTXOpiaError::IkaCpiAccountsMissing.into());
+        }
+        *config.get_ika_dwallet_xonly_pubkey()
     };
 
     let deposit_buffer_data = deposit_tx_buffer_info
@@ -324,23 +322,16 @@ pub fn process_verify_deposit(
     let deposit_parsed =
         ParsedTransaction::parse(deposit_raw_tx).map_err(|_| UTXOpiaError::InvalidSpvProof)?;
 
-    let deposit_vout = if let Some(gpk) = group_pub_key {
-        let mut matched_vout: Option<u32> = None;
-        for (vout, output) in deposit_parsed.outputs().enumerate() {
-            if let Some(output_key) = extract_p2tr_output_key(output.script_pubkey) {
-                if verify_taproot_output_key(&gpk, &npk, &output_key).is_ok() {
-                    matched_vout = Some(vout as u32);
-                    break;
-                }
+    let mut matched_vout: Option<u32> = None;
+    for (vout, output) in deposit_parsed.outputs().enumerate() {
+        if let Some(output_key) = extract_p2tr_output_key(output.script_pubkey) {
+            if verify_taproot_output_key(&ika_xonly, &npk, &output_key).is_ok() {
+                matched_vout = Some(vout as u32);
+                break;
             }
         }
-        matched_vout.ok_or(UTXOpiaError::TaprootVerificationFailed)?
-    } else {
-        let (_output, vout) = deposit_parsed
-            .find_deposit_output_with_vout()
-            .ok_or(UTXOpiaError::InvalidSpvProof)?;
-        vout
-    };
+    }
+    let deposit_vout = matched_vout.ok_or(UTXOpiaError::TaprootVerificationFailed)?;
 
     if !sweep_parsed.find_input_with_prev_outpoint(&ix_data.deposit_txid, deposit_vout) {
         return Err(UTXOpiaError::InvalidSpvProof.into());

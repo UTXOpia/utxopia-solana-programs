@@ -63,7 +63,7 @@ function buildInitializeIx(
   commitmentTree: PublicKey,
   zkbtcMint: PublicKey,
   poolVault: PublicKey,
-  frostVault: PublicKey,
+  depositVault: PublicKey,
   authority: PublicKey,
   programId: PublicKey,
   poolBump: number,
@@ -82,7 +82,7 @@ function buildInitializeIx(
       { pubkey: commitmentTree, isSigner: false, isWritable: true },
       { pubkey: zkbtcMint, isSigner: false, isWritable: false },
       { pubkey: poolVault, isSigner: false, isWritable: false },
-      { pubkey: frostVault, isSigner: false, isWritable: false },
+      { pubkey: depositVault, isSigner: false, isWritable: false },
       { pubkey: authority, isSigner: true, isWritable: true },
       { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
     ],
@@ -181,9 +181,9 @@ async function main() {
   );
   console.log(`✓ Pool Vault: ${poolVaultAccount.address.toBase58()}`);
 
-  // Create frost vault
-  console.log("Creating frost vault...");
-  const frostVaultAccount = await getOrCreateAssociatedTokenAccount(
+  // Create deposit vault
+  console.log("Creating deposit vault...");
+  const depositVaultAccount = await getOrCreateAssociatedTokenAccount(
     connection,
     authority,
     zkbtcMint,
@@ -193,7 +193,7 @@ async function main() {
     undefined,
     TOKEN_2022_PROGRAM_ID
   );
-  console.log(`✓ Frost Vault: ${frostVaultAccount.address.toBase58()}`);
+  console.log(`✓ Deposit Vault: ${depositVaultAccount.address.toBase58()}`);
 
   // Initialize UTXOpia
   console.log("\nInitializing UTXOpia pool...");
@@ -202,7 +202,7 @@ async function main() {
     commitmentTreePda,
     zkbtcMint,
     poolVaultAccount.address,
-    frostVaultAccount.address,
+    depositVaultAccount.address,
     authority.publicKey,
     UTXOPIA_PROGRAM_ID,
     poolBump,

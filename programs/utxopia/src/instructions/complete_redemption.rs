@@ -448,7 +448,7 @@ pub fn process_complete_redemption(
     // --- Pure on-chain signing policy gate ---
     // Even though Ika is one entity (and pre-alpha is a single mock signer),
     // we still gate so a compromised backend cannot drain funds via forged
-    // sighashes. Symmetric with the FROST signers' independent verification.
+    // sighashes before the Ika signing approval.
     {
         let pool_data = pool_state_info.try_borrow_data()?;
         let pool = PoolState::from_bytes(&pool_data)?;

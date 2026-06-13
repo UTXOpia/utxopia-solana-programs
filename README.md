@@ -64,7 +64,6 @@ bun run test
 | 13 | TRANSACT | Private JoinSplit transfer |
 | 14 | UNSHIELD | JoinSplit unshield |
 | 15 | REDEEM | Proof-checked BTC withdrawal request |
-| 16 | RESERVED | Removed proofless request_redemption |
 | 17 | COMPLETE_REDEMPTION | Complete SPV-verified BTC payout |
 | 18 | MARK_PROCESSING | Reserve UTXOs for redemption signing |
 | 19 | CANCEL_REDEMPTION | Cancel pending/timed-out redemption |
@@ -72,6 +71,9 @@ bun run test
 | 24 | REGISTER_DEPOSIT_INTENT | Register OP_RETURN-free deposit intent |
 | 25 | VERIFY_DEPOSIT | Verify OP_RETURN-free deposit |
 | 27 | APPROVE_REDEMPTION_SIGNING | Approve Ika BTC signing |
+
+See [SDK and Frontend Migration](docs/SDK_FRONTEND_MIGRATION.md) for the
+current client-facing account layouts and instruction builder changes.
 
 ## Privacy Model
 

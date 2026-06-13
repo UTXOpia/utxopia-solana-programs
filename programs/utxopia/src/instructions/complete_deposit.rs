@@ -120,7 +120,7 @@ impl CompleteDepositData {
 /// 11. `[writable]` Deposit receipt PDA (prevents duplicate verification)
 /// 12. `[writable]` UTXO record PDA (tracks pool BTC UTXO)
 /// 13. `[writable]` TokenConfig PDA (for token_id, fees, total_shielded tracking)
-/// 14. `[]` PoolConfig PDA (optional, enforces sweep output is pool-controlled)
+/// 14. `[]` PoolConfig PDA (enforces sweep output is pool-controlled)
 ///
 /// # Instruction data
 /// - CompleteDepositData (80 bytes, fixed)
@@ -129,7 +129,7 @@ pub fn process_complete_deposit(
     accounts: &[AccountInfo],
     data: &[u8],
 ) -> ProgramResult {
-    if accounts.len() < 14 {
+    if accounts.len() < 15 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
@@ -359,34 +359,23 @@ pub fn process_complete_deposit(
         Some(output)
     };
 
-    // Extract pool output amount and vout. In direct mode this is the user's
-    // deposit output to the Ika vault. If PoolConfig is supplied, require the
-    // output script to match its pool_script so the recorded UTXO is controlled
-    // by the configured pool/Ika wallet.
-    let (deposit_output, sweep_vout) = if accounts.len() >= 15 {
-        let pool_config_info = &accounts[14];
-        validate_program_owner(pool_config_info, program_id)?;
-        let config_data = pool_config_info.try_borrow_data()?;
-        if config_data.len() >= PoolConfig::LEN && config_data[0] == POOL_CONFIG_DISCRIMINATOR {
-            let config = PoolConfig::from_bytes(&config_data)?;
-            let pool_script = config.get_pool_script();
-            if !pool_script.is_empty() {
-                sweep_parsed
-                    .find_output_by_script(pool_script)
-                    .ok_or(UTXOpiaError::InvalidSpvProof)?
-            } else {
-                sweep_parsed
-                    .find_deposit_output_with_vout()
-                    .ok_or(UTXOpiaError::InvalidSpvProof)?
-            }
-        } else {
-            return Err(UTXOpiaError::IkaCpiAccountsMissing.into());
-        }
-    } else {
-        sweep_parsed
-            .find_deposit_output_with_vout()
-            .ok_or(UTXOpiaError::InvalidSpvProof)?
-    };
+    let pool_config_info = &accounts[14];
+    validate_program_owner(pool_config_info, program_id)?;
+    let config_data = pool_config_info.try_borrow_data()?;
+    if config_data.len() < PoolConfig::LEN || config_data[0] != POOL_CONFIG_DISCRIMINATOR {
+        return Err(UTXOpiaError::IkaCpiAccountsMissing.into());
+    }
+    let config = PoolConfig::from_bytes(&config_data)?;
+    let pool_script = config.get_pool_script();
+    if pool_script.is_empty() {
+        return Err(UTXOpiaError::IkaCpiAccountsMissing.into());
+    }
+
+    // Extract pool output amount and vout. The credited output must match the
+    // configured pool script so the recorded UTXO is controlled by Ika custody.
+    let (deposit_output, sweep_vout) = sweep_parsed
+        .find_output_by_script(pool_script)
+        .ok_or(UTXOpiaError::InvalidSpvProof)?;
     let amount_sats = deposit_output.value;
     let original_deposit_sats = if direct_to_pool {
         // The SPV-verified transaction is the user deposit itself. The pool

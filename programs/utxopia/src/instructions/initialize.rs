@@ -43,7 +43,7 @@ pub struct InitializeAccounts<'a> {
     pub commitment_tree: &'a AccountInfo,
     pub zkbtc_mint: &'a AccountInfo,
     pub pool_vault: &'a AccountInfo,
-    pub frost_vault: &'a AccountInfo,
+    pub deposit_vault: &'a AccountInfo,
     pub authority: &'a AccountInfo,
     pub system_program: &'a AccountInfo,
 }
@@ -58,7 +58,7 @@ impl<'a> InitializeAccounts<'a> {
         let commitment_tree = &accounts[1];
         let zkbtc_mint = &accounts[2];
         let pool_vault = &accounts[3];
-        let frost_vault = &accounts[4];
+        let deposit_vault = &accounts[4];
         let authority = &accounts[5];
         let system_program = &accounts[6];
 
@@ -72,7 +72,7 @@ impl<'a> InitializeAccounts<'a> {
             commitment_tree,
             zkbtc_mint,
             pool_vault,
-            frost_vault,
+            deposit_vault,
             authority,
             system_program,
         })
@@ -173,8 +173,8 @@ pub fn process_initialize(
             .copy_from_slice(accounts.zkbtc_mint.key().as_ref());
         pool.pool_vault
             .copy_from_slice(accounts.pool_vault.key().as_ref());
-        pool.frost_vault
-            .copy_from_slice(accounts.frost_vault.key().as_ref());
+        pool.deposit_vault
+            .copy_from_slice(accounts.deposit_vault.key().as_ref());
         pool.set_min_deposit(MIN_DEPOSIT_SATS);
         pool.set_max_deposit(MAX_DEPOSIT_SATS);
         pool.set_service_fee_base(2_000);

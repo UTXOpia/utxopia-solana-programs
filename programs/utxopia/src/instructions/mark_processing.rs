@@ -1,6 +1,6 @@
 //! Mark processing instruction — transitions a redemption from Pending to Processing
 //!
-//! Called by the pool authority before FROST signing begins.
+//! Called by the pool authority before Ika signing approval begins.
 //! Records the current slot for timeout tracking — if the redemption stays
 //! in Processing longer than REDEMPTION_TIMEOUT_SLOTS, the user can cancel it.
 //!

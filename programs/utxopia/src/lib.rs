@@ -44,7 +44,7 @@ pub const ID: Pubkey = [
     0x5d, 0x2a, 0x8e, 0x4c, 0x7b, 0x3a, 0x1f, 0x6d, 0x9c, 0x5e, 0x2b, 0x8f, 0x4a, 0x7d, 0x3c, 0x1e,
 ];
 
-/// Instruction discriminators — sequential 0-19, grouped by category
+/// Instruction discriminators grouped by category.
 pub mod instruction {
     // Core (0-2)
     pub const INITIALIZE: u8 = 0;
@@ -74,25 +74,13 @@ pub mod instruction {
     pub const UNSHIELD: u8 = 14;
     pub const REDEEM: u8 = 15;
 
-    // Redemption lifecycle (16-19)
-    // 16 was REQUEST_REDEMPTION. It is intentionally reserved because that
-    // legacy path did not verify a JoinSplit proof; use REDEEM instead.
-    pub const RESERVED_REQUEST_REDEMPTION: u8 = 16;
+    // Redemption lifecycle (17-19)
     pub const COMPLETE_REDEMPTION: u8 = 17;
     pub const MARK_PROCESSING: u8 = 18;
     pub const CANCEL_REDEMPTION: u8 = 19;
 
     // Tree management (20)
     pub const ROTATE_TREE: u8 = 20;
-
-    // Discriminators 21–23 + 26 were previously PoI / transact-with-PoI:
-    //   21 = UPDATE_ASSOCIATION_ROOT
-    //   22 = ATTEST_POI
-    //   23 = ATTEST_POI_HIDDEN
-    //   26 = TRANSACT_WITH_POI (Phase 3d-full prototype)
-    // All removed in favor of passive attestation (third-party screener
-    // signs per-commitment verdicts; chain stores a screener registry).
-    // The compliance design is documented in docs/COMPLIANCE.md.
 
     // OP_RETURN-free deposits (24-25).
     // Backend's deposit_tracker uses 24 to register a DepositIntent PDA before
@@ -102,13 +90,6 @@ pub mod instruction {
 
     // Ika pre-broadcast signing approval (27)
     pub const APPROVE_REDEMPTION_SIGNING: u8 = 27;
-
-    // Tree management (28) — create the active-index tree PDA when missing
-    // (migration aid for pools initialized under the legacy plain-seed scheme).
-    pub const INIT_TREE: u8 = 28;
-
-    // Custody migration (29) — repoint pool_script on an initialized PoolConfig.
-    pub const SET_POOL_SCRIPT: u8 = 29;
 }
 
 #[cfg(not(feature = "no-entrypoint"))]
@@ -165,8 +146,7 @@ pub fn process_instruction(
         instruction::TRANSACT => instructions::process_transact(program_id, accounts, data),
         instruction::UNSHIELD => instructions::process_unshield(program_id, accounts, data),
         instruction::REDEEM => instructions::process_redeem(program_id, accounts, data),
-        // Redemption lifecycle (17-19). Discriminator 16 is reserved/invalid;
-        // proof-checked BTC withdrawals enter through REDEEM.
+        // Redemption lifecycle (17-19)
         instruction::COMPLETE_REDEMPTION => {
             instructions::process_complete_redemption(program_id, accounts, data)
         }
@@ -176,12 +156,8 @@ pub fn process_instruction(
         instruction::CANCEL_REDEMPTION => {
             instructions::process_cancel_redemption(program_id, accounts, data)
         }
-        // Tree management (20, 28)
+        // Tree management (20)
         instruction::ROTATE_TREE => instructions::process_rotate_tree(program_id, accounts, data),
-        instruction::INIT_TREE => instructions::process_init_tree(program_id, accounts, data),
-        instruction::SET_POOL_SCRIPT => {
-            instructions::process_set_pool_script(program_id, accounts, data)
-        }
         // OP_RETURN-free deposits (24-25)
         instruction::REGISTER_DEPOSIT_INTENT => {
             instructions::process_register_deposit_intent(program_id, accounts, data)
@@ -261,7 +237,6 @@ mod tests {
             instruction::TRANSACT,
             instruction::UNSHIELD,
             instruction::REDEEM,
-            instruction::RESERVED_REQUEST_REDEMPTION,
             instruction::COMPLETE_REDEMPTION,
             instruction::MARK_PROCESSING,
             instruction::CANCEL_REDEMPTION,
