@@ -1,222 +1,271 @@
-# SDK and Frontend Migration
+# SDK and Frontend VK Registry Migration
 
-This guide covers the client-facing changes from the pre-launch Pinocchio cleanup.
-It applies to SDKs, frontends, relayers, scripts, and indexers that build UTXOpia
-instructions or parse UTXOpia accounts.
+This guide covers the migration from hardcoded JoinSplit Groth16 verification
+keys to on-chain `VkRegistry` accounts. It applies to SDKs, frontends, relayers,
+admin scripts, and deployment operators.
 
 ## Summary
 
-- `PoolConfig` is now Ika-only and is `129` bytes.
-- `set_pool_config` now requires all Ika custody fields in one strict payload.
-- `complete_deposit` and `verify_deposit` require `PoolConfig`.
-- `init_tree` and `set_pool_script` were removed from the program router.
-- `PoolState.frost_vault` was renamed to `deposit_vault`.
-- Discriminator `16` is no longer listed as a reserved SDK instruction.
+- JoinSplit VKs are no longer embedded in the program binary.
+- `VkRegistry` now stores the full verifier material: `vk_hash`, `delta_g2`,
+  and IC points.
+- `VkRegistry` account size changed from `256` bytes to `1060` bytes.
+- `init_vk_registry` and `update_vk_registry` now accept full VK material, not
+  only `vk_hash`.
+- `transact`, `unshield`, and `redeem` must pass the matching `VkRegistry` PDA
+  for the selected `(n_inputs, n_outputs)` proof shape.
 
-## Instruction Changes
+## PDA Derivation
 
-### `initialize` (`disc = 0`)
+Each JoinSplit shape has one registry PDA:
 
-The account order is unchanged, but rename account 4 in clients:
+```ts
+export function deriveVkRegistryPDA(
+  programId: PublicKey,
+  nInputs: number,
+  nOutputs: number,
+): [PublicKey, number] {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from("vk_registry"), Buffer.from([nInputs]), Buffer.from([nOutputs])],
+    programId,
+  );
+}
+```
+
+Do not use a global VK account. Always derive the registry from the exact proof
+shape used in the instruction.
+
+## Registry Payload
+
+`init_vk_registry` (`disc = 6`) and `update_vk_registry` (`disc = 7`) use the
+same data layout:
+
+```ts
+disc(1)
++ n_inputs(1)
++ n_outputs(1)
++ vk_hash(32)
++ delta_g2(128)
++ ic_len(1)
++ ic_points(64 * ic_len)
+```
+
+Validation rules:
+
+- `n_inputs >= 1`
+- `n_outputs >= 1`
+- `n_inputs + n_outputs <= 10`
+- `ic_len === 3 + n_inputs + n_outputs`
+- `vk_hash` is 32 bytes
+- `delta_g2` is 128 bytes
+- every IC point is 64 bytes
+- no trailing bytes
+
+Builder example:
+
+```ts
+export type JoinSplitVkMaterial = {
+  nInputs: number;
+  nOutputs: number;
+  vkHash: Buffer;
+  deltaG2: Buffer;
+  ic: Buffer[];
+};
+
+export function buildVkRegistryData(
+  discriminator: 6 | 7,
+  vk: JoinSplitVkMaterial,
+): Buffer {
+  if (vk.nInputs < 1 || vk.nOutputs < 1 || vk.nInputs + vk.nOutputs > 10) {
+    throw new Error("JoinSplit dimensions must satisfy nInputs + nOutputs <= 10");
+  }
+  if (vk.vkHash.length !== 32) throw new Error("vkHash must be 32 bytes");
+  if (vk.deltaG2.length !== 128) throw new Error("deltaG2 must be 128 bytes");
+
+  const expectedIcLen = 3 + vk.nInputs + vk.nOutputs;
+  if (vk.ic.length !== expectedIcLen) {
+    throw new Error(`expected ${expectedIcLen} IC points`);
+  }
+  for (const [i, point] of vk.ic.entries()) {
+    if (point.length !== 64) throw new Error(`IC[${i}] must be 64 bytes`);
+  }
+
+  return Buffer.concat([
+    Buffer.from([discriminator, vk.nInputs, vk.nOutputs]),
+    vk.vkHash,
+    vk.deltaG2,
+    Buffer.from([vk.ic.length]),
+    ...vk.ic,
+  ]);
+}
+```
+
+## Admin Instructions
+
+Initialize a registry:
+
+```ts
+const [vkRegistry] = deriveVkRegistryPDA(programId, nInputs, nOutputs);
+
+const keys = [
+  { pubkey: poolState, isSigner: false, isWritable: false },
+  { pubkey: vkRegistry, isSigner: false, isWritable: true },
+  { pubkey: authority, isSigner: true, isWritable: true },
+  { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+];
+
+const data = buildVkRegistryData(6, vk);
+```
+
+Update an existing registry:
+
+```ts
+const keys = [
+  { pubkey: vkRegistry, isSigner: false, isWritable: true },
+  { pubkey: authority, isSigner: true, isWritable: false },
+];
+
+const data = buildVkRegistryData(7, vk);
+```
+
+Only the pool authority can initialize registries. Only the registry authority
+can update them. `init_vk_registry` creates the PDA when it does not exist.
+
+## JoinSplit Builders
+
+All JoinSplit instructions must pass the registry at account index `2`.
+
+Applies to:
+
+```ts
+TRANSACT = 13
+UNSHIELD = 14
+REDEEM = 15
+```
+
+Base account order:
 
 ```ts
 [
   poolState,
   commitmentTree,
-  zkbtcMint,
-  poolVault,
-  depositVault,
-  authority,
+  deriveVkRegistryPDA(programId, nInputs, nOutputs)[0],
+  user,
   systemProgram,
+  // remaining instruction-specific accounts...
 ]
 ```
 
-The instruction data remains:
+Before creating a user transaction, fetch the registry and fail early if:
+
+- the account does not exist
+- the owner is not the UTXOpia program
+- discriminator is not `0x14`
+- `nInputs` or `nOutputs` do not match the proof shape
+- `icLen !== 3 + nInputs + nOutputs`
+
+Frontend routing should hide or disable JoinSplit shapes whose registry has not
+been initialized and verified.
+
+## Account Parser
+
+New `VkRegistry` layout:
 
 ```ts
-disc(1) + pool_bump(1) + tree_bump(1) + deposit_fee_bps(2 LE) + withdrawal_fee_bps(2 LE)
-```
+const VK_REGISTRY_LEN = 1060;
+const VK_REGISTRY_DISCRIMINATOR = 0x14;
+const MAX_IC_POINTS = 13;
 
-Builder example:
-
-```ts
-const data = Buffer.alloc(7);
-data[0] = 0;
-data[1] = poolBump;
-data[2] = treeBump;
-data.writeUInt16LE(depositFeeBps, 3);
-data.writeUInt16LE(withdrawalFeeBps, 5);
-```
-
-### `set_pool_config` (`disc = 2`)
-
-Old clients may have sent only `pool_script`, or `pool_script + group_pub_key`.
-That is no longer valid.
-
-New payload:
-
-```ts
-disc(1)
-+ pool_script_len(1)
-+ pool_script(N, 1..=34)
-+ ika_dwallet(32)
-+ ika_dwallet_xonly_pubkey(32)
-+ cpi_authority_bump(1)
-```
-
-Builder example:
-
-```ts
-export function buildSetPoolConfigData(args: {
-  poolScript: Buffer;
-  ikaDwallet: PublicKey;
-  ikaDwalletXonlyPubkey: Buffer;
-  cpiAuthorityBump: number;
-}): Buffer {
-  if (args.poolScript.length < 1 || args.poolScript.length > 34) {
-    throw new Error("poolScript length must be 1..=34");
-  }
-  if (args.ikaDwalletXonlyPubkey.length !== 32) {
-    throw new Error("ikaDwalletXonlyPubkey must be 32 bytes");
-  }
-
-  return Buffer.concat([
-    Buffer.from([2, args.poolScript.length]),
-    args.poolScript,
-    args.ikaDwallet.toBuffer(),
-    args.ikaDwalletXonlyPubkey,
-    Buffer.from([args.cpiAuthorityBump]),
-  ]);
-}
-```
-
-### `complete_deposit` (`disc = 11`)
-
-`PoolConfig` is now required. Do not omit this account.
-
-Account 14:
-
-```ts
-{ pubkey: poolConfig, isSigner: false, isWritable: false }
-```
-
-The credited Bitcoin output must match `PoolConfig.pool_script`; clients should
-show a clear setup error if `PoolConfig` has not been initialized before deposit
-completion.
-
-### `verify_deposit` (`disc = 25`)
-
-`PoolConfig` is now required. Do not omit this account.
-
-Account 13:
-
-```ts
-{ pubkey: poolConfig, isSigner: false, isWritable: false }
-```
-
-The program verifies the user's Taproot deposit output using
-`PoolConfig.ika_dwallet_xonly_pubkey`, so SDK deposit address derivation must use
-the same x-only internal key.
-
-### Removed Instructions
-
-Remove SDK/frontend builders, routes, admin buttons, and docs for:
-
-```ts
-INIT_TREE = 28
-SET_POOL_SCRIPT = 29
-```
-
-Do not expose discriminator `16` as a supported or reserved SDK action.
-Proof-checked BTC withdrawals start at `REDEEM = 15`.
-
-## Account Parser Changes
-
-### `PoolConfig`
-
-New layout:
-
-```ts
-const POOL_CONFIG_LEN = 129;
-
-type PoolConfig = {
-  discriminator: number;              // offset 0
-  poolScriptLen: number;              // offset 1
-  poolScript: Buffer;                 // offset 2, max 34 bytes
-  ikaDwallet: PublicKey;              // offset 36
-  ikaDwalletXonlyPubkey: Buffer;      // offset 68, 32 bytes
-  cpiAuthorityBump: number;           // offset 100
+type VkRegistry = {
+  discriminator: number;       // offset 0
+  nInputs: number;             // offset 2
+  nOutputs: number;            // offset 3
+  authority: PublicKey;        // offset 4
+  vkHash: Buffer;              // offset 36, 32 bytes
+  deltaG2: Buffer;             // offset 68, 128 bytes
+  icLen: number;               // offset 196
+  ic: Buffer[];                // offset 228, 64 bytes each
 };
 ```
 
 Parser example:
 
 ```ts
-export function parsePoolConfig(data: Buffer): PoolConfig {
-  if (data.length < 129) throw new Error("PoolConfig account too small");
-  if (data[0] !== 0x0a) throw new Error("Invalid PoolConfig discriminator");
+export function parseVkRegistry(data: Buffer): VkRegistry {
+  if (data.length < VK_REGISTRY_LEN) throw new Error("VkRegistry account too small");
+  if (data[0] !== VK_REGISTRY_DISCRIMINATOR) {
+    throw new Error("Invalid VkRegistry discriminator");
+  }
 
-  const poolScriptLen = data[1];
-  if (poolScriptLen > 34) throw new Error("Invalid pool script length");
+  const nInputs = data[2];
+  const nOutputs = data[3];
+  const icLen = data[196];
+  const expectedIcLen = 3 + nInputs + nOutputs;
+  if (icLen !== expectedIcLen || icLen > MAX_IC_POINTS) {
+    throw new Error("Invalid VkRegistry IC length");
+  }
+
+  const ic: Buffer[] = [];
+  for (let i = 0; i < icLen; i++) {
+    const start = 228 + i * 64;
+    ic.push(data.subarray(start, start + 64));
+  }
 
   return {
     discriminator: data[0],
-    poolScriptLen,
-    poolScript: data.subarray(2, 2 + poolScriptLen),
-    ikaDwallet: new PublicKey(data.subarray(36, 68)),
-    ikaDwalletXonlyPubkey: data.subarray(68, 100),
-    cpiAuthorityBump: data[100],
+    nInputs,
+    nOutputs,
+    authority: new PublicKey(data.subarray(4, 36)),
+    vkHash: data.subarray(36, 68),
+    deltaG2: data.subarray(68, 196),
+    icLen,
+    ic,
   };
 }
 ```
 
-Remove parser fields for:
+## Ops Rollout
 
-```ts
-group_pub_key
-groupPubKey
-hasGroupPubKey
-```
+For each supported JoinSplit shape:
 
-### `PoolState`
+1. Load the VK artifact for that `(n_inputs, n_outputs)` shape.
+2. Convert it into `vkHash`, `deltaG2`, and ordered IC points.
+3. Derive `["vk_registry", n_inputs, n_outputs]`.
+4. Send `init_vk_registry` from the pool authority.
+5. Fetch and parse the created account.
+6. Compare `vkHash`, `deltaG2`, and every IC point against the source artifact.
+7. Enable that shape in SDK/frontend config only after verification passes.
 
-The byte layout did not move, but rename the field at offset `100..132`:
+For VK rotation, send `update_vk_registry` and repeat the same fetch-and-compare
+verification. User JoinSplit flows should be paused or shape-gated while a
+registry is missing or being rotated.
 
-```ts
-depositVault = new PublicKey(data.subarray(100, 132));
-```
+## SDK Checklist
 
-Remove public SDK naming for `frostVault`.
-
-## Deposit Address Derivation
-
-For OP_RETURN-free deposits, derive the user's Taproot deposit address using:
-
-```ts
-internalKey = poolConfig.ikaDwalletXonlyPubkey
-tweak = TapTweak(internalKey || npk)
-outputKey = internalKey + tweak * G
-```
-
-The same `npk` must be stored in `DepositIntent`; `verify_deposit` checks that
-the raw deposit transaction contains an output for this tweaked key.
+- Add full `init_vk_registry` and `update_vk_registry` data builders.
+- Update `VkRegistry` parser size from `256` to `1060`.
+- Add `deltaG2`, `icLen`, and `ic` parser fields.
+- Derive `vkRegistry` from `(nInputs, nOutputs)` in every JoinSplit builder.
+- Validate registry existence before submitting `transact`, `unshield`, or
+  `redeem`.
+- Remove any dependency on hardcoded Rust VK module names such as
+  `joinsplit_1x2_vk`.
+- Remove any SDK call path that expects `load_joinsplit_vk` to exist.
 
 ## Frontend Checklist
 
-- Require PoolConfig setup before enabling deposit flows.
-- Show configured pool script, Ika dWallet, and x-only key in admin screens.
-- Remove UI for FROST group key setup.
-- Remove UI/actions for tree migration and pool-script migration.
-- Rename labels from `Frost Vault` to `Deposit Vault`.
-- Update generated TypeScript account types and constants.
-- Update any hardcoded `PoolConfig` size from `161` to `129`.
-- Make deposit completion fail early client-side when `PoolConfig` is missing.
+- Gate each JoinSplit shape on a verified registry account.
+- Show a clear setup error when the required registry is missing.
+- Disable unsupported shapes instead of letting the transaction fail on-chain.
+- Refresh admin/ops UI to upload or select full VK material, not only `vk_hash`.
+- Show registry authority, VK hash, dimensions, and IC length in admin screens.
 
-## Regeneration Checklist
+## Verification Commands
 
 After updating SDK/frontend code:
 
 ```bash
+rg "load_joinsplit_vk|joinsplit_.*_vk|VkRegistry.*256" .
 bun run check:scripts
 bun test tests/**/*.test.ts
 cargo test --workspace
