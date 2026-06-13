@@ -29,9 +29,9 @@
 //! 5. token_config         (writable)
 //! 6. vault                (writable) — token-specific vault
 //! 7. token_program        (read)
-//! 8..8+P                  recipient_token_accounts (writable, one per public output)
-//! 8+P..8+P+N             nullifier_records (writable, PDA)
-//! [optional]              proof_buffer (read, only when proof_source=1, last account)
+//!    8..8+P                  recipient_token_accounts (writable, one per public output)
+//!    8+P..8+P+N             nullifier_records (writable, PDA)
+//!    [optional]              proof_buffer (read, only when proof_source=1, last account)
 
 use pinocchio::{
     account_info::AccountInfo,
@@ -43,16 +43,16 @@ use pinocchio::{
 
 use crate::error::UTXOpiaError;
 use crate::state::{
-    CommitmentTree, NullifierOperationType, NullifierRecord, PoolState, TokenConfig,
-    VkRegistry, NULLIFIER_RECORD_DISCRIMINATOR,
+    CommitmentTree, NullifierOperationType, NullifierRecord, PoolState, TokenConfig, VkRegistry,
+    NULLIFIER_RECORD_DISCRIMINATOR,
 };
 use crate::utils::groth16::GROTH16_PROOF_SIZE;
+use crate::utils::token::transfer_zkbtc;
 use crate::utils::{
     create_pda_account, validate_account_writable, validate_active_tree_pda,
-    validate_program_owner, validate_system_program, validate_token_owner,
-    validate_any_token_program_key,
+    validate_any_token_program_key, validate_program_owner, validate_system_program,
+    validate_token_owner,
 };
-use crate::utils::token::transfer_zkbtc;
 
 /// Maximum supported N + M
 const MAX_JOINSPLIT_SIZE: usize = crate::constants::MAX_SAFE_JOINSPLIT_SIZE;
@@ -92,7 +92,10 @@ pub fn process_unshield(
     if n_inputs == 0 || n_outputs == 0 || n_inputs + n_outputs > MAX_JOINSPLIT_SIZE {
         return Err(ProgramError::InvalidInstructionData);
     }
-    if n_public_outputs == 0 || n_public_outputs > MAX_PUBLIC_OUTPUTS || n_public_outputs > n_outputs {
+    if n_public_outputs == 0
+        || n_public_outputs > MAX_PUBLIC_OUTPUTS
+        || n_public_outputs > n_outputs
+    {
         return Err(ProgramError::InvalidInstructionData);
     }
 
@@ -100,16 +103,29 @@ pub fn process_unshield(
     let n_tree_outputs = n_outputs - n_public_outputs;
 
     // Calculate expected data length
-    let proof_data_size = if proof_source == 0 { GROTH16_PROOF_SIZE } else { 0 };
+    let proof_data_size = if proof_source == 0 {
+        GROTH16_PROOF_SIZE
+    } else {
+        0
+    };
     let header_size = 4 + proof_data_size + 32 + 32;
     let nullifiers_size = n_inputs * 32;
     let commitments_size = n_outputs * 32;
     let stealth_size = n_tree_outputs * STEALTH_DATA_PER_OUTPUT;
     let amounts_size = n_public_outputs * 8; // u64 LE per public output
-    let expected_len = header_size + nullifiers_size + commitments_size + stealth_size + amounts_size;
+    let expected_len =
+        header_size + nullifiers_size + commitments_size + stealth_size + amounts_size;
 
     if data.len() < expected_len {
         return Err(ProgramError::InvalidInstructionData);
+    }
+
+    // Validate account count before any optional proof-buffer access. Buffered
+    // proofs require one account beyond the fixed, recipient, and nullifier set.
+    let min_accounts = FIXED_ACCOUNTS + n_public_outputs + n_inputs;
+    let required_accounts = min_accounts + usize::from(proof_source == 1);
+    if accounts.len() < required_accounts {
+        return Err(ProgramError::NotEnoughAccountKeys);
     }
 
     // Parse instruction data (skip 4-byte header)
@@ -130,7 +146,8 @@ pub fn process_unshield(
         if buf_data.len() < CHADBUFFER_AUTHORITY_SIZE + GROTH16_PROOF_SIZE {
             return Err(ProgramError::InvalidAccountData);
         }
-        let src = &buf_data[CHADBUFFER_AUTHORITY_SIZE..CHADBUFFER_AUTHORITY_SIZE + GROTH16_PROOF_SIZE];
+        let src =
+            &buf_data[CHADBUFFER_AUTHORITY_SIZE..CHADBUFFER_AUTHORITY_SIZE + GROTH16_PROOF_SIZE];
         proof_buf = src.try_into().unwrap();
         &proof_buf
     };
@@ -144,15 +161,15 @@ pub fn process_unshield(
     // Parse nullifiers
     const ZERO_REF: &[u8; 32] = &[0u8; 32];
     let mut nullifiers: [&[u8; 32]; MAX_JOINSPLIT_SIZE] = [ZERO_REF; MAX_JOINSPLIT_SIZE];
-    for i in 0..n_inputs {
-        nullifiers[i] = data[offset..offset + 32].try_into().unwrap();
+    for nullifier in nullifiers.iter_mut().take(n_inputs) {
+        *nullifier = data[offset..offset + 32].try_into().unwrap();
         offset += 32;
     }
 
     // Parse output commitments (all n_outputs)
     let mut commitments_out: [&[u8; 32]; MAX_JOINSPLIT_SIZE] = [ZERO_REF; MAX_JOINSPLIT_SIZE];
-    for i in 0..n_outputs {
-        commitments_out[i] = data[offset..offset + 32].try_into().unwrap();
+    for commitment in commitments_out.iter_mut().take(n_outputs) {
+        *commitment = data[offset..offset + 32].try_into().unwrap();
         offset += 32;
     }
 
@@ -164,19 +181,12 @@ pub fn process_unshield(
 
     // Parse per-output unshield amounts
     let mut unshield_amounts: [u64; MAX_PUBLIC_OUTPUTS] = [0u64; MAX_PUBLIC_OUTPUTS];
-    for k in 0..n_public_outputs {
-        unshield_amounts[k] = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+    for amount in unshield_amounts.iter_mut().take(n_public_outputs) {
+        *amount = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
         offset += 8;
     }
     if offset != data.len() {
         return Err(ProgramError::InvalidInstructionData);
-    }
-
-    // Validate account count:
-    // FIXED_ACCOUNTS + n_public_outputs recipients + n_inputs nullifiers [+ proof_buffer]
-    let min_accounts = FIXED_ACCOUNTS + n_public_outputs + n_inputs;
-    if accounts.len() < min_accounts {
-        return Err(ProgramError::NotEnoughAccountKeys);
     }
 
     let pool_state_info = &accounts[0];
@@ -292,32 +302,36 @@ pub fn process_unshield(
     const MAX_PI: usize = 2 + MAX_JOINSPLIT_SIZE;
     let mut public_inputs: [&[u8; 32]; MAX_PI] = [ZERO_REF; MAX_PI];
     let mut pi_len = 0;
-    public_inputs[pi_len] = merkle_root; pi_len += 1;
-    public_inputs[pi_len] = bound_params_hash; pi_len += 1;
-    for i in 0..n_inputs {
-        public_inputs[pi_len] = nullifiers[i]; pi_len += 1;
+    public_inputs[pi_len] = merkle_root;
+    pi_len += 1;
+    public_inputs[pi_len] = bound_params_hash;
+    pi_len += 1;
+    for nullifier in nullifiers.iter().take(n_inputs) {
+        public_inputs[pi_len] = *nullifier;
+        pi_len += 1;
     }
-    for i in 0..n_outputs {
-        public_inputs[pi_len] = commitments_out[i]; pi_len += 1;
+    for commitment in commitments_out.iter().take(n_outputs) {
+        public_inputs[pi_len] = *commitment;
+        pi_len += 1;
     }
 
     // Load VK and verify Groth16 proof
-    let (delta_g2, ic) = crate::utils::groth16::load_joinsplit_vk(
-        n_inputs as u8, n_outputs as u8,
-    )?;
+    let (delta_g2, ic) = crate::utils::groth16::load_joinsplit_vk(n_inputs as u8, n_outputs as u8)?;
 
     crate::utils::groth16::verify_groth16_joinsplit_proof(
-        proof_bytes, &public_inputs[..pi_len], delta_g2, ic,
+        proof_bytes,
+        &public_inputs[..pi_len],
+        delta_g2,
+        ic,
     )?;
 
     // Verify burn commitments: last n_public_outputs = Poseidon(0, token_id, amount_k)
     {
         let zero_npk = [0u8; 32];
-        for k in 0..n_public_outputs {
+        for (k, amount) in unshield_amounts.iter().take(n_public_outputs).enumerate() {
             let idx = n_tree_outputs + k; // public outputs are at the end
-            let expected_commitment = crate::utils::crypto::compute_commitment(
-                &zero_npk, &token_id, unshield_amounts[k],
-            )?;
+            let expected_commitment =
+                crate::utils::crypto::compute_commitment(&zero_npk, &token_id, *amount)?;
             if *commitments_out[idx] != expected_commitment {
                 return Err(UTXOpiaError::InvalidCommitment.into());
             }
@@ -330,11 +344,11 @@ pub fn process_unshield(
 
     // Process nullifiers
     let nullifier_base = FIXED_ACCOUNTS + n_public_outputs;
-    for i in 0..n_inputs {
+    for (i, nullifier) in nullifiers.iter().take(n_inputs).enumerate() {
         let nullifier_info = &accounts[nullifier_base + i];
         validate_account_writable(nullifier_info)?;
 
-        let nullifier_seeds: &[&[u8]] = &[NullifierRecord::SEED, nullifiers[i].as_ref()];
+        let nullifier_seeds: &[&[u8]] = &[NullifierRecord::SEED, nullifier.as_ref()];
         let (expected_pda, nbump) = find_program_address(nullifier_seeds, program_id);
         if nullifier_info.key() != &expected_pda {
             return Err(ProgramError::InvalidSeeds);
@@ -348,11 +362,7 @@ pub fn process_unshield(
         }
 
         let bump_bytes = [nbump];
-        let signer_seeds: &[&[u8]] = &[
-            NullifierRecord::SEED,
-            nullifiers[i].as_ref(),
-            &bump_bytes,
-        ];
+        let signer_seeds: &[&[u8]] = &[NullifierRecord::SEED, nullifier.as_ref(), &bump_bytes];
 
         create_pda_account(
             user,
@@ -381,8 +391,8 @@ pub fn process_unshield(
         let mut tree_data = commitment_tree_info.try_borrow_mut_data()?;
         let tree = CommitmentTree::from_bytes_mut(&mut tree_data)?;
 
-        for i in 0..n_tree_outputs {
-            let leaf_index = tree.insert_leaf(commitments_out[i])?;
+        for (i, commitment) in commitments_out.iter().take(n_tree_outputs).enumerate() {
+            let leaf_index = tree.insert_leaf(commitment)?;
 
             let stealth_offset = stealth_data_start + i * STEALTH_DATA_PER_OUTPUT;
             let ephemeral_pub: &[u8; 32] = data[stealth_offset..stealth_offset + 32]

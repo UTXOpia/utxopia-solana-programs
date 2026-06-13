@@ -21,20 +21,20 @@ use pinocchio::{
 
 use crate::error::UTXOpiaError;
 use crate::state::{
-    PoolConfig, PoolState, RedemptionRequest, RedemptionStatus, UtxoRecord, UtxoStatus,
-    VerifiedTransactionView, light_client_tip_height,
     completion_receipt::{CompletionReceipt, COMPLETION_RECEIPT_DISCRIMINATOR},
+    light_client_tip_height,
     pool_config::POOL_CONFIG_DISCRIMINATOR,
     utxo::UTXO_RECORD_DISCRIMINATOR,
+    PoolConfig, PoolState, RedemptionRequest, RedemptionStatus, UtxoRecord, UtxoStatus,
+    VerifiedTransactionView,
 };
 use crate::utils::bitcoin::{compute_tx_hash, ParsedTransaction};
 use crate::utils::chadbuffer::read_transaction_from_buffer;
-use crate::utils::{
-    burn_zkbtc_signed, close_account_securely, create_pda_account,
-    validate_account_writable, validate_program_owner,
-    validate_token_owner, validate_any_token_program_key,
-};
 use crate::utils::policy::check_redemption_signing;
+use crate::utils::{
+    burn_zkbtc_signed, close_account_securely, create_pda_account, validate_account_writable,
+    validate_any_token_program_key, validate_program_owner, validate_token_owner,
+};
 
 /// Required BTC confirmations before completing redemption
 const REQUIRED_CONFIRMATIONS: u64 = 6;
@@ -111,6 +111,7 @@ impl CompleteRedemptionData {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod data_tests {
     use super::*;
 
@@ -196,7 +197,7 @@ mod data_tests {
 /// 11. `[]`         System program
 /// 12. `[]`         Pool config PDA (stores on-chain pool_script; validates backend-provided script)
 /// 13. `[writable]` Change UTXO record PDA (if change exists; else system program as placeholder)
-/// 14..14+N `[writable]` Consumed UTXO PDAs (for closing, N = consumed_utxo_count)
+///     14..14+N `[writable]` Consumed UTXO PDAs (for closing, N = consumed_utxo_count)
 ///
 pub fn process_complete_redemption(
     program_id: &Pubkey,
@@ -305,11 +306,7 @@ pub fn process_complete_redemption(
         // Create completion receipt PDA
         let rent = Rent::get()?;
         let bump_bytes = [receipt_bump];
-        let signer_seeds: &[&[u8]] = &[
-            CompletionReceipt::SEED,
-            &ix_data.btc_txid,
-            &bump_bytes,
-        ];
+        let signer_seeds: &[&[u8]] = &[CompletionReceipt::SEED, &ix_data.btc_txid, &bump_bytes];
 
         create_pda_account(
             authority,
@@ -325,7 +322,15 @@ pub fn process_complete_redemption(
     }
 
     // Validate redemption state (must be Pending or Processing) and get details
-    let (amount_sats, service_fee, expected_script_len, expected_script, requester_key, request_id, total_input_sats) = {
+    let (
+        amount_sats,
+        service_fee,
+        expected_script_len,
+        expected_script,
+        requester_key,
+        request_id,
+        total_input_sats,
+    ) = {
         let redemption_data = redemption_info.try_borrow_data()?;
         let redemption = RedemptionRequest::from_bytes(&redemption_data)?;
 
@@ -342,7 +347,15 @@ pub fn process_complete_redemption(
         let mut req_key = [0u8; 32];
         req_key.copy_from_slice(&redemption.requester);
 
-        (redemption.amount_sats(), redemption.service_fee(), script_len, script_buf, req_key, redemption.request_id(), redemption.total_input_sats())
+        (
+            redemption.amount_sats(),
+            redemption.service_fee(),
+            script_len,
+            script_buf,
+            req_key,
+            redemption.request_id(),
+            redemption.total_input_sats(),
+        )
     };
 
     // --- VerifiedTransaction PDA check ---
@@ -387,8 +400,8 @@ pub fn process_complete_redemption(
 
     // --- Output verification ---
     // Parse raw tx and verify an output pays the expected script with sufficient amount
-    let parsed_tx = ParsedTransaction::parse(raw_tx)
-        .map_err(|_| UTXOpiaError::RedemptionSpvFailed)?;
+    let parsed_tx =
+        ParsedTransaction::parse(raw_tx).map_err(|_| UTXOpiaError::RedemptionSpvFailed)?;
 
     let expected_script_slice = &expected_script[..expected_script_len];
 
@@ -396,7 +409,9 @@ pub fn process_complete_redemption(
     // This ensures the user gets the fee they agreed to, even if pool config changes.
 
     // expected_send = amount_sats - service_fee (what we intended to send to user)
-    let expected_send = amount_sats.saturating_sub(service_fee);
+    let expected_send = amount_sats
+        .checked_sub(service_fee)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
     let min_amount = expected_send.saturating_sub(MAX_FEE_SATS);
 
     // Find the matching output and capture the actual value sent
@@ -421,7 +436,9 @@ pub fn process_complete_redemption(
         return Err(UTXOpiaError::AmountTooSmall.into());
     }
     let total_outputs = parsed_tx.sum_outputs();
-    let miner_fee = total_input_sats.saturating_sub(total_outputs);
+    let miner_fee = total_input_sats
+        .checked_sub(total_outputs)
+        .ok_or(UTXOpiaError::RedemptionOutputMismatch)?;
 
     // Sanity: miner fee must not exceed MAX_FEE_SATS
     if miner_fee > MAX_FEE_SATS {
@@ -438,7 +455,9 @@ pub fn process_complete_redemption(
         check_redemption_signing(pool, amount_sats, miner_fee)?;
     }
 
-    let burn_amount = actual_received.saturating_add(miner_fee);
+    let burn_amount = actual_received
+        .checked_add(miner_fee)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
     let protocol_revenue = service_fee.saturating_sub(miner_fee);
 
     let bump_bytes = [pool_bump];
@@ -459,7 +478,9 @@ pub fn process_complete_redemption(
         let pool_script_slice = &ix_data.pool_script[..ix_data.pool_script_len as usize];
         let change_utxo_info = &accounts[13];
 
-        if let Some((change_output, change_vout)) = parsed_tx.find_output_by_script(pool_script_slice) {
+        if let Some((change_output, change_vout)) =
+            parsed_tx.find_output_by_script(pool_script_slice)
+        {
             // Create change UTXO PDA
             let vout_le = change_vout.to_le_bytes();
             let utxo_seeds: &[&[u8]] = &[UtxoRecord::SEED, &ix_data.btc_txid, &vout_le];
@@ -497,7 +518,11 @@ pub fn process_complete_redemption(
                 utxo.set_amount_sats(change_output.value);
             }
 
-            crate::utils::events::emit_utxo_created(&ix_data.btc_txid, change_vout, change_output.value);
+            crate::utils::events::emit_utxo_created(
+                &ix_data.btc_txid,
+                change_vout,
+                change_output.value,
+            );
 
             Some(change_output.value)
         } else {

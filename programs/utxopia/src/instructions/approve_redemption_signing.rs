@@ -10,13 +10,12 @@
 //! - `complete_redemption` later SPV-verifies the broadcast tx and finalizes.
 
 use pinocchio::{
-    account_info::AccountInfo,
-    program_error::ProgramError,
-    pubkey::Pubkey,
-    ProgramResult,
+    account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, ProgramResult,
 };
 
-use crate::cpi::ika::{approve_message, ApproveMessageAccounts, SIG_SCHEME_TAPROOT_SHA256};
+use crate::cpi::ika::{
+    approve_message, ApproveMessageAccounts, CPI_AUTHORITY_SEED, SIG_SCHEME_TAPROOT_SHA256,
+};
 use crate::error::UTXOpiaError;
 use crate::state::{
     pool_config::POOL_CONFIG_DISCRIMINATOR, PoolConfig, PoolState, RedemptionRequest,
@@ -67,8 +66,11 @@ impl ApproveRedemptionSigningData {
             } else {
                 (None, None, 32)
             };
-        let miner_fee_sats =
-            u64::from_le_bytes(data[miner_fee_offset..miner_fee_offset + 8].try_into().unwrap());
+        let miner_fee_sats = u64::from_le_bytes(
+            data[miner_fee_offset..miner_fee_offset + 8]
+                .try_into()
+                .unwrap(),
+        );
         Ok(Self {
             btc_sighash,
             ika_message_digest_override,
@@ -155,8 +157,32 @@ pub fn process_approve_redemption_signing(
         if ika_dwallet.key().as_ref() != cfg.get_ika_dwallet() {
             return Err(UTXOpiaError::IkaCpiAccountsMissing.into());
         }
-        (*cfg.get_ika_dwallet_xonly_pubkey(), cfg.get_cpi_authority_bump())
+        (
+            *cfg.get_ika_dwallet_xonly_pubkey(),
+            cfg.get_cpi_authority_bump(),
+        )
     };
+
+    if caller_program.key() != program_id || !caller_program.executable() {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+    if !ika_program.executable() {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+    if ika_dwallet.owner() != ika_program.key() || ika_coordinator.owner() != ika_program.key() {
+        return Err(ProgramError::IllegalOwner);
+    }
+    if ika_message_approval.data_len() != 0 && ika_message_approval.owner() != ika_program.key() {
+        return Err(ProgramError::IllegalOwner);
+    }
+
+    let (expected_cpi_authority, expected_cpi_authority_bump) =
+        pinocchio::pubkey::find_program_address(&[CPI_AUTHORITY_SEED], program_id);
+    if cpi_authority.key() != &expected_cpi_authority
+        || cpi_authority_bump != expected_cpi_authority_bump
+    {
+        return Err(ProgramError::InvalidSeeds);
+    }
 
     // We still policy-check the original BIP-341 sighash above, but Ika's
     // MessageApproval PDA is keyed by keccak256(message), where message is the

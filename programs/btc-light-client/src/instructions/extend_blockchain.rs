@@ -30,8 +30,8 @@ use crate::utils::{
 ///   1. [signer, writable]   Submitter (payer for new PDAs)
 ///   2. []                   System program
 ///   3. []                   Parent BlockHeader PDA (["block", first_header.prev_hash])
-///   4..4+N-1   [writable]   BlockHeader PDAs (["block", hash_i])
-///   4+N..4+2N-1 [writable]  HeightIndex PDAs (["height_index", height_i])
+///      4..4+N-1   [writable]   BlockHeader PDAs (["block", hash_i])
+///      4+N..4+2N-1 [writable]  HeightIndex PDAs (["height_index", height_i])
 pub fn process_extend_blockchain(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -94,7 +94,14 @@ pub fn process_extend_blockchain(
         cw.copy_from_slice(&parent.chainwork);
         let h = parent.height();
         let ts = u32::from_le_bytes(parent.timestamp);
-        (h, cw, hash, ts, parent.epoch_bits(), parent.epoch_start_time())
+        (
+            h,
+            cw,
+            hash,
+            ts,
+            parent.epoch_bits(),
+            parent.epoch_start_time(),
+        )
     };
 
     // Read light client state
@@ -159,7 +166,9 @@ pub fn process_extend_blockchain(
         }
 
         let block_hash = double_sha256(raw_header);
-        let block_height = running_height + 1;
+        let block_height = running_height
+            .checked_add(1)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
 
         // PoW and difficulty checks for production Bitcoin networks.
         if network == crate::constants::NETWORK_MAINNET
@@ -203,6 +212,9 @@ pub fn process_extend_blockchain(
             pinocchio::pubkey::find_program_address(&[BLOCK_HEADER_SEED, &block_hash], program_id);
         if block_header_info.key() != &expected_pda {
             return Err(ProgramError::InvalidSeeds);
+        }
+        if block_header_info.data_len() != 0 && block_header_info.owner() != program_id {
+            return Err(ProgramError::IllegalOwner);
         }
 
         // Create BlockHeader PDA if it doesn't exist (idempotent — skip if already created)
@@ -275,7 +287,10 @@ pub fn process_extend_blockchain(
             let header_offset = 1 + i * 80;
             let raw_header: &[u8; 80] = data[header_offset..header_offset + 80].try_into().unwrap();
             let block_hash = double_sha256(raw_header);
-            let block_height = parent_height + 1 + i as u64;
+            let block_height = parent_height
+                .checked_add(1)
+                .and_then(|height| height.checked_add(i as u64))
+                .ok_or(ProgramError::ArithmeticOverflow)?;
             let height_le = block_height.to_le_bytes();
 
             let height_index_info = &accounts[4 + n + i];
@@ -285,6 +300,9 @@ pub fn process_extend_blockchain(
             );
             if height_index_info.key() != &expected_hi_pda {
                 return Err(ProgramError::InvalidSeeds);
+            }
+            if height_index_info.data_len() != 0 && height_index_info.owner() != program_id {
+                return Err(ProgramError::IllegalOwner);
             }
 
             // Check if HeightIndex already exists
@@ -336,7 +354,11 @@ pub fn process_extend_blockchain(
 
             lc.tip_hash = prev_hash; // last block hash in batch
             lc.set_tip_height(running_height);
-            lc.set_header_count(lc.header_count() + n as u64);
+            let header_count = lc
+                .header_count()
+                .checked_add(n as u64)
+                .ok_or(ProgramError::ArithmeticOverflow)?;
+            lc.set_header_count(header_count);
             lc.total_chainwork = running_chainwork;
 
             if running_height > REQUIRED_CONFIRMATIONS {
@@ -359,7 +381,11 @@ pub fn process_extend_blockchain(
         // Still count the headers.
         let mut lc_data = light_client_info.try_borrow_mut_data()?;
         let lc = BitcoinLightClient::from_bytes_mut(&mut lc_data)?;
-        lc.set_header_count(lc.header_count() + n as u64);
+        let header_count = lc
+            .header_count()
+            .checked_add(n as u64)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
+        lc.set_header_count(header_count);
         lc.set_last_update(clock.unix_timestamp);
     }
 

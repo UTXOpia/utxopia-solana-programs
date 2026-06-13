@@ -182,7 +182,6 @@ impl PoolState {
         u64::from_le_bytes(self.service_fee_base)
     }
 
-
     pub fn deposit_fee_bps(&self) -> u16 {
         u16::from_le_bytes(self.deposit_fee_bps)
     }
@@ -193,22 +192,21 @@ impl PoolState {
 
     /// Compute deposit fee: amount * deposit_fee_bps / 10000
     pub fn compute_deposit_fee(&self, amount: u64) -> u64 {
-        let bps = self.deposit_fee_bps() as u64;
-        amount.saturating_mul(bps) / 10_000
+        let bps = self.deposit_fee_bps() as u128;
+        ((amount as u128 * bps) / 10_000).min(u64::MAX as u128) as u64
     }
 
     /// Compute withdrawal fee: amount * withdrawal_fee_bps / 10000
     pub fn compute_withdrawal_fee(&self, amount: u64) -> u64 {
-        let bps = self.withdrawal_fee_bps() as u64;
-        amount.saturating_mul(bps) / 10_000
+        let bps = self.withdrawal_fee_bps() as u128;
+        ((amount as u128 * bps) / 10_000).min(u64::MAX as u128) as u64
     }
 
-    /// Compute deposit fee: amount * deposit_fee_bps / 10000 + service_fee_base
-    /// service_fee_base is kept for BTC deposits (relayer gas compensation)
+    /// Compute BTC withdrawal service fee: amount * withdrawal_fee_bps / 10000
+    /// + service_fee_base.
     pub fn compute_service_fee(&self, amount: u64) -> u64 {
-        let bps = self.deposit_fee_bps() as u64;
         let base = self.service_fee_base();
-        let pct_fee = amount.saturating_mul(bps) / 10_000;
+        let pct_fee = self.compute_withdrawal_fee(amount);
         pct_fee.saturating_add(base)
     }
 
@@ -231,7 +229,6 @@ impl PoolState {
     pub fn pending_execute_after(&self) -> i64 {
         i64::from_le_bytes(self.pending_execute_after)
     }
-
 
     pub fn has_pending_proposal(&self) -> bool {
         self.pending_execute_after() != 0
@@ -294,7 +291,6 @@ impl PoolState {
         self.service_fee_base = value.to_le_bytes();
     }
 
-
     pub fn set_deposit_fee_bps(&mut self, value: u16) {
         self.deposit_fee_bps = value.to_le_bytes();
     }
@@ -323,7 +319,6 @@ impl PoolState {
         self.pending_execute_after = value.to_le_bytes();
     }
 
-
     pub fn set_total_btc_held(&mut self, value: u64) {
         self.total_btc_held = value.to_le_bytes();
     }
@@ -349,55 +344,93 @@ impl PoolState {
     // Increment helpers with overflow check
     pub fn increment_deposit_count(&mut self) -> Result<(), ProgramError> {
         let count = self.deposit_count();
-        self.set_deposit_count(count.checked_add(1).ok_or(ProgramError::ArithmeticOverflow)?);
+        self.set_deposit_count(
+            count
+                .checked_add(1)
+                .ok_or(ProgramError::ArithmeticOverflow)?,
+        );
         Ok(())
     }
 
     pub fn add_minted(&mut self, amount: u64) -> Result<(), ProgramError> {
         let total = self.total_minted();
-        self.set_total_minted(total.checked_add(amount).ok_or(ProgramError::ArithmeticOverflow)?);
+        self.set_total_minted(
+            total
+                .checked_add(amount)
+                .ok_or(ProgramError::ArithmeticOverflow)?,
+        );
         Ok(())
     }
 
     pub fn add_burned(&mut self, amount: u64) -> Result<(), ProgramError> {
         let total = self.total_burned();
-        self.set_total_burned(total.checked_add(amount).ok_or(ProgramError::ArithmeticOverflow)?);
+        self.set_total_burned(
+            total
+                .checked_add(amount)
+                .ok_or(ProgramError::ArithmeticOverflow)?,
+        );
         Ok(())
     }
 
     pub fn add_shielded(&mut self, amount: u64) -> Result<(), ProgramError> {
         let total = self.total_shielded();
-        self.set_total_shielded(total.checked_add(amount).ok_or(ProgramError::ArithmeticOverflow)?);
+        self.set_total_shielded(
+            total
+                .checked_add(amount)
+                .ok_or(ProgramError::ArithmeticOverflow)?,
+        );
         Ok(())
     }
 
     pub fn sub_shielded(&mut self, amount: u64) -> Result<(), ProgramError> {
         let total = self.total_shielded();
-        self.set_total_shielded(total.checked_sub(amount).ok_or(ProgramError::ArithmeticOverflow)?);
+        self.set_total_shielded(
+            total
+                .checked_sub(amount)
+                .ok_or(ProgramError::ArithmeticOverflow)?,
+        );
         Ok(())
     }
 
     pub fn add_fee_pool(&mut self, amount: u64) -> Result<(), ProgramError> {
         let total = self.fee_pool();
-        self.set_fee_pool(total.checked_add(amount).ok_or(ProgramError::ArithmeticOverflow)?);
+        self.set_fee_pool(
+            total
+                .checked_add(amount)
+                .ok_or(ProgramError::ArithmeticOverflow)?,
+        );
         Ok(())
     }
 
     /// Add a UTXO to the pool's BTC tracking
     pub fn add_utxo(&mut self, amount: u64) -> Result<(), ProgramError> {
         let held = self.total_btc_held();
-        self.set_total_btc_held(held.checked_add(amount).ok_or(ProgramError::ArithmeticOverflow)?);
+        self.set_total_btc_held(
+            held.checked_add(amount)
+                .ok_or(ProgramError::ArithmeticOverflow)?,
+        );
         let count = self.utxo_count();
-        self.set_utxo_count(count.checked_add(1).ok_or(ProgramError::ArithmeticOverflow)?);
+        self.set_utxo_count(
+            count
+                .checked_add(1)
+                .ok_or(ProgramError::ArithmeticOverflow)?,
+        );
         Ok(())
     }
 
     /// Remove a UTXO from the pool's BTC tracking
     pub fn remove_utxo(&mut self, amount: u64) -> Result<(), ProgramError> {
         let held = self.total_btc_held();
-        self.set_total_btc_held(held.checked_sub(amount).ok_or(ProgramError::ArithmeticOverflow)?);
+        self.set_total_btc_held(
+            held.checked_sub(amount)
+                .ok_or(ProgramError::ArithmeticOverflow)?,
+        );
         let count = self.utxo_count();
-        self.set_utxo_count(count.checked_sub(1).ok_or(ProgramError::ArithmeticOverflow)?);
+        self.set_utxo_count(
+            count
+                .checked_sub(1)
+                .ok_or(ProgramError::ArithmeticOverflow)?,
+        );
         Ok(())
     }
 }
@@ -551,9 +584,9 @@ mod tests {
         let pool = PoolState::from_bytes_mut(&mut buf).unwrap();
 
         // Deposit 3 UTXOs
-        pool.add_utxo(10_000).unwrap();  // UTXO 1
-        pool.add_utxo(25_000).unwrap();  // UTXO 2
-        pool.add_utxo(50_000).unwrap();  // UTXO 3
+        pool.add_utxo(10_000).unwrap(); // UTXO 1
+        pool.add_utxo(25_000).unwrap(); // UTXO 2
+        pool.add_utxo(50_000).unwrap(); // UTXO 3
 
         assert_eq!(pool.total_btc_held(), 85_000);
         assert_eq!(pool.utxo_count(), 3);
@@ -575,12 +608,12 @@ mod tests {
         let mut buf = init_pool();
         let pool = PoolState::from_bytes_mut(&mut buf).unwrap();
 
-        pool.set_deposit_fee_bps(50);  // 0.5%
+        pool.set_deposit_fee_bps(50); // 0.5%
         pool.set_withdrawal_fee_bps(100); // 1.0%
 
         assert_eq!(pool.deposit_fee_bps(), 50);
         assert_eq!(pool.withdrawal_fee_bps(), 100);
-        assert_eq!(pool.compute_deposit_fee(100_000), 500);  // 0.5%
+        assert_eq!(pool.compute_deposit_fee(100_000), 500); // 0.5%
         assert_eq!(pool.compute_withdrawal_fee(100_000), 1000); // 1.0%
     }
 
@@ -599,7 +632,7 @@ mod tests {
         let mut buf = init_pool();
         let pool = PoolState::from_bytes_mut(&mut buf).unwrap();
 
-        pool.set_deposit_fee_bps(30);
+        pool.set_withdrawal_fee_bps(30);
         pool.set_service_fee_base(1000);
 
         // UTXO operations should not interfere with fee computation

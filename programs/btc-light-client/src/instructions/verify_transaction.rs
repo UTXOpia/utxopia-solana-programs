@@ -3,14 +3,14 @@ use pinocchio::{
     instruction::{Seed, Signer},
     program_error::ProgramError,
     pubkey::Pubkey,
-    ProgramResult,
     sysvars::{clock::Clock, Sysvar},
+    ProgramResult,
 };
 use pinocchio_system::instructions::CreateAccount;
 
 use crate::constants::{
-    BLOCK_HEADER_DISCRIMINATOR, BLOCK_HEADER_SEED, HEIGHT_INDEX_DISCRIMINATOR,
-    HEIGHT_INDEX_SEED, REQUIRED_CONFIRMATIONS, VERIFIED_TX_DISCRIMINATOR, VERIFIED_TX_SEED,
+    BLOCK_HEADER_DISCRIMINATOR, BLOCK_HEADER_SEED, HEIGHT_INDEX_DISCRIMINATOR, HEIGHT_INDEX_SEED,
+    REQUIRED_CONFIRMATIONS, VERIFIED_TX_DISCRIMINATOR, VERIFIED_TX_SEED,
 };
 use crate::state::{BitcoinLightClient, BlockHeader, HeightIndex, VerifiedTransaction};
 use crate::utils::{double_sha256, double_sha256_pair};
@@ -74,10 +74,8 @@ pub fn process_verify_transaction(
     let tx_size = u32::from_le_bytes(data[64..68].try_into().unwrap());
 
     // Verify BlockHeader PDA address: ["block", block_hash]
-    let (expected_header_pda, _) = pinocchio::pubkey::find_program_address(
-        &[BLOCK_HEADER_SEED, &block_hash],
-        program_id,
-    );
+    let (expected_header_pda, _) =
+        pinocchio::pubkey::find_program_address(&[BLOCK_HEADER_SEED, &block_hash], program_id);
     if block_header_info.key() != &expected_header_pda {
         return Err(ProgramError::InvalidSeeds);
     }
@@ -200,9 +198,12 @@ pub fn process_verify_transaction(
     }
 
     // Idempotent: if already exists, return Ok
-    {
+    if verified_tx_info.data_len() != 0 {
+        if verified_tx_info.owner() != program_id {
+            return Err(ProgramError::IllegalOwner);
+        }
         let existing_data = verified_tx_info.try_borrow_data()?;
-        if !existing_data.is_empty() && existing_data[0] == VERIFIED_TX_DISCRIMINATOR {
+        if existing_data[0] == VERIFIED_TX_DISCRIMINATOR {
             return Ok(());
         }
     }
