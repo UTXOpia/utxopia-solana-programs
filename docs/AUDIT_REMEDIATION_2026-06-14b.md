@@ -26,6 +26,26 @@ Scope agreed with maintainer: **fix the 17 confirmed Critical/Major/Medium/Minor
 
 Tests added: 5 redemption-policy cases (`complete_redemption_skim_tests.rs`), UtxoRecord layout (`utxo_tests.rs`), SegWit txid equivalence (`bitcoin.rs::txid_tests`).
 
+## Info/Discussion hardening (2nd pass — verified each against current code)
+
+| # | Finding | Verdict / Fix |
+|---|---------|---------------|
+| 53 | `reduce_to_field` bitwise mask ≠ modular reduction | **Fixed** — on-chain Poseidon now uses exact `val mod Fr` (matches circuit/SDK); non-canonical inputs no longer diverge. + test. |
+| 54/24 | Non-canonical `commitments_out` pass verification | **Fixed** — `parse_prefix` rejects non-canonical commitments (mirrors the nullifier check); on-chain leaf/event == proved commitment. |
+| 23 | VK/tree account substitution (proof forgery) | **Fixed** — `vk_registry` pinned to `["vk_registry", n_in, n_out]` PDA; tree already pinned via `validate_active_tree_pda`/`validate_frozen_tree`. (Not exploitable anyway — VK accounts are admin-only + frozen — but now defense-in-depth.) |
+| 36/37 | Digest/scheme overrides = generic dWallet signing oracle | **Fixed** — `approve_redemption_signing` rejects both overrides; signing fixed to `keccak256(btc_sighash)` under Taproot-SHA256. Backend never set them. |
+| 43 | Reorg can move `finalized_height` backward | **Fixed** — `finalized_height` is now monotonic. |
+| 44 | testnet4 min-difficulty timestamp exploit | **Fixed** — headers >2h in the future are rejected (Solana-clock bound). |
+| 35 | Unshield amounts not bound (fund reallocation) | **Non-issue** — amounts bound via burn commitments `Poseidon(0, token_id, amount)` checked against proof public inputs (`unshield.rs:209`). |
+
+Deployed in-place to `G1bj9`/`C8Jo` (sigs `51if3n7…` / `gQpBPpp…`).
+
+### Accepted with rationale (not fixed)
+
+- **#50 Unauthenticated sender memos** (Low): memos are an optional, event-only convenience; a relayer stripping them only griefs the sender who chose that relayer, and **no protocol state depends on them**. Authenticating them needs a coordinated bound-params/circuit change disproportionate to the value. Accepted.
+- **#36 (deep half) sighash not reconstructed at approval**: override removal closes the oracle; fully *binding* the approved sighash to the redemption's reserved UTXOs + script would require on-chain BIP-341 sighash reconstruction. The authority is a trusted role and the broadcast tx is still policy-checked at `complete_redemption`. Deferred as a larger design item.
+- **#13 frozen-tree client wiring**: on-chain is complete + tested; the web-relay/client piece can't trigger until a 65,536-leaf tree rotation and is a strict no-op until then. Deferred (documented trigger) to avoid shipping untestable account-ordering to the live spend path.
+
 ## Triaged — no change required (already safe)
 
 - **#11 utxo_count u16 overflow**: `add_utxo` already uses `checked_add(1)` (errors, never wraps); release profile has `overflow-checks = true`. Reaching 65 535 on-chain UTXOs is impractical.
