@@ -65,12 +65,20 @@ pub fn process_register_token(
     // Validate mint is Token-2022
     validate_token_owner(mint_info)?;
 
-    // Read decimals from mint (offset 44 in Token-2022 mint layout)
+    // Read decimals from mint (offset 44 in Token-2022 mint layout) and reject fee-on-transfer
+    // mints. A TransferFeeConfig extension makes the vault receive fewer tokens than the credited
+    // amount on the withdrawal side and strands protocol fees; refuse such mints at registration.
+    // (The deposit side additionally measures the actual vault balance delta — see shield.rs.)
     let decimals = {
         let mint_data = mint_info.try_borrow_data()?;
         if mint_data.len() < 82 {
             return Err(ProgramError::InvalidAccountData);
         }
+
+        if mint_has_transfer_fee(&mint_data) {
+            return Err(UTXOpiaError::InvalidMint.into());
+        }
+
         mint_data[44]
     };
 
@@ -129,4 +137,72 @@ pub fn process_register_token(
 
     pinocchio::msg!("UTXOpia: registered token");
     Ok(())
+}
+
+/// Return true if a Token-2022 mint carries the TransferFeeConfig extension (fee-on-transfer).
+///
+/// Token-2022 accounts with extensions: the 82-byte base mint is padded to 165, then a 1-byte
+/// account_type (1 = Mint) at offset 165, then TLV extensions from offset 166. Each TLV entry is
+/// type(u16 LE) + length(u16 LE) + value; ExtensionType 1 is TransferFeeConfig.
+pub(crate) fn mint_has_transfer_fee(mint_data: &[u8]) -> bool {
+    if mint_data.len() <= 165 || mint_data[165] != 1 {
+        return false;
+    }
+    let mut off = 166usize;
+    while off + 4 <= mint_data.len() {
+        let ext_type = u16::from_le_bytes([mint_data[off], mint_data[off + 1]]);
+        if ext_type == 0 {
+            break; // Uninitialized slot — end of extension list
+        }
+        if ext_type == 1 {
+            return true; // TransferFeeConfig
+        }
+        let ext_len = u16::from_le_bytes([mint_data[off + 2], mint_data[off + 3]]) as usize;
+        match off.checked_add(4 + ext_len) {
+            Some(next) => off = next,
+            None => break,
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod transfer_fee_tests {
+    use super::mint_has_transfer_fee;
+
+    fn mint_with_exts(exts: &[(u16, &[u8])]) -> Vec<u8> {
+        let mut v = vec![0u8; 166];
+        v[165] = 1; // account_type = Mint
+        for (ty, data) in exts {
+            v.extend_from_slice(&ty.to_le_bytes());
+            v.extend_from_slice(&(data.len() as u16).to_le_bytes());
+            v.extend_from_slice(data);
+        }
+        v
+    }
+
+    #[test]
+    fn plain_mint_82_bytes_has_no_fee() {
+        assert!(!mint_has_transfer_fee(&[0u8; 82]));
+    }
+
+    #[test]
+    fn mint_with_metadata_pointer_only_has_no_fee() {
+        // ExtensionType 18 = MetadataPointer (not a transfer fee).
+        let m = mint_with_exts(&[(18, &[0u8; 64])]);
+        assert!(!mint_has_transfer_fee(&m));
+    }
+
+    #[test]
+    fn mint_with_transfer_fee_config_is_detected() {
+        // ExtensionType 1 = TransferFeeConfig.
+        let m = mint_with_exts(&[(1, &[0u8; 108])]);
+        assert!(mint_has_transfer_fee(&m));
+    }
+
+    #[test]
+    fn transfer_fee_after_another_extension_is_detected() {
+        let m = mint_with_exts(&[(3, &[0u8; 32]), (1, &[0u8; 108])]);
+        assert!(mint_has_transfer_fee(&m));
+    }
 }
