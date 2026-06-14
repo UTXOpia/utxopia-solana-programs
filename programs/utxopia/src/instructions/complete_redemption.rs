@@ -180,6 +180,124 @@ mod data_tests {
     }
 }
 
+#[cfg(test)]
+mod skim_tests {
+    use super::*;
+    use crate::utils::bitcoin::ParsedTransaction;
+
+    fn p2tr(tag: u8) -> Vec<u8> {
+        let mut s = vec![0x51u8, 0x20];
+        s.extend_from_slice(&[tag; 32]);
+        s
+    }
+
+    fn op_return() -> Vec<u8> {
+        vec![0x6a, 0x04, 0xde, 0xad, 0xbe, 0xef]
+    }
+
+    /// Build a minimal legacy tx (1 input, given outputs). Counts assumed < 253.
+    fn tx_with_outputs(outputs: &[(u64, Vec<u8>)]) -> Vec<u8> {
+        let mut t = vec![1u8, 0, 0, 0]; // version
+        t.push(1); // input count
+        t.extend_from_slice(&[0u8; 32]); // prev txid
+        t.extend_from_slice(&[0u8; 4]); // prev vout
+        t.push(0); // scriptSig len
+        t.extend_from_slice(&[0xffu8; 4]); // sequence
+        t.push(outputs.len() as u8); // output count
+        for (val, script) in outputs {
+            t.extend_from_slice(&val.to_le_bytes());
+            t.push(script.len() as u8);
+            t.extend_from_slice(script);
+        }
+        t.extend_from_slice(&[0u8; 4]); // locktime
+        t
+    }
+
+    const RECIPIENT: u8 = 0xAA;
+    const POOL: u8 = 0xBB;
+    const ATTACKER: u8 = 0xCC;
+
+    #[test]
+    fn allows_recipient_only() {
+        let tx = tx_with_outputs(&[(100_000, p2tr(RECIPIENT))]);
+        let parsed = ParsedTransaction::parse(&tx).unwrap();
+        assert!(redemption_outputs_within_policy(
+            &parsed,
+            &p2tr(RECIPIENT),
+            &p2tr(POOL)
+        ));
+    }
+
+    #[test]
+    fn allows_recipient_plus_pool_change_and_op_return() {
+        let tx = tx_with_outputs(&[
+            (100_000, p2tr(RECIPIENT)),
+            (50_000, p2tr(POOL)),
+            (0, op_return()),
+        ]);
+        let parsed = ParsedTransaction::parse(&tx).unwrap();
+        assert!(redemption_outputs_within_policy(
+            &parsed,
+            &p2tr(RECIPIENT),
+            &p2tr(POOL)
+        ));
+    }
+
+    /// The core skim attack: an extra output to an attacker-controlled address must be rejected.
+    #[test]
+    fn rejects_attacker_skim_output() {
+        let tx = tx_with_outputs(&[
+            (100_000, p2tr(RECIPIENT)),
+            (800_000, p2tr(ATTACKER)), // skim
+        ]);
+        let parsed = ParsedTransaction::parse(&tx).unwrap();
+        assert!(!redemption_outputs_within_policy(
+            &parsed,
+            &p2tr(RECIPIENT),
+            &p2tr(POOL)
+        ));
+    }
+
+    /// With no pool_script declared, ANY non-recipient/non-OP_RETURN output is a skim.
+    #[test]
+    fn rejects_change_when_pool_script_absent() {
+        let tx = tx_with_outputs(&[
+            (100_000, p2tr(RECIPIENT)),
+            (50_000, p2tr(POOL)), // would-be change, but pool_script not provided
+        ]);
+        let parsed = ParsedTransaction::parse(&tx).unwrap();
+        assert!(!redemption_outputs_within_policy(
+            &parsed,
+            &p2tr(RECIPIENT),
+            &[]
+        ));
+    }
+}
+
+/// Anti-skim policy: every BTC output must pay the recipient, return change to the pool
+/// script, or be an OP_RETURN marker. Any other output lets an operator route pool BTC to an
+/// arbitrary address while keeping the leftover under MAX_FEE_SATS. Pure (no account access)
+/// so it is unit-testable against raw tx blobs.
+pub(crate) fn redemption_outputs_within_policy(
+    parsed_tx: &ParsedTransaction,
+    recipient_script: &[u8],
+    pool_script: &[u8],
+) -> bool {
+    for output in parsed_tx.outputs() {
+        if output.script_pubkey == recipient_script {
+            continue; // recipient payout
+        }
+        if !pool_script.is_empty() && output.script_pubkey == pool_script {
+            continue; // change back to the pool
+        }
+        if output.is_op_return() {
+            continue; // unspendable marker — cannot benefit an attacker
+        }
+        return false;
+    }
+    true
+}
+
 /// Process complete redemption with VerifiedTransaction PDA + output verification
 ///
 /// # Accounts
@@ -334,8 +452,11 @@ pub fn process_complete_redemption(
         let redemption_data = redemption_info.try_borrow_data()?;
         let redemption = RedemptionRequest::from_bytes(&redemption_data)?;
 
+        // Must be Processing: mark_processing reserves the UTXOs and sets total_input_sats.
+        // Completing a still-Pending redemption skips UTXO reservation entirely, so require
+        // the explicit state rather than relying on the total_input_sats == 0 side-effect.
         let status = redemption.get_status();
-        if status != RedemptionStatus::Pending && status != RedemptionStatus::Processing {
+        if status != RedemptionStatus::Processing {
             return Err(UTXOpiaError::InvalidRedemptionState.into());
         }
 
@@ -368,8 +489,18 @@ pub fn process_complete_redemption(
             return Err(UTXOpiaError::RedemptionSpvFailed.into());
         }
 
+        // Pin both light-client accounts to their canonical PDAs (owner+disc alone would
+        // accept any btc-light-client-owned account with a forged payout confirmation).
+        crate::state::assert_canonical_verified_tx(
+            verified_tx_info.key(),
+            vt.block_hash(),
+            vt.txid(),
+            btc_lc_id,
+        )?;
+
         vt.block_height() as u64
     };
+    crate::state::assert_canonical_light_client(light_client_info.key(), btc_lc_id)?;
 
     // Verify sufficient confirmations
     {
@@ -419,6 +550,21 @@ pub fn process_complete_redemption(
         .find(|output| output.script_pubkey == expected_script_slice && output.value >= min_amount)
         .ok_or(UTXOpiaError::RedemptionOutputMismatch)?
         .value;
+
+    // --- Anti-skim: constrain where pool BTC may go ---
+    // Every output must pay the recipient, return to the pool change script, or be an
+    // OP_RETURN marker. Without this, an operator could route the bulk of the inputs to an
+    // arbitrary address and keep the leftover (the implicit "miner fee") under MAX_FEE_SATS,
+    // skimming pool BTC while on-chain accounting under-counts the loss. Change therefore
+    // requires a validated pool_script (see the PoolConfig check above).
+    let pool_script_slice: &[u8] = if ix_data.pool_script_len > 0 {
+        &ix_data.pool_script[..ix_data.pool_script_len as usize]
+    } else {
+        &[]
+    };
+    if !redemption_outputs_within_policy(&parsed_tx, expected_script_slice, pool_script_slice) {
+        return Err(UTXOpiaError::RedemptionOutputMismatch.into());
+    }
 
     // --- Compute miner fee trustlessly from on-chain data ---
     // Require total_input_sats > 0: mark_processing MUST set this from UTXO PDAs.
@@ -557,6 +703,10 @@ pub fn process_complete_redemption(
                 let vout = utxo.vout();
                 let mut txid = [0u8; 32];
                 txid.copy_from_slice(&utxo.txid);
+                // The completing tx must actually spend this reserved UTXO.
+                if !parsed_tx.find_input_with_prev_outpoint(&txid, vout) {
+                    return Err(UTXOpiaError::InvalidUtxo.into());
+                }
                 // Emit consumed event before closing
                 crate::utils::events::emit_utxo_consumed(&txid, vout, amount);
             }
@@ -564,6 +714,13 @@ pub fn process_complete_redemption(
             // Close the UTXO account and reclaim rent
             close_account_securely(consumed_utxo_info, rent_recipient)?;
         }
+    }
+
+    // The tx must spend EXACTLY the reserved UTXOs — no extra, unaccounted inputs — so
+    // total_input_sats (summed at mark_processing) provably equals the real input total
+    // and the miner-fee computation above cannot be gamed by adding hidden inputs.
+    if parsed_tx.inputs().count() != consumed_count {
+        return Err(UTXOpiaError::RedemptionOutputMismatch.into());
     }
 
     // --- Update pool state with exact accounting ---

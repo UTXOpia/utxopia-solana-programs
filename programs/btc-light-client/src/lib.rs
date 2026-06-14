@@ -15,8 +15,10 @@ use pinocchio::{
 
 use instructions::{
     process_extend_blockchain, process_initialize, process_prune_obsolete_blocks,
-    process_reinitialize, process_verify_transaction,
+    process_verify_transaction,
 };
+#[cfg(not(feature = "mainnet"))]
+use instructions::process_reinitialize;
 
 entrypoint!(process_instruction);
 
@@ -34,6 +36,7 @@ fn process_instruction(
         1 => process_extend_blockchain(program_id, accounts, &data[1..]),
         2 => process_verify_transaction(program_id, accounts, &data[1..]),
         3 => process_prune_obsolete_blocks(program_id, accounts, &data[1..]),
+        #[cfg(not(feature = "mainnet"))]
         4 => process_reinitialize(program_id, accounts, &data[1..]),
         _ => Err(ProgramError::InvalidInstructionData),
     }

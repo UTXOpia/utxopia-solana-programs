@@ -198,6 +198,9 @@ pub enum UTXOpiaError {
 
     #[error("Invalid token config limits (min/max/cap)")]
     InvalidTokenConfig = 6089,
+
+    #[error("VK registry is frozen and can no longer be updated")]
+    VkRegistryFrozen = 6090,
 }
 
 impl From<UTXOpiaError> for ProgramError {

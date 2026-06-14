@@ -95,6 +95,18 @@ impl VkRegistry {
         self.authority == *pubkey
     }
 
+    /// True once the VK material has been permanently frozen (see [`Self::freeze`]).
+    /// Stored in the first byte of the reserved area so the 1060-byte layout is unchanged.
+    pub fn is_frozen(&self) -> bool {
+        self._reserved[0] != 0
+    }
+
+    /// Permanently freeze this registry. One-way: there is no unfreeze. After freezing,
+    /// `process_update_vk_registry` is rejected, removing the single-authority forge vector.
+    pub fn freeze(&mut self) {
+        self._reserved[0] = 1;
+    }
+
     /// Get number of public inputs
     pub fn num_public_inputs(&self) -> usize {
         joinsplit_num_public_inputs(self.n_inputs, self.n_outputs)

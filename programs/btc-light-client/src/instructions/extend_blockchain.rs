@@ -179,6 +179,13 @@ pub fn process_extend_blockchain(
                 return Err(ProgramError::InvalidArgument);
             }
 
+            // Difficulty params MUST be seeded for production networks. An unseeded (0)
+            // value previously made required_bits_for_next_block return 0, which disabled
+            // the bits check entirely and let an attacker grind a low-difficulty chain.
+            if running_expected_bits == 0 {
+                return Err(ProgramError::InvalidArgument);
+            }
+
             let required_bits = required_bits_for_next_block(
                 network == crate::constants::NETWORK_TESTNET4,
                 block_height,
@@ -187,7 +194,9 @@ pub fn process_extend_blockchain(
                 running_expected_bits,
                 running_epoch_start,
             );
-            if required_bits != 0 && bits != required_bits {
+            // Always enforce the consensus difficulty — chainwork is derived from `bits`,
+            // so an unconstrained `bits` would let a fork claim arbitrary work.
+            if bits != required_bits {
                 return Err(ProgramError::InvalidArgument);
             }
         }

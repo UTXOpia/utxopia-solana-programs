@@ -34,6 +34,18 @@ pub fn poseidon2_hash(left: &[u8; 32], right: &[u8; 32]) -> Result<[u8; 32], Pro
     }
 }
 
+/// True if a big-endian 32-byte value is a canonical BN254 Fr element (< modulus).
+///
+/// The `alt_bn128` multiplication syscall reduces scalars mod the Fr order, so two
+/// byte-distinct encodings of the same field element (`n` and `n + p`) verify the same
+/// Groth16 proof. Nullifiers are also used as PDA dedup seeds from their raw bytes, so a
+/// non-canonical re-encoding would seed a fresh nullifier PDA while re-using a spent
+/// note's proof → double-spend. Reject any non-canonical nullifier before use.
+#[inline]
+pub fn is_canonical_fr(val: &[u8; 32]) -> bool {
+    !is_ge_modulus(val)
+}
+
 /// Check if a big-endian 32-byte value is >= BN254 Fr modulus
 #[inline]
 fn is_ge_modulus(val: &[u8; 32]) -> bool {
@@ -335,3 +347,47 @@ pub const ZERO_HASHES: [[u8; 32]; 20] = [
     [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32],
     [0u8; 32], [0u8; 32], [0u8; 32],
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// BN254 Fr modulus p (big-endian) — the boundary for canonical encodings.
+    const P: [u8; 32] = [
+        0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58,
+        0x5d, 0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00,
+        0x00, 0x01,
+    ];
+
+    #[test]
+    fn zero_is_canonical() {
+        assert!(is_canonical_fr(&[0u8; 32]));
+    }
+
+    #[test]
+    fn modulus_is_not_canonical() {
+        // p mod p == 0, so the encoding `p` is a non-canonical alias of 0 → must be rejected.
+        assert!(!is_canonical_fr(&P));
+    }
+
+    #[test]
+    fn modulus_minus_one_is_canonical() {
+        let mut p_minus_1 = P;
+        p_minus_1[31] = 0x00; // ...f000_0001 -> ...f000_0000 = p-1, the largest valid element
+        assert!(is_canonical_fr(&p_minus_1));
+    }
+
+    #[test]
+    fn all_ones_is_not_canonical() {
+        // 2^256-1 is far above p → the classic `n + k*p` alias family that enabled the
+        // nullifier double-spend.
+        assert!(!is_canonical_fr(&[0xff; 32]));
+    }
+
+    #[test]
+    fn modulus_plus_one_is_not_canonical() {
+        let mut p_plus_1 = P;
+        p_plus_1[31] = 0x02; // p+1, a non-canonical alias of 1
+        assert!(!is_canonical_fr(&p_plus_1));
+    }
+}

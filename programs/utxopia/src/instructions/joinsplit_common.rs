@@ -162,7 +162,14 @@ pub fn parse_prefix<'a>(
 
     let mut nullifiers: [&[u8; 32]; MAX_JOINSPLIT_SIZE] = [ZERO_REF; MAX_JOINSPLIT_SIZE];
     for nullifier in nullifiers.iter_mut().take(header.n_inputs) {
-        *nullifier = data[offset..offset + 32].try_into().unwrap();
+        let n: &[u8; 32] = data[offset..offset + 32].try_into().unwrap();
+        // Reject non-canonical encodings: the proof scalar is reduced mod Fr by the
+        // syscall, but the nullifier PDA dedup seed uses these raw bytes, so `n` and
+        // `n + p` would seed distinct PDAs for one note → double-spend.
+        if !crate::utils::crypto::is_canonical_fr(n) {
+            return Err(UTXOpiaError::InvalidZkProof.into());
+        }
+        *nullifier = n;
         offset += 32;
     }
 
@@ -312,5 +319,41 @@ mod tests {
 
         assert_eq!(value, u64::from_le_bytes([8, 7, 6, 5, 4, 3, 2, 1]));
         assert_eq!(offset, data.len());
+    }
+
+    /// Build a JoinSplit(1,1) instruction body (proof_source=0, 1 tree output) with the
+    /// given nullifier bytes. Layout: header(4) + proof(256) + root(32) + bound(32) +
+    /// nullifier(32) + commitment(32) + stealth(72).
+    fn joinsplit_1x1_with_nullifier(nullifier: [u8; 32]) -> Vec<u8> {
+        let mut d = vec![1u8, 1, 1, 0]; // n_in=1, n_out=1, n_pub=1, proof_source=0
+        d.extend_from_slice(&[0u8; GROTH16_PROOF_SIZE]); // proof
+        d.extend_from_slice(&[0u8; 32]); // merkle_root
+        d.extend_from_slice(&[0u8; 32]); // bound_params_hash
+        d.extend_from_slice(&nullifier); // nullifier
+        d.extend_from_slice(&[0u8; 32]); // commitment_out
+        d.extend_from_slice(&[0u8; STEALTH_DATA_PER_OUTPUT]); // stealth for 1 tree output
+        d
+    }
+
+    #[test]
+    fn parse_prefix_accepts_canonical_nullifier() {
+        let data = joinsplit_1x1_with_nullifier([0u8; 32]);
+        let header = parse_header(&data).unwrap();
+        let mut proof_buf = [0u8; GROTH16_PROOF_SIZE];
+        // proof_source==0 path never indexes accounts, so an empty slice is fine.
+        let res = parse_prefix(&data, &[], header, 1, &mut proof_buf);
+        assert!(res.is_ok(), "canonical nullifier should parse");
+    }
+
+    #[test]
+    fn parse_prefix_rejects_noncanonical_nullifier() {
+        // 0xff..ff >= BN254 Fr modulus: a non-canonical alias that the alt_bn128 syscall
+        // would reduce to the same field element while seeding a *different* nullifier PDA.
+        // This is the double-spend vector — parsing must reject it outright.
+        let data = joinsplit_1x1_with_nullifier([0xffu8; 32]);
+        let header = parse_header(&data).unwrap();
+        let mut proof_buf = [0u8; GROTH16_PROOF_SIZE];
+        let res = parse_prefix(&data, &[], header, 1, &mut proof_buf);
+        assert!(res.is_err(), "non-canonical nullifier must be rejected");
     }
 }

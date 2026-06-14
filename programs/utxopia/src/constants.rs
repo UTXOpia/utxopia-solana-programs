@@ -9,6 +9,10 @@ pub const MAX_DEPOSIT_SATS: u64 = 100_000_000_000;
 /// Required Bitcoin confirmations
 pub const REQUIRED_CONFIRMATIONS: u32 = 2;
 
+/// Basis-points denominator. Configured fee bps must be strictly less than this so a
+/// fee can never consume 100% of a deposit/withdrawal (which would mint zero / DoS).
+pub const MAX_FEE_BPS: u16 = 10_000;
+
 /// Maximum Groth16 proof size in bytes (256 bytes = 2 G1 + 1 G2)
 pub const MAX_GROTH16_PROOF_SIZE: usize = 256;
 
@@ -42,7 +46,19 @@ pub const BTC_LIGHT_CLIENT_PROGRAM_ID: [u8; 32] = [
 /// Audited JoinSplit scope (N + M). VK registry accounts support variants up to 10.
 pub const MAX_SAFE_JOINSPLIT_SIZE: usize = 10;
 
+/// Guard against a contradictory build: `mainnet` must never be combined with a
+/// dev/test network feature, or `CHAIN_ID` (baked into every bound_params_hash) would be
+/// ambiguous and could silently weaken cross-chain replay protection.
+#[cfg(all(
+    feature = "mainnet",
+    any(feature = "devnet", feature = "localnet", feature = "devnet-regtest")
+))]
+compile_error!("`mainnet` feature is mutually exclusive with devnet/localnet/devnet-regtest");
+
 /// Chain ID for bound params hash verification (prevents cross-chain replay).
+/// NOTE: a non-mainnet build (the default) uses the devnet domain separator. A mainnet
+/// deployment MUST be built with `--features mainnet`; otherwise proofs are bound to the
+/// devnet CHAIN_ID. The guard above only catches contradictory combinations.
 #[cfg(not(feature = "mainnet"))]
 pub const CHAIN_ID: u64 = 103; // Solana devnet
 

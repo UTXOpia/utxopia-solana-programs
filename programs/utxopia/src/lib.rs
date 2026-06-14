@@ -56,9 +56,10 @@ pub mod instruction {
     pub const EXECUTE_POOL_UPDATE: u8 = 4;
     pub const CANCEL_POOL_UPDATE: u8 = 5;
 
-    // VK admin (6-7)
+    // VK admin (6-7, 16)
     pub const INIT_VK_REGISTRY: u8 = 6;
     pub const UPDATE_VK_REGISTRY: u8 = 7;
+    pub const FREEZE_VK_REGISTRY: u8 = 16;
 
     // Multi-token (8-10)
     pub const REGISTER_TOKEN: u8 = 8;
@@ -128,6 +129,9 @@ pub fn process_instruction(
         }
         instruction::UPDATE_VK_REGISTRY => {
             instructions::process_update_vk_registry(program_id, accounts, data)
+        }
+        instruction::FREEZE_VK_REGISTRY => {
+            instructions::process_freeze_vk_registry(program_id, accounts, data)
         }
         // Multi-token (8-10)
         instruction::REGISTER_TOKEN => {
@@ -229,6 +233,7 @@ mod tests {
             instruction::CANCEL_POOL_UPDATE,
             instruction::INIT_VK_REGISTRY,
             instruction::UPDATE_VK_REGISTRY,
+            instruction::FREEZE_VK_REGISTRY,
             instruction::REGISTER_TOKEN,
             instruction::UPDATE_TOKEN_CONFIG,
             instruction::CLAIM_FEES,

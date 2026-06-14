@@ -51,6 +51,10 @@ impl BitcoinLightClient {
         u64::from_le_bytes(self.tip_height)
     }
 
+    pub fn finalized_height(&self) -> u64 {
+        u64::from_le_bytes(self.finalized_height)
+    }
+
     pub fn header_count(&self) -> u64 {
         u64::from_le_bytes(self.header_count)
     }

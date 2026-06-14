@@ -131,6 +131,15 @@ pub fn process_initialize(
         start_bits = initial_bits;
     }
 
+    // Production networks MUST be seeded with difficulty params, otherwise extend_blockchain
+    // cannot enforce PoW difficulty (required_bits would be 0). Checkpoint at a known epoch
+    // so `epoch_start_time` is the timestamp of the first block of the current epoch.
+    if (network == NETWORK_MAINNET || network == NETWORK_TESTNET4)
+        && (initial_bits == 0 || epoch_start == 0)
+    {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+
     // Drop the borrow before creating more accounts
     drop(lc_data);
 

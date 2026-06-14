@@ -5,7 +5,8 @@ members = [
     "programs/btc-light-client",
 ]
 exclude = [
-    "programs/chadbuffer"
+    "programs/chadbuffer",
+    "programs/svm-tests"
 ]
 
 [profile.release]

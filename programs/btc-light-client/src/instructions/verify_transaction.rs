@@ -10,7 +10,7 @@ use pinocchio_system::instructions::CreateAccount;
 
 use crate::constants::{
     BLOCK_HEADER_DISCRIMINATOR, BLOCK_HEADER_SEED, HEIGHT_INDEX_DISCRIMINATOR, HEIGHT_INDEX_SEED,
-    REQUIRED_CONFIRMATIONS, VERIFIED_TX_DISCRIMINATOR, VERIFIED_TX_SEED,
+    VERIFIED_TX_DISCRIMINATOR, VERIFIED_TX_SEED,
 };
 use crate::state::{BitcoinLightClient, BlockHeader, HeightIndex, VerifiedTransaction};
 use crate::utils::{double_sha256, double_sha256_pair};
@@ -135,17 +135,16 @@ pub fn process_verify_transaction(
         }
     }
 
-    // Verify sufficient confirmations
+    // Require the block to be FINALIZED, not merely confirmed against the tip.
+    // finalized_height = canonical_tip - REQUIRED_CONFIRMATIONS, so a tx is only verifiable
+    // once its block is buried beyond the reorg horizon. Measuring against the tip (instead
+    // of finalized_height) let a transiently-inflated tip grant premature confirmations and
+    // left verified txs exposed to reorg; finality + enforced PoW (see extend_blockchain)
+    // closes both. The HeightIndex canonicality check above pins this to the main chain.
     {
         let lc_data = light_client_info.try_borrow_data()?;
         let lc = BitcoinLightClient::from_bytes(&lc_data)?;
-        let tip = lc.tip_height();
-        let confirmations = if block_height > tip {
-            0
-        } else {
-            tip - block_height + 1
-        };
-        if confirmations < REQUIRED_CONFIRMATIONS {
+        if block_height > lc.finalized_height() {
             return Err(ProgramError::InvalidArgument);
         }
     }
@@ -158,6 +157,11 @@ pub fn process_verify_transaction(
         // ChadBuffer format: 32-byte authority pubkey header, then data
         if buffer_data.len() < 32 + tx_size as usize {
             return Err(ProgramError::InvalidAccountData);
+        }
+        // Reject 64-byte leaves: a 64-byte "transaction" is indistinguishable from an
+        // internal merkle node, enabling the classic inner-node-as-tx inclusion forgery.
+        if tx_size == 64 {
+            return Err(ProgramError::InvalidArgument);
         }
         let raw_tx = &buffer_data[32..32 + tx_size as usize];
         let computed_hash = double_sha256(raw_tx);
@@ -176,6 +180,11 @@ pub fn process_verify_transaction(
             let sibling_offset = siblings_start + i * 32;
             let mut sibling = [0u8; 32];
             sibling.copy_from_slice(&proof_data[sibling_offset..sibling_offset + 32]);
+            // CVE-2012-2459: a node equal to its sibling marks a duplicated (forgeable)
+            // subtree. Honest proofs never present sibling == current.
+            if sibling == current {
+                return Err(ProgramError::InvalidArgument);
+            }
             let is_right = (path_bits >> i) & 1 == 1;
             current = if is_right {
                 double_sha256_pair(&sibling, &current)

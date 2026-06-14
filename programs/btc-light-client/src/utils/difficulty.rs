@@ -53,11 +53,17 @@ pub fn required_bits_for_next_block(
     }
 
     if block_height.is_multiple_of(BLOCKS_PER_EPOCH) {
-        let actual_timespan = parent_timestamp.wrapping_sub(epoch_start_time);
+        // saturating_sub (not wrapping_sub): an out-of-order epoch boundary timestamp would
+        // otherwise underflow to a huge timespan and be clamped to MAX, spuriously easing
+        // difficulty. Saturating to 0 clamps to the minimum timespan (hardest) — fail-safe.
+        let actual_timespan = parent_timestamp.saturating_sub(epoch_start_time);
         return calculate_new_bits(epoch_bits, actual_timespan);
     }
 
-    if testnet4 && timestamp.wrapping_sub(parent_timestamp) > 20 * 60 {
+    // Guard the subtraction: without `timestamp > parent_timestamp` an out-of-order
+    // timestamp underflows `wrapping_sub` to a huge value and spuriously trips the
+    // testnet4 20-minute min-difficulty exception.
+    if testnet4 && timestamp > parent_timestamp && timestamp - parent_timestamp > 20 * 60 {
         return MAX_TARGET_BITS;
     }
 
@@ -147,5 +153,62 @@ mod tests {
 
         assert_eq!(required, calculate_new_bits(epoch_bits, TARGET_TIMESPAN));
         assert_ne!(required, MAX_TARGET_BITS);
+    }
+
+    // --- Regression tests for the 2026-06-14 consensus hardening ---
+
+    /// C1: an unseeded chain (epoch_bits == 0) yields required_bits == 0. extend_blockchain
+    /// now treats 0 as "reject" for mainnet/testnet4 instead of skipping the difficulty check.
+    #[test]
+    fn unseeded_epoch_bits_returns_zero() {
+        assert_eq!(
+            required_bits_for_next_block(false, 100, 1_000, 900, 0, 0),
+            0
+        );
+        assert_eq!(required_bits_for_next_block(true, 100, 1_000, 900, 0, 0), 0);
+    }
+
+    /// C2 guard: an out-of-order (backwards) timestamp must NOT trip the testnet4
+    /// min-difficulty exception. Pre-fix, `timestamp.wrapping_sub(parent)` underflowed to a
+    /// huge value > 1200 and returned MAX_TARGET_BITS, easing difficulty for free.
+    #[test]
+    fn testnet4_backwards_timestamp_does_not_ease_difficulty() {
+        let epoch_bits = 0x1d00aaaa;
+        // timestamp (100) < parent_timestamp (1000), non-boundary height.
+        let required = required_bits_for_next_block(true, 100, 100, 1_000, epoch_bits, 0);
+        assert_eq!(required, epoch_bits);
+        assert_ne!(required, MAX_TARGET_BITS);
+    }
+
+    /// C2 guard: an epoch-boundary retarget with parent_timestamp < epoch_start_time must
+    /// saturate the timespan to 0 (→ clamped to the minimum, hardest), never underflow into
+    /// the maximum timespan (easiest).
+    #[test]
+    fn retarget_saturates_on_backwards_epoch_no_easing() {
+        let epoch_bits = 0x1b0404cb; // a realistic mid-range difficulty
+        let required = required_bits_for_next_block(
+            false,
+            BLOCKS_PER_EPOCH, // boundary
+            5_000,
+            100,   // parent_timestamp
+            epoch_bits,
+            1_000, // epoch_start_time > parent_timestamp → backwards
+        );
+        // Saturated timespan 0 clamps to TARGET_TIMESPAN/4 (max difficulty increase).
+        assert_eq!(required, calculate_new_bits(epoch_bits, TARGET_TIMESPAN / 4));
+        // And it is NOT the eased (4x timespan) result.
+        assert_ne!(required, calculate_new_bits(epoch_bits, TARGET_TIMESPAN * 4));
+    }
+
+    /// calculate_new_bits clamps the timespan to [T/4, T*4]; values outside collapse to the
+    /// bounds, capping per-epoch difficulty swings (limits timestamp-manipulation leverage).
+    #[test]
+    fn calculate_new_bits_clamps_timespan() {
+        let b = 0x1b0404cb;
+        assert_eq!(calculate_new_bits(b, 1), calculate_new_bits(b, TARGET_TIMESPAN / 4));
+        assert_eq!(
+            calculate_new_bits(b, u32::MAX),
+            calculate_new_bits(b, TARGET_TIMESPAN * 4)
+        );
     }
 }
