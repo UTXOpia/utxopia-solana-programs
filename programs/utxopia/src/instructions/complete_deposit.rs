@@ -254,7 +254,7 @@ pub fn process_complete_deposit(
 
     // --- VerifiedTransaction PDA check ---
     // Parse the VerifiedTransaction PDA and verify the SPV-verified txid matches.
-    {
+    let vt_epoch = {
         let vt_data = verified_tx_info.try_borrow_data()?;
         let vt = VerifiedTransactionView::from_bytes(&vt_data)?;
 
@@ -276,12 +276,18 @@ pub fn process_complete_deposit(
             vt.txid(),
             btc_lc_id,
         )?;
-    }
+
+        vt.reinit_epoch()
+    };
     crate::state::assert_canonical_light_client(light_client_info.key(), btc_lc_id)?;
 
     // Verify sufficient confirmations via light client tip height
     {
         let lc_data = light_client_info.try_borrow_data()?;
+        // Reject proofs minted under a prior light-client chain instance (see reinitialize).
+        if vt_epoch != crate::state::light_client_reinit_epoch(&lc_data)? {
+            return Err(UTXOpiaError::InvalidSpvProof.into());
+        }
         let tip = light_client_tip_height(&lc_data)?;
         let confirmations = if ix_data.block_height > tip {
             0
@@ -393,20 +399,32 @@ pub fn process_complete_deposit(
 
     // Extract pool output amount and vout. The credited output must match the
     // configured pool script so the recorded UTXO is controlled by Ika custody.
-    let (deposit_output, sweep_vout) = sweep_parsed
+    let (pool_output, sweep_vout) = sweep_parsed
         .find_output_by_script(pool_script)
         .ok_or(UTXOpiaError::InvalidSpvProof)?;
-    let amount_sats = deposit_output.value;
+    let pool_output_value = pool_output.value;
     let original_deposit_sats = if direct_to_pool {
         // The SPV-verified transaction is the user deposit itself. The pool
         // output is the gross user deposit; other outputs may be wallet change.
-        amount_sats
+        pool_output_value
     } else {
         // Two-step sweep mode: report the original user deposit output before
         // the backend sweep miner fee reduced the pool-received amount.
         original_deposit_output
             .map(|o| o.value)
-            .unwrap_or(amount_sats)
+            .unwrap_or(pool_output_value)
+    };
+
+    // Bind the credited amount to the claimant's OWN deposit. A batched/consolidating sweep
+    // produces a single pool output that aggregates many users' deposits; crediting that whole
+    // output to one completer would let a small deposit mint against the entire aggregate and
+    // claim others' funds. In sweep mode, cap the credit at the traced deposit output value
+    // (the user can never be credited more than they actually deposited). Direct-to-pool mode
+    // has no intermediate sweep, so the pool output IS the user's deposit.
+    let amount_sats = if direct_to_pool {
+        pool_output_value
+    } else {
+        core::cmp::min(original_deposit_sats, pool_output_value)
     };
 
     // Validate extracted amount is within bounds

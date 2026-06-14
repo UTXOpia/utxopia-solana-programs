@@ -198,42 +198,13 @@ pub fn process_verify_deposit(
         tc.token_id
     };
 
-    // --- Deposit receipt dedup check ---
-    {
-        let receipt_seeds: &[&[u8]] = &[DepositReceipt::SEED, &ix_data.deposit_txid];
-        let (expected_receipt_pda, receipt_bump) = find_program_address(receipt_seeds, program_id);
-        if deposit_receipt_info.key() != &expected_receipt_pda {
-            return Err(ProgramError::InvalidSeeds);
-        }
-
-        // Check if deposit was already verified
-        {
-            let receipt_data = deposit_receipt_info.try_borrow_data()?;
-            if !receipt_data.is_empty() && receipt_data[0] == DEPOSIT_RECEIPT_DISCRIMINATOR {
-                return Err(UTXOpiaError::DuplicateDeposit.into());
-            }
-        }
-
-        // Create deposit receipt PDA
-        let rent = Rent::get()?;
-        let bump_bytes = [receipt_bump];
-        let signer_seeds: &[&[u8]] = &[DepositReceipt::SEED, &ix_data.deposit_txid, &bump_bytes];
-
-        create_pda_account(
-            authority,
-            deposit_receipt_info,
-            program_id,
-            rent.minimum_balance(DepositReceipt::LEN),
-            DepositReceipt::LEN as u64,
-            signer_seeds,
-        )?;
-
-        let mut receipt_data = deposit_receipt_info.try_borrow_mut_data()?;
-        DepositReceipt::init(&mut receipt_data)?;
-    }
+    // NOTE: the deposit-receipt dedup PDA is created AFTER the npk-bound deposit output (and
+    // its vout) is identified below, so the receipt is keyed by (txid, vout). Keying by txid
+    // alone would let a single funding transaction carrying multiple independent deposit
+    // outputs verify only its first output and permanently block the others.
 
     // --- VerifiedTransaction PDA check ---
-    {
+    let vt_epoch = {
         let vt_data = verified_tx_info.try_borrow_data()?;
         let vt = VerifiedTransactionView::from_bytes(&vt_data)?;
 
@@ -253,12 +224,18 @@ pub fn process_verify_deposit(
             vt.txid(),
             btc_lc_id,
         )?;
-    }
+
+        vt.reinit_epoch()
+    };
     crate::state::assert_canonical_light_client(light_client_info.key(), btc_lc_id)?;
 
     // Verify sufficient confirmations
     {
         let lc_data = light_client_info.try_borrow_data()?;
+        // Reject proofs minted under a prior light-client chain instance (see reinitialize).
+        if vt_epoch != crate::state::light_client_reinit_epoch(&lc_data)? {
+            return Err(UTXOpiaError::InvalidSpvProof.into());
+        }
         let tip = light_client_tip_height(&lc_data)?;
         let confirmations = if ix_data.block_height > tip {
             0
@@ -358,6 +335,49 @@ pub fn process_verify_deposit(
 
     if !sweep_parsed.find_input_with_prev_outpoint(&ix_data.deposit_txid, deposit_vout) {
         return Err(UTXOpiaError::InvalidSpvProof.into());
+    }
+
+    // --- Deposit receipt dedup check, keyed by (txid, vout) ---
+    // One receipt per deposit OUTPUT, so distinct outputs of the same funding tx can each be
+    // credited exactly once and replays of any single output are still rejected.
+    {
+        let deposit_vout_le = deposit_vout.to_le_bytes();
+        let receipt_seeds: &[&[u8]] =
+            &[DepositReceipt::SEED, &ix_data.deposit_txid, &deposit_vout_le];
+        let (expected_receipt_pda, receipt_bump) = find_program_address(receipt_seeds, program_id);
+        if deposit_receipt_info.key() != &expected_receipt_pda {
+            return Err(ProgramError::InvalidSeeds);
+        }
+
+        // Check if this specific deposit output was already verified
+        {
+            let receipt_data = deposit_receipt_info.try_borrow_data()?;
+            if !receipt_data.is_empty() && receipt_data[0] == DEPOSIT_RECEIPT_DISCRIMINATOR {
+                return Err(UTXOpiaError::DuplicateDeposit.into());
+            }
+        }
+
+        // Create deposit receipt PDA
+        let rent = Rent::get()?;
+        let bump_bytes = [receipt_bump];
+        let signer_seeds: &[&[u8]] = &[
+            DepositReceipt::SEED,
+            &ix_data.deposit_txid,
+            &deposit_vout_le,
+            &bump_bytes,
+        ];
+
+        create_pda_account(
+            authority,
+            deposit_receipt_info,
+            program_id,
+            rent.minimum_balance(DepositReceipt::LEN),
+            DepositReceipt::LEN as u64,
+            signer_seeds,
+        )?;
+
+        let mut receipt_data = deposit_receipt_info.try_borrow_mut_data()?;
+        DepositReceipt::init(&mut receipt_data)?;
     }
 
     // Credit exactly the value of the npk-bound deposit output. The previous code read

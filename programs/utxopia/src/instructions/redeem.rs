@@ -48,9 +48,9 @@ use pinocchio::{
 
 use crate::error::UTXOpiaError;
 use crate::instructions::joinsplit_common::{
-    create_nullifier_records, parse_header, parse_prefix, read_u64_le, take_bytes,
-    validate_account_count, validate_public_outputs, verify_vk_merkle_and_proof, JoinSplitHeader,
-    MAX_PUBLIC_OUTPUTS, STEALTH_DATA_PER_OUTPUT,
+    create_nullifier_records, looks_like_commitment_tree, parse_header, parse_prefix, read_u64_le,
+    take_bytes, validate_account_count, validate_public_outputs, verify_vk_merkle_and_proof,
+    JoinSplitHeader, MAX_PUBLIC_OUTPUTS, STEALTH_DATA_PER_OUTPUT,
 };
 use crate::state::{
     CommitmentTree, NullifierOperationType, PoolState, RedemptionRequest, RedemptionStatus,
@@ -128,10 +128,13 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
         }
 
         let stealth_data_hash = crate::utils::sha256(&data[stealth_data_start..stealth_data_end]);
+        // Bind the proof to the requesting signer (accounts[3]) so it cannot be replayed under a
+        // different signer to hijack ownership of the resulting RedemptionRequest PDAs.
         let expected = crate::utils::crypto::compute_bound_params_hash_redeem(
             crate::constants::CHAIN_ID,
             &scripts_concat[..scripts_total_len],
             &stealth_data_hash,
+            accounts[3].key(),
         );
         if *prefix.bound_params_hash != expected {
             return Err(UTXOpiaError::InvalidBoundParams.into());
@@ -174,15 +177,31 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
     };
 
     // Validate pool is not paused, validate active tree, read state
-    let (pending_redemptions, total_shielded) = {
+    let (pending_redemptions, total_shielded, active_index) = {
         let pool_data = pool_state_info.try_borrow_data()?;
         let pool = PoolState::from_bytes(&pool_data)?;
         if pool.is_paused() {
             return Err(UTXOpiaError::PoolPaused.into());
         }
         validate_active_tree_pda(commitment_tree_info, program_id, pool.active_tree_index())?;
-        (pool.pending_redemptions(), pool.total_shielded())
+        (
+            pool.pending_redemptions(),
+            pool.total_shielded(),
+            pool.active_tree_index(),
+        )
     };
+
+    // Optional frozen source tree for spending notes committed before a tree rotation; appended
+    // just before the optional proof_buffer and identified by being a program-owned CommitmentTree.
+    let pb = usize::from(proof_source == 1);
+    let source_tree_info = accounts
+        .len()
+        .checked_sub(1 + pb)
+        .filter(|&i| i >= min_accounts)
+        .map(|i| &accounts[i])
+        .filter(|a| {
+            a.key() != commitment_tree_info.key() && looks_like_commitment_tree(a, program_id)
+        });
 
     // Validate total redeem amount
     let mut total_redeem: u64 = 0;
@@ -198,7 +217,15 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
         return Err(UTXOpiaError::InsufficientFunds.into());
     }
 
-    verify_vk_merkle_and_proof(vk_registry_info, commitment_tree_info, header, &prefix)?;
+    verify_vk_merkle_and_proof(
+        program_id,
+        vk_registry_info,
+        commitment_tree_info,
+        active_index,
+        source_tree_info,
+        header,
+        &prefix,
+    )?;
 
     // Verify burn commitments: last n_public_outputs = Poseidon(0, token_id, amount_k)
     {

@@ -7,9 +7,12 @@ use pinocchio::{
 };
 
 use crate::error::UTXOpiaError;
-use crate::state::{CommitmentTree, NullifierRecord, VkRegistry, NULLIFIER_RECORD_DISCRIMINATOR};
+use crate::state::{
+    CommitmentTree, NullifierRecord, VkRegistry, COMMITMENT_TREE_DISCRIMINATOR,
+    NULLIFIER_RECORD_DISCRIMINATOR,
+};
 use crate::utils::groth16::GROTH16_PROOF_SIZE;
-use crate::utils::{create_pda_account, validate_account_writable};
+use crate::utils::{create_pda_account, validate_account_writable, validate_frozen_tree};
 
 pub const MAX_JOINSPLIT_SIZE: usize = crate::constants::MAX_SAFE_JOINSPLIT_SIZE;
 pub const MAX_PUBLIC_OUTPUTS: usize = 3;
@@ -193,17 +196,48 @@ pub fn parse_prefix<'a>(
     })
 }
 
+/// Cheap identity check: does this account look like a program-owned CommitmentTree?
+/// Used to detect an optional frozen source-tree account positionally without ambiguity
+/// (relayer accounts are signers, proof buffers are ChadBuffer-owned — neither matches).
+pub fn looks_like_commitment_tree(account: &AccountInfo, program_id: &Pubkey) -> bool {
+    if account.owner() != program_id {
+        return false;
+    }
+    account
+        .try_borrow_data()
+        .map(|d| d.first().copied() == Some(COMMITMENT_TREE_DISCRIMINATOR))
+        .unwrap_or(false)
+}
+
 pub fn verify_vk_merkle_and_proof(
+    program_id: &Pubkey,
     vk_registry_info: &AccountInfo,
     commitment_tree_info: &AccountInfo,
+    active_index: u32,
+    source_tree_info: Option<&AccountInfo>,
     header: JoinSplitHeader,
     prefix: &JoinSplitPrefix<'_>,
 ) -> ProgramResult {
     {
-        let tree_data = commitment_tree_info.try_borrow_data()?;
-        let tree = CommitmentTree::from_bytes(&tree_data)?;
-        if !tree.is_valid_root(prefix.merkle_root) {
-            return Err(UTXOpiaError::InvalidMerkleProof.into());
+        // The note may live in the active tree OR — after a tree rotation — in a frozen previous
+        // tree. Validate the proof's merkle_root against the active tree first; if it does not
+        // match, accept a caller-supplied frozen source tree whose (current or historical) root
+        // matches. New output commitments are still inserted into the active tree by the caller.
+        let active_root_ok = {
+            let tree_data = commitment_tree_info.try_borrow_data()?;
+            let tree = CommitmentTree::from_bytes(&tree_data)?;
+            tree.is_valid_root(prefix.merkle_root)
+        };
+        if !active_root_ok {
+            let frozen_ok = match source_tree_info {
+                Some(src) => {
+                    validate_frozen_tree(src, program_id, active_index, prefix.merkle_root)?
+                }
+                None => false,
+            };
+            if !frozen_ok {
+                return Err(UTXOpiaError::InvalidMerkleProof.into());
+            }
         }
     }
 

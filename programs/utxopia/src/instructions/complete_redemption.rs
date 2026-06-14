@@ -128,15 +128,30 @@ pub(crate) fn redemption_outputs_within_policy(
     recipient_script: &[u8],
     pool_script: &[u8],
 ) -> bool {
+    let mut change_outputs = 0u32;
     for output in parsed_tx.outputs() {
         if output.script_pubkey == recipient_script {
             continue; // recipient payout
         }
         if !pool_script.is_empty() && output.script_pubkey == pool_script {
-            continue; // change back to the pool
+            // Change back to the pool. Only ONE change output is tracked downstream
+            // (find_output_by_script records the first match), so reject any tx that
+            // splits change across multiple pool outputs — otherwise the extra change
+            // would be silently untracked and stranded.
+            change_outputs += 1;
+            if change_outputs > 1 {
+                return false;
+            }
+            continue;
         }
         if output.is_op_return() {
-            continue; // unspendable marker — cannot benefit an attacker
+            // Unspendable marker. Bitcoin permits non-zero-value OP_RETURN outputs, which
+            // would destroy real pool BTC without being captured in burn accounting, leaving
+            // the pool undercollateralized. Only a zero-value marker is policy-compliant.
+            if output.value != 0 {
+                return false;
+            }
+            continue;
         }
         return false;
     }
@@ -325,7 +340,7 @@ pub fn process_complete_redemption(
     };
 
     // --- VerifiedTransaction PDA check ---
-    let block_height = {
+    let (block_height, vt_epoch) = {
         let vt_data = verified_tx_info.try_borrow_data()?;
         let vt = VerifiedTransactionView::from_bytes(&vt_data)?;
 
@@ -343,13 +358,18 @@ pub fn process_complete_redemption(
             btc_lc_id,
         )?;
 
-        vt.block_height() as u64
+        (vt.block_height() as u64, vt.reinit_epoch())
     };
     crate::state::assert_canonical_light_client(light_client_info.key(), btc_lc_id)?;
 
     // Verify sufficient confirmations
     {
         let lc_data = light_client_info.try_borrow_data()?;
+        // Reject proofs from a prior chain instance: after a light-client reinitialization the
+        // singleton PDA still passes the canonical check, but stale proofs carry an older epoch.
+        if vt_epoch != crate::state::light_client_reinit_epoch(&lc_data)? {
+            return Err(UTXOpiaError::RedemptionSpvFailed.into());
+        }
         let tip = light_client_tip_height(&lc_data)?;
         let confirmations = if block_height > tip {
             0
@@ -390,11 +410,24 @@ pub fn process_complete_redemption(
         .ok_or(ProgramError::ArithmeticOverflow)?;
     let min_amount = expected_send.saturating_sub(MAX_FEE_SATS);
 
-    let actual_received = parsed_tx
-        .outputs()
-        .find(|output| output.script_pubkey == expected_script_slice && output.value >= min_amount)
-        .ok_or(UTXOpiaError::RedemptionOutputMismatch)?
-        .value;
+    // Sum the value of EVERY output paying the recipient script. Taking only the first
+    // matching output under-counts the BTC actually sent when a completion tx splits the
+    // payout across multiple recipient outputs, causing burn_amount to understate the real
+    // pool outflow and leaving excess zkBTC outstanding (undercollateralization).
+    let mut actual_received: u64 = 0;
+    let mut matched_recipient = false;
+    for output in parsed_tx.outputs() {
+        if output.script_pubkey == expected_script_slice {
+            matched_recipient = true;
+            actual_received = actual_received
+                .checked_add(output.value)
+                .ok_or(ProgramError::ArithmeticOverflow)?;
+        }
+    }
+    // Require at least one recipient output and that the aggregate meets the lower bound.
+    if !matched_recipient || actual_received < min_amount {
+        return Err(UTXOpiaError::RedemptionOutputMismatch.into());
+    }
 
     // --- Anti-skim: constrain where pool BTC may go ---
     // Every output must pay the recipient, return to the pool change script, or be an
@@ -542,6 +575,12 @@ pub fn process_complete_redemption(
                 // SECURITY: Verify UTXO is Reserved (set by mark_processing).
                 // Prevents consuming Unspent UTXOs that weren't part of this withdrawal.
                 if utxo.get_status() != UtxoStatus::Reserved {
+                    return Err(UTXOpiaError::InvalidUtxo.into());
+                }
+                // SECURITY: Verify the UTXO was reserved for THIS redemption. Without this,
+                // one redemption could complete by consuming UTXOs reserved for a different
+                // in-flight redemption, desynchronizing pool accounting.
+                if utxo.reserved_for_request_id() != request_id {
                     return Err(UTXOpiaError::InvalidUtxo.into());
                 }
                 let amount = utxo.amount_sats();

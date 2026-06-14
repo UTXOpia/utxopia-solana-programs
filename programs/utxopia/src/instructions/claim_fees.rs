@@ -57,6 +57,12 @@ pub fn process_claim_fees(
     validate_account_writable(vault)?;
     validate_account_writable(admin_token_account)?;
 
+    // Reject vault == destination: a self-transfer moves no tokens, but accumulated_fees would
+    // still be decremented below, permanently stranding that fee value in the vault.
+    if vault.key() == admin_token_account.key() {
+        return Err(ProgramError::InvalidArgument);
+    }
+
     // Validate authority
     let pool_bump = {
         let pool_data = pool_state_info.try_borrow_data()?;

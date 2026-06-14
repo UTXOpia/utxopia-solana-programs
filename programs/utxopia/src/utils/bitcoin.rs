@@ -27,6 +27,46 @@ pub fn double_sha256(data: &[u8]) -> [u8; 32] {
     sha256(&first)
 }
 
+/// SHA256 over multiple non-contiguous byte ranges, as if they were concatenated.
+/// Uses sol_sha256's multi-chunk form so no intermediate buffer is needed on-chain.
+pub fn sha256_parts(parts: &[&[u8]]) -> [u8; 32] {
+    let mut result = [0u8; 32];
+
+    #[cfg(target_os = "solana")]
+    {
+        unsafe {
+            extern "C" {
+                fn sol_sha256(vals: *const u8, val_len: u64, hash_result: *mut u8) -> u64;
+            }
+            // sol_sha256 expects an array of (ptr, len) descriptors, one per chunk.
+            const MAX_PARTS: usize = 4;
+            let mut descs = [[core::ptr::null::<u8>(), core::ptr::null::<u8>()]; MAX_PARTS];
+            let n = parts.len();
+            for (i, p) in parts.iter().enumerate() {
+                descs[i] = [p.as_ptr(), p.len() as *const u8];
+            }
+            sol_sha256(descs.as_ptr() as *const u8, n as u64, result.as_mut_ptr());
+        }
+    }
+
+    #[cfg(not(target_os = "solana"))]
+    {
+        let buf = alloc_concat(parts);
+        result.copy_from_slice(&sha256(&buf));
+    }
+
+    result
+}
+
+#[cfg(not(target_os = "solana"))]
+fn alloc_concat(parts: &[&[u8]]) -> std::vec::Vec<u8> {
+    let mut v = std::vec::Vec::new();
+    for p in parts {
+        v.extend_from_slice(p);
+    }
+    v
+}
+
 /// SHA256 hash using Solana's syscall
 pub fn sha256(data: &[u8]) -> [u8; 32] {
     // Solana provides sol_sha256 syscall
@@ -92,9 +132,64 @@ pub fn keccak256(data: &[u8]) -> [u8; 32] {
     result
 }
 
-/// Compute Bitcoin transaction hash (double SHA256)
+/// Compute a Bitcoin transaction's canonical txid (double SHA256).
+///
+/// For SegWit transactions the txid is computed over the LEGACY serialization — version, inputs,
+/// outputs, locktime — with the marker, flag, and witness data removed. Hashing the raw bytes of a
+/// SegWit tx instead yields the wtxid, which does not match the txid committed in block Merkle
+/// roots / SPV proofs. Legacy transactions hash their raw bytes directly.
 pub fn compute_tx_hash(raw_tx: &[u8]) -> [u8; 32] {
-    double_sha256(raw_tx)
+    match segwit_body_end(raw_tx) {
+        Some(body_end) if raw_tx.len() >= body_end + 4 => {
+            // version[0..4] ++ (inputs ++ outputs)[6..body_end] ++ locktime[len-4..len]
+            let version = &raw_tx[0..4];
+            let body = &raw_tx[6..body_end];
+            let locktime = &raw_tx[raw_tx.len() - 4..];
+            let inner = sha256_parts(&[version, body, locktime]);
+            sha256(&inner)
+        }
+        // Legacy tx (or unparseable as segwit): hash raw bytes as before.
+        _ => double_sha256(raw_tx),
+    }
+}
+
+/// If `raw_tx` is a SegWit transaction, return the offset at which the outputs end (i.e. where the
+/// witness section begins). Returns `None` for legacy transactions or on parse failure, so callers
+/// fall back to hashing the raw bytes.
+fn segwit_body_end(raw_tx: &[u8]) -> Option<usize> {
+    if raw_tx.len() < 10 {
+        return None;
+    }
+    let mut offset = 4;
+    // SegWit marker (0x00) + flag (0x01)
+    if !(raw_tx[offset] == 0x00 && raw_tx[offset + 1] == 0x01) {
+        return None;
+    }
+    offset += 2;
+
+    let (input_count, vi) = read_varint(raw_tx.get(offset..)?).ok()?;
+    offset += vi;
+    for _ in 0..input_count {
+        offset += 36; // prev outpoint
+        let (script_len, vi) = read_varint(raw_tx.get(offset..)?).ok()?;
+        offset += vi + script_len as usize + 4; // script + sequence
+        if offset > raw_tx.len() {
+            return None;
+        }
+    }
+
+    let (output_count, vi) = read_varint(raw_tx.get(offset..)?).ok()?;
+    offset += vi;
+    for _ in 0..output_count {
+        offset += 8; // value
+        let (script_len, vi) = read_varint(raw_tx.get(offset..)?).ok()?;
+        offset += vi + script_len as usize;
+        if offset > raw_tx.len() {
+            return None;
+        }
+    }
+
+    Some(offset)
 }
 
 /// Parsed Bitcoin transaction output
@@ -415,5 +510,59 @@ fn read_varint(data: &[u8]) -> Result<(u64, usize), ProgramError> {
             }
             Ok((u64::from_le_bytes(data[1..9].try_into().unwrap()), 9))
         }
+    }
+}
+
+#[cfg(test)]
+mod txid_tests {
+    use super::*;
+
+    // Build a 1-in/1-out transaction body shared by the legacy and segwit encodings.
+    // version(4) | [marker|flag] | vin_count | input(prevout36 + scriptlen + script + seq4)
+    //   | vout_count | output(value8 + scriptlen + script) | [witness] | locktime(4)
+    fn parts() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let version = vec![2u8, 0, 0, 0];
+        let mut vin = vec![1u8]; // 1 input
+        vin.extend_from_slice(&[0x11u8; 32]); // prev txid
+        vin.extend_from_slice(&[0u8; 4]); // prev vout
+        vin.push(0); // empty scriptSig (segwit)
+        vin.extend_from_slice(&[0xffu8; 4]); // sequence
+        let mut vout = vec![1u8]; // 1 output
+        vout.extend_from_slice(&50_000u64.to_le_bytes());
+        let spk = vec![0x51u8, 0x20, 0xAA]; // dummy-ish script (len 3 via varint below)
+        vout.push(spk.len() as u8);
+        vout.extend_from_slice(&spk);
+        let locktime = vec![0u8; 4];
+        ([version, vin, vout].concat(), locktime, {
+            // a witness: 1 stack item of 4 bytes
+            vec![0x01, 0x04, 0xde, 0xad, 0xbe, 0xef]
+        })
+    }
+
+    #[test]
+    fn segwit_txid_matches_legacy_serialization() {
+        let (body, locktime, witness) = parts();
+
+        // Legacy serialization = body || locktime
+        let mut legacy = body.clone();
+        legacy.extend_from_slice(&locktime);
+
+        // Segwit serialization = version || 0x00 0x01 || vin || vout || witness || locktime
+        let mut segwit = Vec::new();
+        segwit.extend_from_slice(&body[0..4]); // version
+        segwit.extend_from_slice(&[0x00, 0x01]); // marker+flag
+        segwit.extend_from_slice(&body[4..]); // vin + vout
+        segwit.extend_from_slice(&witness);
+        segwit.extend_from_slice(&locktime);
+
+        let legacy_txid = compute_tx_hash(&legacy);
+        let segwit_txid = compute_tx_hash(&segwit);
+
+        // The canonical txid of the segwit tx must equal the legacy serialization's hash,
+        // i.e. the witness/marker/flag are excluded.
+        assert_eq!(legacy_txid, segwit_txid);
+
+        // And it must NOT equal the wtxid (raw double-sha of the full segwit bytes).
+        assert_ne!(segwit_txid, double_sha256(&segwit));
     }
 }

@@ -88,6 +88,13 @@ pub fn process_cancel_redemption(
             return Err(UTXOpiaError::Unauthorized.into());
         }
 
+        // Never cancel once BTC signing was approved: a payout may already be broadcastable,
+        // and re-minting the note here would enable a cross-chain double-spend. This holds even
+        // after the processing timeout.
+        if redemption.is_signing_approved() {
+            return Err(UTXOpiaError::RedemptionCancelNotAllowed.into());
+        }
+
         // Allow cancel if Pending, or if Processing and timed out
         match redemption.get_status() {
             RedemptionStatus::Pending => {

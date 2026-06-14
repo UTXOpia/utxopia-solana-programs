@@ -26,13 +26,14 @@ pub enum UtxoStatus {
 
 /// On-chain UTXO record (zero-copy layout)
 ///
-/// Layout (48 bytes):
-/// - discriminator:  1 byte  (0x09)
-/// - status:         1 byte  (0=Unspent, 1=Reserved)
-/// - _padding:       2 bytes
-/// - vout:           4 bytes (u32 LE)
-/// - txid:           32 bytes
-/// - amount_sats:    8 bytes (u64 LE)
+/// Layout (56 bytes):
+/// - discriminator:           1 byte  (0x09)
+/// - status:                  1 byte  (0=Unspent, 1=Reserved)
+/// - _padding:                2 bytes
+/// - vout:                    4 bytes (u32 LE)
+/// - txid:                    32 bytes
+/// - amount_sats:             8 bytes (u64 LE)
+/// - reserved_for_request_id: 8 bytes (u64 LE; 0 when Unspent)
 #[repr(C)]
 pub struct UtxoRecord {
     /// Account discriminator (0x09)
@@ -52,6 +53,11 @@ pub struct UtxoRecord {
 
     /// Amount in satoshis
     amount_sats: [u8; 8],
+
+    /// request_id of the RedemptionRequest that reserved this UTXO (0 while Unspent).
+    /// Binds a Reserved UTXO to one specific redemption so it cannot be consumed to
+    /// complete a different in-flight redemption.
+    reserved_for_request_id: [u8; 8],
 }
 
 impl UtxoRecord {
@@ -107,6 +113,10 @@ impl UtxoRecord {
         u64::from_le_bytes(self.amount_sats)
     }
 
+    pub fn reserved_for_request_id(&self) -> u64 {
+        u64::from_le_bytes(self.reserved_for_request_id)
+    }
+
     // Setters
     pub fn set_status(&mut self, status: UtxoStatus) {
         self.status = status as u8;
@@ -122,6 +132,10 @@ impl UtxoRecord {
 
     pub fn set_amount_sats(&mut self, value: u64) {
         self.amount_sats = value.to_le_bytes();
+    }
+
+    pub fn set_reserved_for_request_id(&mut self, value: u64) {
+        self.reserved_for_request_id = value.to_le_bytes();
     }
 }
 

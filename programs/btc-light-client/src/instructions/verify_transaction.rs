@@ -141,13 +141,14 @@ pub fn process_verify_transaction(
     // of finalized_height) let a transiently-inflated tip grant premature confirmations and
     // left verified txs exposed to reorg; finality + enforced PoW (see extend_blockchain)
     // closes both. The HeightIndex canonicality check above pins this to the main chain.
-    {
+    let reinit_epoch = {
         let lc_data = light_client_info.try_borrow_data()?;
         let lc = BitcoinLightClient::from_bytes(&lc_data)?;
         if block_height > lc.finalized_height() {
             return Err(ProgramError::InvalidArgument);
         }
-    }
+        lc.reinit_epoch()
+    };
 
     // Read raw tx from ChadBuffer and verify hash
     {
@@ -251,6 +252,9 @@ pub fn process_verify_transaction(
         vt.block_hash = block_hash;
         vt.txid = txid;
         vt.tx_index = tx_index.to_le_bytes();
+        // Bind this proof to the current light-client reinit epoch so it cannot be replayed
+        // after a reinitialization that resets the chain to a different instance.
+        vt._reserved = reinit_epoch.to_le_bytes();
 
         let clock = Clock::get()?;
         vt.verified_at = clock.unix_timestamp.to_le_bytes();

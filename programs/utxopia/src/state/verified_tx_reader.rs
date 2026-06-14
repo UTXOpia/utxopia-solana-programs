@@ -102,6 +102,13 @@ impl<'a> VerifiedTransactionView<'a> {
     pub fn tx_index(&self) -> u32 {
         u32::from_le_bytes(self.data[80..84].try_into().unwrap())
     }
+
+    /// Reinit epoch this proof was minted under (u32 LE at [84..88]).
+    /// Bound at verify_transaction time to the light client's reinit epoch so a stale
+    /// proof from a pre-reinitialization chain instance can be detected.
+    pub fn reinit_epoch(&self) -> u32 {
+        u32::from_le_bytes(self.data[84..88].try_into().unwrap())
+    }
 }
 
 /// Read tip height from btc-light-client BitcoinLightClient account
@@ -115,4 +122,36 @@ pub fn light_client_tip_height(data: &[u8]) -> Result<u64, ProgramError> {
         return Err(ProgramError::InvalidAccountData);
     }
     Ok(u64::from_le_bytes(data[136..144].try_into().unwrap()))
+}
+
+/// Minimum size of BitcoinLightClient account for reading the reinit epoch (offset 176..180).
+const LIGHT_CLIENT_EPOCH_MIN_LEN: usize = 180;
+
+/// Read the reinit epoch from btc-light-client BitcoinLightClient account.
+///
+/// Layout offset 176..180 is reinit_epoch (u32 LE), stored in the account's _reserved region.
+pub fn light_client_reinit_epoch(data: &[u8]) -> Result<u32, ProgramError> {
+    if data.len() < LIGHT_CLIENT_EPOCH_MIN_LEN {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    if data[0] != BTC_LIGHT_CLIENT_DISCRIMINATOR {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    Ok(u32::from_le_bytes(data[176..180].try_into().unwrap()))
+}
+
+/// Assert that a VerifiedTransaction proof belongs to the current light-client chain instance.
+///
+/// After `process_reinitialize` resets the singleton light client to a different chain, old
+/// proofs keep their PDA and discriminator but carry the *previous* reinit epoch. Comparing the
+/// proof's epoch against the current light-client epoch rejects stale/wrong-chain proofs.
+pub fn assert_verified_tx_current_epoch(
+    vt: &VerifiedTransactionView,
+    light_client_data: &[u8],
+) -> Result<(), ProgramError> {
+    let current_epoch = light_client_reinit_epoch(light_client_data)?;
+    if vt.reinit_epoch() != current_epoch {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    Ok(())
 }

@@ -50,8 +50,9 @@ use pinocchio::{
 
 use crate::error::UTXOpiaError;
 use crate::instructions::joinsplit_common::{
-    create_nullifier_records, parse_header, parse_prefix, validate_account_count,
-    validate_public_outputs, verify_vk_merkle_and_proof, JoinSplitHeader, STEALTH_DATA_PER_OUTPUT,
+    create_nullifier_records, looks_like_commitment_tree, parse_header, parse_prefix,
+    validate_account_count, validate_public_outputs, verify_vk_merkle_and_proof, JoinSplitHeader,
+    STEALTH_DATA_PER_OUTPUT,
 };
 use crate::state::{CommitmentTree, NullifierOperationType, PoolState};
 use crate::utils::{
@@ -114,15 +115,43 @@ pub fn process_transact(
     let user = &accounts[3];
     let system_program = &accounts[4];
 
-    // Check for optional relayer account (after nullifiers, before optional proof_buffer)
-    // Account layout: [5..5+N nullifiers] [optional relayer] [optional proof_buffer]
-    let extra_accounts_after_nullifiers = accounts.len() - (5 + n_inputs);
-    let has_proof_buffer = proof_source == 1;
-    let has_relayer = if has_proof_buffer {
-        extra_accounts_after_nullifiers > 1
-    } else {
-        extra_accounts_after_nullifiers > 0
+    // Validate accounts
+    validate_program_owner(pool_state_info, program_id)?;
+    validate_program_owner(commitment_tree_info, program_id)?;
+    validate_program_owner(vk_registry_info, program_id)?;
+    validate_system_program(system_program)?;
+    validate_account_writable(pool_state_info)?;
+    validate_account_writable(commitment_tree_info)?;
+
+    // Validate pool is not paused + tree PDA matches active index
+    let active_index = {
+        let pool_data = pool_state_info.try_borrow_data()?;
+        let pool = PoolState::from_bytes(&pool_data)?;
+        if pool.is_paused() {
+            return Err(UTXOpiaError::PoolPaused.into());
+        }
+        validate_active_tree_pda(commitment_tree_info, program_id, pool.active_tree_index())?;
+        pool.active_tree_index()
     };
+
+    // Optional account layout after nullifiers:
+    //   [5..5+N nullifiers] [optional relayer] [optional frozen source tree] [optional proof_buffer]
+    // The frozen source tree (a previous, rotated-out CommitmentTree) lets notes committed before a
+    // tree rotation still be spent — its root proves membership while new outputs go to the active
+    // tree. It is identified by being a program-owned CommitmentTree, so it is unambiguous against a
+    // relayer (signer) or proof_buffer (ChadBuffer-owned).
+    let has_proof_buffer = proof_source == 1;
+    let pb = usize::from(has_proof_buffer);
+    let source_tree_info = accounts
+        .len()
+        .checked_sub(1 + pb)
+        .filter(|&i| i >= 5 + n_inputs)
+        .map(|i| &accounts[i])
+        .filter(|a| a.key() != commitment_tree_info.key() && looks_like_commitment_tree(a, program_id));
+    let frozen = usize::from(source_tree_info.is_some());
+
+    let extra_accounts_after_nullifiers = accounts.len() - (5 + n_inputs);
+    let has_relayer = extra_accounts_after_nullifiers > frozen + pb;
     let payer = if has_relayer {
         let relayer = &accounts[5 + n_inputs];
         if !relayer.is_signer() {
@@ -136,25 +165,15 @@ pub fn process_transact(
         user
     };
 
-    // Validate accounts
-    validate_program_owner(pool_state_info, program_id)?;
-    validate_program_owner(commitment_tree_info, program_id)?;
-    validate_program_owner(vk_registry_info, program_id)?;
-    validate_system_program(system_program)?;
-    validate_account_writable(pool_state_info)?;
-    validate_account_writable(commitment_tree_info)?;
-
-    // Validate pool is not paused + tree PDA matches active index
-    {
-        let pool_data = pool_state_info.try_borrow_data()?;
-        let pool = PoolState::from_bytes(&pool_data)?;
-        if pool.is_paused() {
-            return Err(UTXOpiaError::PoolPaused.into());
-        }
-        validate_active_tree_pda(commitment_tree_info, program_id, pool.active_tree_index())?;
-    }
-
-    verify_vk_merkle_and_proof(vk_registry_info, commitment_tree_info, header, &prefix)?;
+    verify_vk_merkle_and_proof(
+        program_id,
+        vk_registry_info,
+        commitment_tree_info,
+        active_index,
+        source_tree_info,
+        header,
+        &prefix,
+    )?;
 
     pinocchio::msg!("UTXOpia: transact");
 

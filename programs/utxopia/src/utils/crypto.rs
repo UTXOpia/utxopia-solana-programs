@@ -268,15 +268,21 @@ pub fn compute_bound_params_hash_redeem(
     chain_id: u64,
     btc_script: &[u8],
     stealth_data_hash: &[u8; 32],
+    requester: &[u8; 32],
 ) -> [u8; 32] {
     use super::sha256;
 
-    let mut buf = [0u8; 77];
+    // Binds the redemption to the requesting signer in addition to the BTC scripts and stealth
+    // data. Without the requester in the preimage, a privileged orderflow attacker could replay
+    // the same proof under their own signer, take ownership of the RedemptionRequest PDA, and
+    // later cancel it to recover the shielded value.
+    let mut buf = [0u8; 109];
     buf[4] = 2; // flag = 2 (redeem)
     let script_hash: [u8; 32] = sha256(btc_script);
     buf[5..37].copy_from_slice(&script_hash);
     buf[37..45].copy_from_slice(&chain_id.to_le_bytes());
     buf[45..77].copy_from_slice(stealth_data_hash);
+    buf[77..109].copy_from_slice(requester);
 
     let hash: [u8; 32] = sha256(&buf);
     reduce_to_field_exact(&hash)

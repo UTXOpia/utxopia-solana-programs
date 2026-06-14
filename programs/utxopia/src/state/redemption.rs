@@ -45,8 +45,11 @@ pub struct RedemptionRequest {
     /// BTC scriptPubKey length
     pub btc_script_len: u8,
 
-    /// Padding for alignment
-    _padding1: u8,
+    /// Set to 1 once Ika signing has been approved (approve_redemption_signing). Once set,
+    /// cancel_redemption is permanently blocked — even after the processing timeout — because
+    /// a signed BTC payout may already be broadcastable, so re-minting the note would allow a
+    /// cross-chain double-spend.
+    signing_approved: u8,
 
     /// Slot when mark_processing was called (0 = not yet processing).
     /// Used for timeout: if current_slot - processing_slot > TIMEOUT_SLOTS, user can cancel.
@@ -151,9 +154,17 @@ impl RedemptionRequest {
         &self.token_id
     }
 
+    pub fn is_signing_approved(&self) -> bool {
+        self.signing_approved != 0
+    }
+
     // Setters
     pub fn set_status(&mut self, status: RedemptionStatus) {
         self.status = status as u8;
+    }
+
+    pub fn set_signing_approved(&mut self) {
+        self.signing_approved = 1;
     }
 
     pub fn set_request_id(&mut self, value: u64) {

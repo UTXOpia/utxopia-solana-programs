@@ -90,4 +90,15 @@ impl BitcoinLightClient {
     pub fn set_epoch_start_time(&mut self, value: u32) {
         self.epoch_start_time = value.to_le_bytes();
     }
+
+    /// Reinitialization epoch (u32 LE in _reserved[0..4]). Incremented on every
+    /// `process_reinitialize` so proofs minted under a prior chain instance can be
+    /// distinguished from proofs under the current one. Zero on a fresh `initialize`.
+    pub fn reinit_epoch(&self) -> u32 {
+        u32::from_le_bytes(self._reserved[0..4].try_into().unwrap())
+    }
+
+    pub fn set_reinit_epoch(&mut self, value: u32) {
+        self._reserved[0..4].copy_from_slice(&value.to_le_bytes());
+    }
 }

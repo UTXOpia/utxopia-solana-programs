@@ -87,6 +87,17 @@ pub fn process_mark_processing(
         return Err(ProgramError::InvalidInstructionData);
     }
 
+    // Read the request_id up front so each reserved UTXO can be bound to THIS redemption.
+    // We re-validate the Pending status here; Phase 3 transitions it to Processing.
+    let request_id = {
+        let redemption_data = redemption_info.try_borrow_data()?;
+        let redemption = RedemptionRequest::from_bytes(&redemption_data)?;
+        if redemption.get_status() != RedemptionStatus::Pending {
+            return Err(UTXOpiaError::InvalidRedemptionState.into());
+        }
+        redemption.request_id()
+    };
+
     // --- Phase 1: Validate and read UTXO amounts, mark as Reserved ---
     let mut total_input_sats: u64 = 0;
     // Stack-allocated array to hold amounts for pool state update
@@ -121,8 +132,9 @@ pub fn process_mark_processing(
             .checked_add(amount)
             .ok_or(ProgramError::ArithmeticOverflow)?;
 
-        // Mark as Reserved
+        // Mark as Reserved and bind to this specific redemption request.
         utxo.set_status(UtxoStatus::Reserved);
+        utxo.set_reserved_for_request_id(request_id);
     }
 
     // --- Phase 2: Update PoolState counters ---

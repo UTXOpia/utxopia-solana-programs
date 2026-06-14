@@ -80,6 +80,11 @@ pub fn process_reinitialize(
     let mut lc_data = light_client_info.try_borrow_mut_data()?;
     let lc = BitcoinLightClient::from_bytes_mut(&mut lc_data)?;
 
+    // Bump the reinit epoch so VerifiedTransaction proofs minted under the prior chain
+    // instance no longer match the current epoch and are rejected downstream by utxopia.
+    let next_epoch = lc.reinit_epoch().wrapping_add(1);
+    lc.set_reinit_epoch(next_epoch);
+
     lc.network = network;
     lc.paused = 0;
     lc.genesis_hash = start_block_hash;

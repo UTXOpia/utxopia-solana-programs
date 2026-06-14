@@ -100,6 +100,14 @@ pub fn process_prune_obsolete_blocks(
         }
     }
 
+    // Reject rent_receiver aliasing the account being closed. If they are the same account,
+    // the close sequence below zeroes lamports and then credits them straight back to the same
+    // account before reassigning it to the system program, leaving a funded tombstone instead
+    // of a fully reclaimed PDA.
+    if rent_receiver.key() == block_header_info.key() {
+        return Err(ProgramError::InvalidArgument);
+    }
+
     // Close BlockHeader account: zero data, transfer lamports to receiver
     {
         let mut header_data = block_header_info.try_borrow_mut_data()?;

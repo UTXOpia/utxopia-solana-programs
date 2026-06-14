@@ -88,3 +88,79 @@
             &[]
         ));
     }
+
+    /// Non-zero-value OP_RETURN would destroy pool BTC outside burn accounting — must reject.
+    #[test]
+    fn rejects_nonzero_value_op_return() {
+        let tx = tx_with_outputs(&[
+            (100_000, p2tr(RECIPIENT)),
+            (25_000, op_return()), // burns real sats into an unspendable output
+        ]);
+        let parsed = ParsedTransaction::parse(&tx).unwrap();
+        assert!(!redemption_outputs_within_policy(
+            &parsed,
+            &p2tr(RECIPIENT),
+            &p2tr(POOL)
+        ));
+    }
+
+    /// A zero-value OP_RETURN marker alongside the recipient stays policy-compliant.
+    #[test]
+    fn allows_zero_value_op_return() {
+        let tx = tx_with_outputs(&[
+            (100_000, p2tr(RECIPIENT)),
+            (0, op_return()),
+        ]);
+        let parsed = ParsedTransaction::parse(&tx).unwrap();
+        assert!(redemption_outputs_within_policy(
+            &parsed,
+            &p2tr(RECIPIENT),
+            &p2tr(POOL)
+        ));
+    }
+
+    /// Only one pool change output is tracked downstream; splitting change must reject.
+    #[test]
+    fn rejects_multiple_pool_change_outputs() {
+        let tx = tx_with_outputs(&[
+            (100_000, p2tr(RECIPIENT)),
+            (30_000, p2tr(POOL)),
+            (20_000, p2tr(POOL)), // second change output — would be untracked
+        ]);
+        let parsed = ParsedTransaction::parse(&tx).unwrap();
+        assert!(!redemption_outputs_within_policy(
+            &parsed,
+            &p2tr(RECIPIENT),
+            &p2tr(POOL)
+        ));
+    }
+
+    /// A single pool change output is still accepted.
+    #[test]
+    fn allows_single_pool_change_output() {
+        let tx = tx_with_outputs(&[
+            (100_000, p2tr(RECIPIENT)),
+            (50_000, p2tr(POOL)),
+        ]);
+        let parsed = ParsedTransaction::parse(&tx).unwrap();
+        assert!(redemption_outputs_within_policy(
+            &parsed,
+            &p2tr(RECIPIENT),
+            &p2tr(POOL)
+        ));
+    }
+
+    /// Multiple recipient outputs are permitted by policy (the handler sums their value).
+    #[test]
+    fn allows_multiple_recipient_outputs() {
+        let tx = tx_with_outputs(&[
+            (60_000, p2tr(RECIPIENT)),
+            (40_000, p2tr(RECIPIENT)),
+        ]);
+        let parsed = ParsedTransaction::parse(&tx).unwrap();
+        assert!(redemption_outputs_within_policy(
+            &parsed,
+            &p2tr(RECIPIENT),
+            &p2tr(POOL)
+        ));
+    }

@@ -79,8 +79,12 @@ pub fn process_shield(
         pool.deposit_fee_bps()
     };
 
-    // Read token config — validate enabled, limits, vault, mint
-    let (token_id, shielded_amount, protocol_fee) = {
+    // Read token config — validate enabled, limits, vault, mint.
+    // Fee/shielded are NOT computed from the user-supplied `amount` here: a fee-on-transfer
+    // or deflationary mint can deliver less than `amount` to the vault, which would overcredit
+    // the shielded note and leave the pool insolvent. We instead credit the measured vault
+    // balance delta after the transfer (see below).
+    let (token_id, deposit_cap) = {
         let tc_data = token_config_info.try_borrow_data()?;
         let tc = TokenConfig::from_bytes(&tc_data)?;
 
@@ -104,34 +108,50 @@ pub fn process_shield(
             }
         }
 
-        // Validate amount limits
+        // Validate amount limits (against the user-requested gross amount)
         if amount < tc.min_deposit() || amount > tc.max_deposit() {
             return Err(UTXOpiaError::AmountOutOfRange.into());
         }
 
-        // Compute fee
-        let fee = (amount as u128 * deposit_fee_bps as u128 / 10_000) as u64;
-        let shielded = amount
-            .checked_sub(fee)
-            .ok_or(ProgramError::ArithmeticOverflow)?;
-
-        // Check deposit cap
-        if tc
-            .total_shielded()
-            .checked_add(shielded)
-            .ok_or(ProgramError::ArithmeticOverflow)?
-            > tc.deposit_cap()
-        {
-            return Err(UTXOpiaError::DepositCapExceeded.into());
-        }
-
         let mut tid = [0u8; 32];
         tid.copy_from_slice(&tc.token_id);
-        (tid, shielded, fee)
+        (tid, tc.deposit_cap())
     };
+
+    // Measure the vault balance delta across the transfer so the credited amount reflects
+    // tokens actually received, not the nominal `amount`.
+    let vault_before = crate::utils::get_token_balance(vault)?;
 
     // Transfer tokens from user → vault (user signs, no PDA needed)
     transfer_token_user(token_program, user_token_account, vault, user, amount)?;
+
+    let vault_after = crate::utils::get_token_balance(vault)?;
+    let received = vault_after
+        .checked_sub(vault_before)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+
+    // Derive fee and shielded amount from what the vault actually received.
+    let protocol_fee = (received as u128 * deposit_fee_bps as u128 / 10_000) as u64;
+    let shielded_amount = received
+        .checked_sub(protocol_fee)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    if shielded_amount == 0 {
+        return Err(UTXOpiaError::AmountTooSmall.into());
+    }
+
+    // Check deposit cap against the actual shielded value being added.
+    {
+        let tc_data = token_config_info.try_borrow_data()?;
+        let tc = TokenConfig::from_bytes(&tc_data)?;
+        if tc
+            .total_shielded()
+            .checked_add(shielded_amount)
+            .ok_or(ProgramError::ArithmeticOverflow)?
+            > deposit_cap
+        {
+            return Err(UTXOpiaError::DepositCapExceeded.into());
+        }
+    }
 
     // Compute commitment: Poseidon(npk, token_id, shielded_amount)
     let commitment = compute_commitment(npk, &token_id, shielded_amount)?;
@@ -155,8 +175,8 @@ pub fn process_shield(
         &token_id,
     );
 
-    // Emit shield metadata (gross amount + fee) for indexer
-    emit_shield_meta(amount, protocol_fee, &token_id);
+    // Emit shield metadata (actual received gross + fee) for indexer
+    emit_shield_meta(received, protocol_fee, &token_id);
 
     // Update token config: total_shielded and accumulated_fees
     {

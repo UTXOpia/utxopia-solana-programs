@@ -367,13 +367,15 @@ pub fn validate_frozen_tree(
 
     let tree = CommitmentTree::from_bytes(&tree_data)?;
 
-    // Verify PDA matches some index < active_index
+    // Verify PDA matches some index < active_index, then accept the proof's root if it is the
+    // frozen tree's current root or any root still in its history (consistent with how the active
+    // tree is validated). A frozen tree no longer mutates, so its roots are stable.
     for idx in 0..active_index {
         let idx_bytes = idx.to_le_bytes();
         let seeds: &[&[u8]] = &[CommitmentTree::SEED_PREFIX, &idx_bytes];
         let (pda, _) = find_program_address(seeds, program_id);
         if tree_account.key() == &pda {
-            return Ok(tree.current_root == *expected_root);
+            return Ok(tree.is_valid_root(expected_root));
         }
     }
 

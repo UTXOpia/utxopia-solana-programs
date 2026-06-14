@@ -43,9 +43,9 @@ use pinocchio::{
 
 use crate::error::UTXOpiaError;
 use crate::instructions::joinsplit_common::{
-    create_nullifier_records, parse_header, parse_prefix, read_u64_le, validate_account_count,
-    validate_public_outputs, verify_vk_merkle_and_proof, JoinSplitHeader, MAX_PUBLIC_OUTPUTS,
-    STEALTH_DATA_PER_OUTPUT,
+    create_nullifier_records, looks_like_commitment_tree, parse_header, parse_prefix, read_u64_le,
+    validate_account_count, validate_public_outputs, verify_vk_merkle_and_proof, JoinSplitHeader,
+    MAX_PUBLIC_OUTPUTS, STEALTH_DATA_PER_OUTPUT,
 };
 use crate::state::{CommitmentTree, NullifierOperationType, PoolState, TokenConfig};
 use crate::utils::token::transfer_zkbtc;
@@ -149,15 +149,28 @@ pub fn process_unshield(
     }
 
     // Read pool state — check paused, validate active tree, get withdrawal_fee_bps
-    let withdrawal_fee_bps = {
+    let (withdrawal_fee_bps, active_index) = {
         let pool_data = pool_state_info.try_borrow_data()?;
         let pool = PoolState::from_bytes(&pool_data)?;
         if pool.is_paused() {
             return Err(UTXOpiaError::PoolPaused.into());
         }
         validate_active_tree_pda(commitment_tree_info, program_id, pool.active_tree_index())?;
-        pool.withdrawal_fee_bps()
+        (pool.withdrawal_fee_bps(), pool.active_tree_index())
     };
+
+    // Optional frozen source tree (for spending notes committed before a tree rotation): appended
+    // just before the optional proof_buffer (which parse_prefix reads as the last account).
+    // Identified by being a program-owned CommitmentTree, so it cannot be confused with the buffer.
+    let pb = usize::from(proof_source == 1);
+    let source_tree_info = accounts
+        .len()
+        .checked_sub(1 + pb)
+        .filter(|&i| i >= min_accounts)
+        .map(|i| &accounts[i])
+        .filter(|a| {
+            a.key() != commitment_tree_info.key() && looks_like_commitment_tree(a, program_id)
+        });
 
     // Read token config — get token_id, validate vault
     let token_id = {
@@ -183,7 +196,15 @@ pub fn process_unshield(
         return Err(ProgramError::InvalidSeeds);
     }
 
-    verify_vk_merkle_and_proof(vk_registry_info, commitment_tree_info, header, &prefix)?;
+    verify_vk_merkle_and_proof(
+        program_id,
+        vk_registry_info,
+        commitment_tree_info,
+        active_index,
+        source_tree_info,
+        header,
+        &prefix,
+    )?;
 
     // Verify burn commitments: last n_public_outputs = Poseidon(0, token_id, amount_k)
     {

@@ -223,6 +223,15 @@ pub fn process_approve_redemption_signing(
         cpi_authority_bump,
     )?;
 
+    // Mark the redemption as signing-approved so it can no longer be cancelled/re-minted:
+    // a BTC payout may now be broadcastable, and cancelling would re-mint the note, enabling
+    // a cross-chain double-spend.
+    {
+        let mut redemption_data = redemption_info.try_borrow_mut_data()?;
+        let redemption = RedemptionRequest::from_bytes_mut(&mut redemption_data)?;
+        redemption.set_signing_approved();
+    }
+
     pinocchio::msg!("UTXOpia: redemption signing approved");
     Ok(())
 }
