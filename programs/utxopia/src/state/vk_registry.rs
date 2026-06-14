@@ -95,6 +95,18 @@ impl VkRegistry {
         self.authority == *pubkey
     }
 
+    /// True once the VK material has been permanently frozen (see [`Self::freeze`]).
+    /// Stored in the first byte of the reserved area so the 1060-byte layout is unchanged.
+    pub fn is_frozen(&self) -> bool {
+        self._reserved[0] != 0
+    }
+
+    /// Permanently freeze this registry. One-way: there is no unfreeze. After freezing,
+    /// `process_update_vk_registry` is rejected, removing the single-authority forge vector.
+    pub fn freeze(&mut self) {
+        self._reserved[0] = 1;
+    }
+
     /// Get number of public inputs
     pub fn num_public_inputs(&self) -> usize {
         joinsplit_num_public_inputs(self.n_inputs, self.n_outputs)
@@ -140,35 +152,5 @@ impl VkRegistry {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_joinsplit_public_inputs() {
-        assert_eq!(joinsplit_num_public_inputs(1, 2), 5); // root + bound + 1 null + 2 comm
-        assert_eq!(joinsplit_num_public_inputs(2, 2), 6);
-        assert_eq!(joinsplit_num_public_inputs(1, 1), 4);
-    }
-
-    #[test]
-    fn test_vk_registry_size() {
-        assert_eq!(VkRegistry::SIZE, 1060);
-    }
-
-    #[test]
-    fn test_vk_registry_set_vk_roundtrip() {
-        let mut buf = [0u8; VkRegistry::SIZE];
-        let registry = VkRegistry::init(&mut buf).unwrap();
-        registry.n_inputs = 1;
-        registry.n_outputs = 2;
-
-        let hash = [1u8; 32];
-        let delta = [2u8; 128];
-        let ic = [[3u8; 64]; 6];
-        registry.set_vk(&hash, &delta, &ic).unwrap();
-
-        assert_eq!(registry.get_vk_hash(), &hash);
-        assert_eq!(registry.get_delta_g2(), &delta);
-        assert_eq!(registry.get_ic().unwrap(), &ic);
-    }
-}
+#[path = "vk_registry_tests.rs"]
+mod tests;

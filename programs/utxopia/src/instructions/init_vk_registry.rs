@@ -227,6 +227,12 @@ pub fn process_update_vk_registry(
             return Err(UTXOpiaError::Unauthorized.into());
         }
 
+        // Once frozen, VK material is immutable — a compromised authority can no longer
+        // swap in a forging key.
+        if registry.is_frozen() {
+            return Err(UTXOpiaError::VkRegistryFrozen.into());
+        }
+
         // Verify variant matches
         if registry.n_inputs != ix_data.n_inputs || registry.n_outputs != ix_data.n_outputs {
             return Err(ProgramError::InvalidArgument);
@@ -236,6 +242,49 @@ pub fn process_update_vk_registry(
     }
 
     pinocchio::msg!("UTXOpia: VK registry updated");
+
+    Ok(())
+}
+
+/// Permanently freeze a VK registry so its key material can never be updated again.
+///
+/// This is the production hardening step: deploy → register/iterate VKs → freeze before
+/// mainnet. After freezing, `process_update_vk_registry` always fails, so a later authority
+/// compromise cannot install a malicious verification key and forge proofs.
+///
+/// Accounts:
+/// 0. vk_registry - VK registry PDA (writable)
+/// 1. authority - Current registry authority (signer)
+pub fn process_freeze_vk_registry(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    _data: &[u8],
+) -> ProgramResult {
+    if accounts.len() < 2 {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+
+    let vk_registry = &accounts[0];
+    let authority = &accounts[1];
+
+    if !authority.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    validate_program_owner(vk_registry, program_id)?;
+
+    {
+        let mut vk_data = vk_registry.try_borrow_mut_data()?;
+        let registry = VkRegistry::from_bytes_mut(&mut vk_data)?;
+
+        if !registry.is_authority(authority.key().as_ref().try_into().unwrap()) {
+            return Err(UTXOpiaError::Unauthorized.into());
+        }
+
+        registry.freeze();
+    }
+
+    pinocchio::msg!("UTXOpia: VK registry frozen");
 
     Ok(())
 }

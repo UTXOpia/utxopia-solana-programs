@@ -180,6 +180,17 @@ pub fn process_verify_deposit(
         (pool.bump, pool.min_deposit(), pool.max_deposit())
     };
 
+    // Bind token_config to the mint actually being credited. Without this the config is
+    // only owner-checked, so a caller could supply the canonical config of a *different*
+    // (more valuable) token and mint a note under its token_id → cross-token mint.
+    {
+        let tc_seeds: &[&[u8]] = &[TokenConfig::SEED, zkbtc_mint.key().as_ref()];
+        let (expected_tc_pda, _) = find_program_address(tc_seeds, program_id);
+        if token_config_info.key() != &expected_tc_pda {
+            return Err(UTXOpiaError::InvalidPDA.into());
+        }
+    }
+
     // Read token config — get token_id for commitment
     let token_id = {
         let tc_data = token_config_info.try_borrow_data()?;
@@ -233,7 +244,17 @@ pub fn process_verify_deposit(
         if vt.block_height() as u64 != ix_data.block_height {
             return Err(UTXOpiaError::InvalidBlockHeader.into());
         }
+
+        // Pin both light-client accounts to their canonical PDAs (owner+disc alone would
+        // accept any btc-light-client-owned account with a forged confirmation).
+        crate::state::assert_canonical_verified_tx(
+            verified_tx_info.key(),
+            vt.block_hash(),
+            vt.txid(),
+            btc_lc_id,
+        )?;
     }
+    crate::state::assert_canonical_light_client(light_client_info.key(), btc_lc_id)?;
 
     // Verify sufficient confirmations
     {
@@ -323,10 +344,12 @@ pub fn process_verify_deposit(
         ParsedTransaction::parse(deposit_raw_tx).map_err(|_| UTXOpiaError::InvalidSpvProof)?;
 
     let mut matched_vout: Option<u32> = None;
+    let mut matched_value: u64 = 0;
     for (vout, output) in deposit_parsed.outputs().enumerate() {
         if let Some(output_key) = extract_p2tr_output_key(output.script_pubkey) {
             if verify_taproot_output_key(&ika_xonly, &npk, &output_key).is_ok() {
                 matched_vout = Some(vout as u32);
+                matched_value = output.value;
                 break;
             }
         }
@@ -337,11 +360,11 @@ pub fn process_verify_deposit(
         return Err(UTXOpiaError::InvalidSpvProof.into());
     }
 
-    // Extract deposit amount from sweep TX's deposit output (largest P2TR output)
-    let deposit_output = sweep_parsed
-        .find_deposit_output()
-        .ok_or(UTXOpiaError::InvalidSpvProof)?;
-    let amount_sats = deposit_output.value;
+    // Credit exactly the value of the npk-bound deposit output. The previous code read
+    // the sweep tx's first non-OP_RETURN output (`find_deposit_output`), which is not
+    // bound to this user — a batched sweep or fee-netting sweep could mint an amount that
+    // diverges from what the user actually deposited.
+    let amount_sats = matched_value;
 
     // Validate extracted amount is within bounds
     if amount_sats < min_deposit {

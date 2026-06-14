@@ -3,7 +3,10 @@
 //! Lightweight module to read btc-light-client accounts from utxopia.
 //! No Borsh, just zero-copy byte reading.
 
-use pinocchio::program_error::ProgramError;
+use pinocchio::{
+    program_error::ProgramError,
+    pubkey::{find_program_address, Pubkey},
+};
 
 /// Discriminator for VerifiedTransaction account (must match btc-light-client)
 pub const VERIFIED_TX_DISCRIMINATOR: u8 = 0x08;
@@ -11,8 +14,43 @@ pub const VERIFIED_TX_DISCRIMINATOR: u8 = 0x08;
 /// PDA seed for VerifiedTransaction (must match btc-light-client)
 pub const VERIFIED_TX_SEED: &[u8] = b"verified_tx";
 
+/// PDA seed for the singleton BitcoinLightClient account (must match btc-light-client)
+pub const LIGHT_CLIENT_SEED: &[u8] = b"btc_light_client";
+
 /// Discriminator for BitcoinLightClient account (must match btc-light-client)
 pub const BTC_LIGHT_CLIENT_DISCRIMINATOR: u8 = 0x06;
+
+/// Pin a VerifiedTransaction account to its canonical PDA `["verified_tx", block_hash, txid]`.
+///
+/// Owner + discriminator checks alone are not enough: they accept any btc-light-client-owned
+/// account whose first byte is the VT discriminator. Re-deriving the PDA from the block_hash
+/// and txid stored *inside* the account and matching it against the account's own address
+/// proves the account was created by the light client's `verify_transaction` at the canonical
+/// address — a forged/substituted account cannot satisfy this.
+pub fn assert_canonical_verified_tx(
+    account_key: &Pubkey,
+    block_hash: &[u8; 32],
+    txid: &[u8; 32],
+    btc_lc_id: &Pubkey,
+) -> Result<(), ProgramError> {
+    let (expected, _) = find_program_address(&[VERIFIED_TX_SEED, block_hash, txid], btc_lc_id);
+    if account_key != &expected {
+        return Err(ProgramError::InvalidSeeds);
+    }
+    Ok(())
+}
+
+/// Pin the BitcoinLightClient (tip) account to its canonical singleton PDA.
+pub fn assert_canonical_light_client(
+    account_key: &Pubkey,
+    btc_lc_id: &Pubkey,
+) -> Result<(), ProgramError> {
+    let (expected, _) = find_program_address(&[LIGHT_CLIENT_SEED], btc_lc_id);
+    if account_key != &expected {
+        return Err(ProgramError::InvalidSeeds);
+    }
+    Ok(())
+}
 
 /// Minimum size of VerifiedTransaction account
 const VERIFIED_TX_MIN_LEN: usize = 120;

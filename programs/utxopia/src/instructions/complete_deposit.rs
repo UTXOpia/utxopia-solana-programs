@@ -173,6 +173,16 @@ pub fn process_complete_deposit(
     validate_program_owner(token_config_info, program_id)?;
     validate_account_writable(token_config_info)?;
 
+    // Bind token_config to the mint actually being credited (prevents cross-token mint:
+    // supplying another token's canonical config to mint a note under its token_id).
+    {
+        let tc_seeds: &[&[u8]] = &[TokenConfig::SEED, zkbtc_mint.key().as_ref()];
+        let (expected_tc_pda, _) = find_program_address(tc_seeds, program_id);
+        if token_config_info.key() != &expected_tc_pda {
+            return Err(UTXOpiaError::InvalidPDA.into());
+        }
+    }
+
     // Authority must be signer
     if !authority.is_signer() {
         return Err(ProgramError::MissingRequiredSignature);
@@ -257,7 +267,17 @@ pub fn process_complete_deposit(
         if vt.block_height() as u64 != ix_data.block_height {
             return Err(UTXOpiaError::InvalidBlockHeader.into());
         }
+
+        // Pin both light-client accounts to their canonical PDAs (owner+disc alone would
+        // accept any btc-light-client-owned account with a forged confirmation).
+        crate::state::assert_canonical_verified_tx(
+            verified_tx_info.key(),
+            vt.block_hash(),
+            vt.txid(),
+            btc_lc_id,
+        )?;
     }
+    crate::state::assert_canonical_light_client(light_client_info.key(), btc_lc_id)?;
 
     // Verify sufficient confirmations via light client tip height
     {

@@ -1,0 +1,17 @@
+# Isolated SVM integration tests (mollusk). EXCLUDED from the workspace so its agave/solana
+# dependency tree cannot perturb the on-chain program crates' resolution or `cargo build-sbf`.
+# Run with: cargo test --manifest-path programs/svm-tests/Cargo.toml
+# Requires the .so artifacts: run `cargo build-sbf` first.
+[package]
+name = "svm-tests"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dev-dependencies]
+mollusk-svm = "=0.11.0"
+solana-account = "3.2"
+solana-instruction = "3.0"
+solana-pubkey = "4.0"
+solana-program-error = "3.0"
+sha2 = "0.10"

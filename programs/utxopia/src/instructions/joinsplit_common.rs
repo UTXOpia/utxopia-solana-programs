@@ -162,7 +162,14 @@ pub fn parse_prefix<'a>(
 
     let mut nullifiers: [&[u8; 32]; MAX_JOINSPLIT_SIZE] = [ZERO_REF; MAX_JOINSPLIT_SIZE];
     for nullifier in nullifiers.iter_mut().take(header.n_inputs) {
-        *nullifier = data[offset..offset + 32].try_into().unwrap();
+        let n: &[u8; 32] = data[offset..offset + 32].try_into().unwrap();
+        // Reject non-canonical encodings: the proof scalar is reduced mod Fr by the
+        // syscall, but the nullifier PDA dedup seed uses these raw bytes, so `n` and
+        // `n + p` would seed distinct PDAs for one note → double-spend.
+        if !crate::utils::crypto::is_canonical_fr(n) {
+            return Err(UTXOpiaError::InvalidZkProof.into());
+        }
+        *nullifier = n;
         offset += 32;
     }
 
@@ -289,28 +296,5 @@ pub fn create_nullifier_records(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn take_bytes_rejects_short_input_without_advancing() {
-        let data = [1u8, 2, 3];
-        let mut offset = 1usize;
-
-        let err = take_bytes(&data, &mut offset, 4).unwrap_err();
-
-        assert_eq!(err, ProgramError::InvalidInstructionData);
-        assert_eq!(offset, 1);
-    }
-
-    #[test]
-    fn read_u64_le_advances_offset() {
-        let data = [9u8, 8, 7, 6, 5, 4, 3, 2, 1];
-        let mut offset = 1usize;
-
-        let value = read_u64_le(&data, &mut offset).unwrap();
-
-        assert_eq!(value, u64::from_le_bytes([8, 7, 6, 5, 4, 3, 2, 1]));
-        assert_eq!(offset, data.len());
-    }
-}
+#[path = "joinsplit_common_tests.rs"]
+mod tests;

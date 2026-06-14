@@ -34,6 +34,18 @@ pub fn poseidon2_hash(left: &[u8; 32], right: &[u8; 32]) -> Result<[u8; 32], Pro
     }
 }
 
+/// True if a big-endian 32-byte value is a canonical BN254 Fr element (< modulus).
+///
+/// The `alt_bn128` multiplication syscall reduces scalars mod the Fr order, so two
+/// byte-distinct encodings of the same field element (`n` and `n + p`) verify the same
+/// Groth16 proof. Nullifiers are also used as PDA dedup seeds from their raw bytes, so a
+/// non-canonical re-encoding would seed a fresh nullifier PDA while re-using a spent
+/// note's proof → double-spend. Reject any non-canonical nullifier before use.
+#[inline]
+pub fn is_canonical_fr(val: &[u8; 32]) -> bool {
+    !is_ge_modulus(val)
+}
+
 /// Check if a big-endian 32-byte value is >= BN254 Fr modulus
 #[inline]
 fn is_ge_modulus(val: &[u8; 32]) -> bool {
@@ -335,3 +347,7 @@ pub const ZERO_HASHES: [[u8; 32]; 20] = [
     [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32],
     [0u8; 32], [0u8; 32], [0u8; 32],
 ];
+
+#[cfg(test)]
+#[path = "crypto_tests.rs"]
+mod tests;

@@ -10,7 +10,7 @@ use pinocchio::{
 
 use crate::utils::{create_pda_account, validate_system_program, validate_token_owner};
 
-use crate::constants::{MAX_DEPOSIT_SATS, MIN_DEPOSIT_SATS};
+use crate::constants::{MAX_DEPOSIT_SATS, MAX_FEE_BPS, MIN_DEPOSIT_SATS};
 use crate::error::UTXOpiaError;
 use crate::state::{CommitmentTree, PoolState, POOL_STATE_DISCRIMINATOR};
 
@@ -160,6 +160,11 @@ pub fn process_initialize(
 
     // Get clock for timestamp
     let clock = Clock::get()?;
+
+    // Reject fees that would consume the entire deposit/withdrawal (100%+ fee DoS).
+    if ix_data.deposit_fee_bps >= MAX_FEE_BPS || ix_data.withdrawal_fee_bps >= MAX_FEE_BPS {
+        return Err(UTXOpiaError::InvalidTokenConfig.into());
+    }
 
     // Initialize pool state
     {

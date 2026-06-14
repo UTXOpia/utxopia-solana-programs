@@ -10,6 +10,9 @@ name = "btc_light_client"
 
 [features]
 default = []
+# Production build: compiles out the `reinitialize` admin instruction, which can otherwise
+# rewrite the chain head. MUST be set for mainnet deployments.
+mainnet = []
 
 [dependencies]
 pinocchio = "0.9"
