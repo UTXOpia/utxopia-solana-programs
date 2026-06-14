@@ -244,23 +244,21 @@ pub fn process_complete_redemption(
         validate_program_owner(pool_config_info, program_id)?;
 
         let config_data = pool_config_info.try_borrow_data()?;
-        if config_data.len() >= PoolConfig::LEN && config_data[0] == POOL_CONFIG_DISCRIMINATOR {
-            let config = PoolConfig::from_bytes(&config_data)?;
-            let on_chain_script = config.get_pool_script();
-
-            if !on_chain_script.is_empty() {
-                // On-chain pool_script is set — validate ix data matches
-                let ix_script = if ix_data.pool_script_len > 0 {
-                    &ix_data.pool_script[..ix_data.pool_script_len as usize]
-                } else {
-                    &[]
-                };
-
-                if ix_script != on_chain_script {
-                    pinocchio::msg!("UTXOpia: pool_script mismatch (ix data vs on-chain)");
-                    return Err(UTXOpiaError::PoolScriptMismatch.into());
-                }
-            }
+        // Reject any program-owned account that is not a valid PoolConfig — otherwise the
+        // caller-supplied pool_script would be trusted unvalidated (change-skim vector).
+        if config_data.len() < PoolConfig::LEN || config_data[0] != POOL_CONFIG_DISCRIMINATOR {
+            return Err(UTXOpiaError::InvalidPDA.into());
+        }
+        let config = PoolConfig::from_bytes(&config_data)?;
+        let on_chain_script = config.get_pool_script();
+        // Change tracking requires a configured on-chain script that the ix data matches exactly.
+        if on_chain_script.is_empty() {
+            return Err(UTXOpiaError::PoolScriptMismatch.into());
+        }
+        let ix_script = &ix_data.pool_script[..ix_data.pool_script_len as usize];
+        if ix_script != on_chain_script {
+            pinocchio::msg!("UTXOpia: pool_script mismatch (ix data vs on-chain)");
+            return Err(UTXOpiaError::PoolScriptMismatch.into());
         }
     }
 

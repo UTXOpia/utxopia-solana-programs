@@ -6,7 +6,7 @@ use pinocchio::{
     sysvars::{clock::Clock, Sysvar},
     ProgramResult,
 };
-use pinocchio_system::instructions::CreateAccount;
+use pinocchio_system::instructions::{Allocate, Assign, CreateAccount, Transfer};
 
 use crate::constants::{
     BLOCK_HEADER_DISCRIMINATOR, BLOCK_HEADER_SEED, BTC_LIGHT_CLIENT_DISCRIMINATOR,
@@ -77,14 +77,49 @@ pub fn process_initialize(
     let rent = pinocchio::sysvars::rent::Rent::get()?;
     let lamports = rent.minimum_balance(BitcoinLightClient::LEN);
 
-    CreateAccount {
-        from: payer,
-        to: light_client_info,
-        lamports,
-        space: BitcoinLightClient::LEN as u64,
-        owner: program_id,
+    // Reject re-initialization of an already-initialized client.
+    if light_client_info.data_len() >= 1
+        && light_client_info.try_borrow_data()?[0] == BTC_LIGHT_CLIENT_DISCRIMINATOR
+    {
+        return Err(ProgramError::AccountAlreadyInitialized);
     }
-    .invoke_signed(&signer)?;
+
+    if light_client_info.lamports() == 0 {
+        CreateAccount {
+            from: payer,
+            to: light_client_info,
+            lamports,
+            space: BitcoinLightClient::LEN as u64,
+            owner: program_id,
+        }
+        .invoke_signed(&signer)?;
+    } else {
+        // Pre-funded PDA (a griefer can transfer lamports to the known address to make a
+        // bare CreateAccount fail): top up rent, then allocate + assign so init still succeeds.
+        let current = light_client_info.lamports();
+        if lamports > current {
+            Transfer {
+                from: payer,
+                to: light_client_info,
+                lamports: lamports - current,
+            }
+            .invoke()?;
+        }
+        if light_client_info.data_len() < BitcoinLightClient::LEN {
+            Allocate {
+                account: light_client_info,
+                space: BitcoinLightClient::LEN as u64,
+            }
+            .invoke_signed(&signer)?;
+        }
+        if light_client_info.owner() != program_id {
+            Assign {
+                account: light_client_info,
+                owner: program_id,
+            }
+            .invoke_signed(&signer)?;
+        }
+    }
 
     // Initialize light client fields
     let mut lc_data = light_client_info.try_borrow_mut_data()?;

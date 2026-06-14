@@ -173,6 +173,15 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
         if token_config_info.key() != &expected_tc_pda {
             return Err(ProgramError::InvalidSeeds);
         }
+        // Only zkBTC notes may drive the BTC redemption flow — otherwise another registered
+        // token could be redeemed against the shared pool BTC accounting.
+        {
+            let pool_data = pool_state_info.try_borrow_data()?;
+            let pool = PoolState::from_bytes(&pool_data)?;
+            if tc.mint != pool.zkbtc_mint {
+                return Err(UTXOpiaError::InvalidTokenConfig.into());
+            }
+        }
         tc.token_id
     };
 
