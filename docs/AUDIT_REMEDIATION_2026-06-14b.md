@@ -46,6 +46,17 @@ Deployed in-place to `G1bj9`/`C8Jo` (sigs `51if3n7…` / `gQpBPpp…`).
 - **#36 (deep half) sighash not reconstructed at approval**: override removal closes the oracle; fully *binding* the approved sighash to the redemption's reserved UTXOs + script would require on-chain BIP-341 sighash reconstruction. The authority is a trusted role and the broadcast tx is still policy-checked at `complete_redemption`. Deferred as a larger design item.
 - **#13 frozen-tree client wiring**: on-chain is complete + tested; the web-relay/client piece can't trigger until a 65,536-leaf tree rotation and is a strict no-op until then. Deferred (documented trigger) to avoid shipping untestable account-ordering to the live spend path.
 
+## ⚠️ Live deployment finding — G1bj9 cannot run JoinSplit (pre-existing, not from this work)
+
+On-chain inspection of the live devnet `G1bj9` after the in-place upgrade:
+- `pool_state` ✓ (268B, preserved across the upgrade).
+- `commitment_tree` (index 0) **does not exist** — `INIT_TREE` was never run.
+- The four VK registries (`vk_1x1/1x2/2x1/2x2`) exist at the canonical PDAs but are the **old 256-byte, frozen** layout; the program needs **1060-byte** `VkRegistry` (`from_bytes` rejects 256B).
+
+There is **no VK close/reinit instruction**, and `init_vk_registry` rejects any existing account, so the old frozen VKs **cannot be replaced in place**. Therefore `transact`/`unshield`/`redeem` cannot execute on `G1bj9` — a dead-end from the deferred 256→1060B VK migration, surfaced (not caused) by the in-place upgrade.
+
+**A live JoinSplit E2E is impossible on `G1bj9` as-is.** Unblocking requires either a **fresh deploy** (new program ID + full init: tree, 1060B VKs, Ika DKG, pool funding) or adding an admin **close-VK instruction** (rejected — closing a *frozen* VK defeats the freeze guarantee on an audit-readiness build). Recommendation: defer the live E2E to a fresh deploy; the code is covered by 83 unit + 4 SVM integration tests in the meantime.
+
 ## Triaged — no change required (already safe)
 
 - **#11 utxo_count u16 overflow**: `add_utxo` already uses `checked_add(1)` (errors, never wraps); release profile has `overflow-checks = true`. Reaching 65 535 on-chain UTXOs is impractical.
