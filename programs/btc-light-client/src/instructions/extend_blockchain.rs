@@ -160,6 +160,15 @@ pub fn process_extend_blockchain(
         let timestamp = u32::from_le_bytes(raw_header[68..72].try_into().unwrap());
         let bits = u32::from_le_bytes(raw_header[72..76].try_into().unwrap());
 
+        // Future-timestamp bound (Bitcoin's "timestamp too far in the future" rule, ~2h). Without
+        // it, a testnet4 attacker can set each child far into the future to repeatedly trigger the
+        // 20-minute min-difficulty exception and advance the chain at near-zero PoW cost. Bounding
+        // against the Solana clock keeps submitted timestamps roughly honest.
+        const MAX_FUTURE_DRIFT_SECS: i64 = 2 * 60 * 60;
+        if (timestamp as i64) > clock.unix_timestamp + MAX_FUTURE_DRIFT_SECS {
+            return Err(ProgramError::InvalidArgument);
+        }
+
         // Validate chain continuity
         if *header_prev_hash != prev_hash {
             return Err(ProgramError::InvalidArgument);
@@ -370,8 +379,16 @@ pub fn process_extend_blockchain(
             lc.set_header_count(header_count);
             lc.total_chainwork = running_chainwork;
 
+            // finalized_height is monotonic: never let a heavier-but-shorter reorg move the
+            // finalized boundary backward. Downstream (verify_transaction, prune_obsolete_blocks)
+            // treats it as a one-way safety threshold; moving it back would let already-finalized
+            // history be rewritten and re-pruned. A reorg can still advance the tip; it just can't
+            // un-finalize.
             if running_height > REQUIRED_CONFIRMATIONS {
-                lc.set_finalized_height(running_height - REQUIRED_CONFIRMATIONS);
+                let candidate = running_height - REQUIRED_CONFIRMATIONS;
+                if candidate > lc.finalized_height() {
+                    lc.set_finalized_height(candidate);
+                }
             }
 
             // Update difficulty params

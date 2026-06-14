@@ -67,3 +67,23 @@
         let h2 = compute_bound_params_hash_redeem(103, &script, &stealth, &requester2);
         assert_ne!(h, h2, "requester must be bound into the hash");
     }
+
+    #[test]
+    fn reduce_to_field_exact_is_true_modular_reduction() {
+        // modulus mod p == 0 (not a masked value)
+        assert_eq!(reduce_to_field_exact(&P), [0u8; 32]);
+
+        // (modulus + 5) mod p == 5
+        let mut m_plus_5 = P;
+        // add 5 to the big-endian value (last byte, no carry since it ends in 0x01)
+        m_plus_5[31] = m_plus_5[31].wrapping_add(5);
+        let mut five = [0u8; 32];
+        five[31] = 5; // (modulus + 5) mod modulus == 5
+        assert_eq!(reduce_to_field_exact(&m_plus_5), five);
+
+        // a canonical value is returned unchanged
+        let mut canonical = [0u8; 32];
+        canonical[0] = 0x10; // < 0x30 → below modulus
+        canonical[31] = 0xAB;
+        assert_eq!(reduce_to_field_exact(&canonical), canonical);
+    }

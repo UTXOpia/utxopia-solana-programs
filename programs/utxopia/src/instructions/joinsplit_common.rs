@@ -178,7 +178,16 @@ pub fn parse_prefix<'a>(
 
     let mut commitments_out: [&[u8; 32]; MAX_JOINSPLIT_SIZE] = [ZERO_REF; MAX_JOINSPLIT_SIZE];
     for commitment in commitments_out.iter_mut().take(header.n_outputs) {
-        *commitment = data[offset..offset + 32].try_into().unwrap();
+        let c: &[u8; 32] = data[offset..offset + 32].try_into().unwrap();
+        // Reject non-canonical encodings. Groth16 verifies public inputs modulo Fr, so a
+        // byte-distinct alias `c + k*p` would still satisfy the proof, but these RAW bytes are
+        // inserted into the Merkle tree and emitted in stealth/memo events. A non-canonical alias
+        // would create a leaf and metadata that the wallet/circuit can never reproduce, stranding
+        // the output. Requiring canonical bytes keeps the on-chain leaf == the proved commitment.
+        if !crate::utils::crypto::is_canonical_fr(c) {
+            return Err(UTXOpiaError::InvalidZkProof.into());
+        }
+        *commitment = c;
         offset += 32;
     }
 
@@ -255,6 +264,18 @@ pub fn verify_vk_merkle_and_proof(
     for commitment in prefix.commitments_out.iter().take(header.n_outputs) {
         public_inputs[pi_len] = *commitment;
         pi_len += 1;
+    }
+
+    // Pin the VK registry to its canonical PDA ["vk_registry", n_inputs, n_outputs]. Owner +
+    // discriminator + (n_inputs, n_outputs) checks alone would accept any program-owned account
+    // with matching size fields; re-deriving the address proves it is the admin-registered,
+    // freezable VK for this circuit size and not a substituted account with forged delta_g2/ic.
+    let (expected_vk, _) = find_program_address(
+        &[VkRegistry::SEED, &[header.n_inputs as u8], &[header.n_outputs as u8]],
+        program_id,
+    );
+    if vk_registry_info.key() != &expected_vk {
+        return Err(UTXOpiaError::InvalidVkRegistry.into());
     }
 
     let vk_data = vk_registry_info.try_borrow_data()?;

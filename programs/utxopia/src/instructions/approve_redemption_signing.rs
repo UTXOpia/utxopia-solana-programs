@@ -184,15 +184,20 @@ pub fn process_approve_redemption_signing(
         return Err(ProgramError::InvalidSeeds);
     }
 
-    // We still policy-check the original BIP-341 sighash above, but Ika's
-    // MessageApproval PDA is keyed by keccak256(message), where message is the
-    // exact byte payload sent to gRPC Sign.
-    let ika_message_digest = ix_data
-        .ika_message_digest_override
-        .unwrap_or_else(|| crate::utils::bitcoin::keccak256(&ix_data.btc_sighash));
-    let signature_scheme = ix_data
-        .signature_scheme_override
-        .unwrap_or(SIG_SCHEME_TAPROOT_SHA256);
+    // The approved message is fixed to keccak256(btc_sighash) under Taproot-SHA256. Caller-chosen
+    // digest/scheme overrides are rejected: allowing them would turn redemption approval into a
+    // generic dWallet signing oracle — a compromised authority could obtain an Ika signature over
+    // an arbitrary 32-byte message (any scheme), unrelated to the redemption's BTC spend. The
+    // backend never sets these, so rejecting them is a no-op for the live flow.
+    if ix_data.ika_message_digest_override.is_some()
+        || ix_data.signature_scheme_override.is_some()
+    {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    // Ika's MessageApproval PDA is keyed by keccak256(message), where message is the exact byte
+    // payload sent to gRPC Sign.
+    let ika_message_digest = crate::utils::bitcoin::keccak256(&ix_data.btc_sighash);
+    let signature_scheme = SIG_SCHEME_TAPROOT_SHA256;
 
     let ma_bump = crate::cpi::ika::find_message_approval_pda_bump(
         ika_program.key(),

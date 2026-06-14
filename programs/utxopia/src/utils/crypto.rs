@@ -60,20 +60,17 @@ fn is_ge_modulus(val: &[u8; 32]) -> bool {
     true // Equal to modulus
 }
 
-/// Reduce a big-endian value modulo BN254 Fr if needed
-/// For values >= modulus, we XOR with a mask to bring into range
-/// This is a simple reduction that maintains determinism
+/// Reduce a big-endian value modulo BN254 Fr.
+///
+/// Uses exact modular reduction (`val mod Fr`), identical to the off-chain reference and to the
+/// Groth16 verifier's modular interpretation of scalars. The previous implementation cleared the
+/// top byte with a bitwise mask (`result[0] &= 0x2F`), which is NOT congruent mod Fr for
+/// non-canonical inputs — so the on-chain Poseidon path could produce a different field element
+/// than the circuit/SDK, yielding commitments the wallet can never reproduce.
 #[cfg(target_os = "solana")]
 #[inline]
 fn reduce_to_field(val: &[u8; 32]) -> [u8; 32] {
-    if !is_ge_modulus(val) {
-        return *val;
-    }
-    // Simple reduction: clear top bits to ensure < modulus
-    // The modulus starts with 0x30, so clearing to 0x2F or less ensures < modulus
-    let mut result = *val;
-    result[0] &= 0x2F;
-    result
+    reduce_to_field_exact(val)
 }
 
 /// Poseidon hash using Solana syscall
