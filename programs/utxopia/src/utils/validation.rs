@@ -381,6 +381,5 @@ pub fn validate_frozen_tree(
 }
 
 #[cfg(test)]
-mod tests {
-    // Tests would go here with mock AccountInfo
-}
+#[path = "validation_tests.rs"]
+mod tests;
