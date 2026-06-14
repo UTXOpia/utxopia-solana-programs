@@ -38,3 +38,32 @@
         p_plus_1[31] = 0x02; // p+1, a non-canonical alias of 1
         assert!(!is_canonical_fr(&p_plus_1));
     }
+
+    #[test]
+    fn redeem_bound_params_binds_requester() {
+        // Fixed cross-layer vector (mirrored in the TS SDK bound-params test):
+        // script = 0x5120 || 0xBB*32, chain_id = 103, stealth_data_hash = [0;32], requester = 0xDD*32.
+        let mut script = [0u8; 34];
+        script[0] = 0x51;
+        script[1] = 0x20;
+        for b in script.iter_mut().skip(2) {
+            *b = 0xBB;
+        }
+        let stealth = [0u8; 32];
+        let requester = [0xDDu8; 32];
+
+        let h = compute_bound_params_hash_redeem(103, &script, &stealth, &requester);
+        let hex: String = h.iter().map(|b| format!("{:02x}", b)).collect();
+        // Cross-layer vector — must equal the TS SDK output for the same inputs.
+        assert_eq!(
+            hex,
+            "0a2d4cdcdeff70c6c7036a7177b3a9380e838ea433471280fd1a5a7ba4ae2e28",
+            "redeem bound-params vector"
+        );
+
+        // Changing the requester must change the hash (the whole point of #9).
+        let mut requester2 = requester;
+        requester2[0] ^= 0x01;
+        let h2 = compute_bound_params_hash_redeem(103, &script, &stealth, &requester2);
+        assert_ne!(h, h2, "requester must be bound into the hash");
+    }
