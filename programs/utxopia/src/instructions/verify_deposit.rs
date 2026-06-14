@@ -164,8 +164,8 @@ pub fn process_verify_deposit(
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    // Validate authority matches pool and get bump + bounds
-    let (pool_bump, min_deposit, max_deposit) = {
+    // Validate authority matches pool and get bump + bounds + fee rate
+    let (pool_bump, min_deposit, max_deposit, deposit_fee_bps) = {
         let pool_data = pool_state_info.try_borrow_data()?;
         let pool = PoolState::from_bytes(&pool_data)?;
 
@@ -177,7 +177,12 @@ pub fn process_verify_deposit(
             return Err(UTXOpiaError::Unauthorized.into());
         }
 
-        (pool.bump, pool.min_deposit(), pool.max_deposit())
+        (
+            pool.bump,
+            pool.min_deposit(),
+            pool.max_deposit(),
+            pool.deposit_fee_bps(),
+        )
     };
 
     // Bind token_config to the mint actually being credited. Without this the config is
@@ -191,11 +196,14 @@ pub fn process_verify_deposit(
         }
     }
 
-    // Read token config — get token_id for commitment
-    let token_id = {
+    // Read token config — token_id + per-token service_fee; reject disabled tokens.
+    let (token_id, service_fee) = {
         let tc_data = token_config_info.try_borrow_data()?;
         let tc = TokenConfig::from_bytes(&tc_data)?;
-        tc.token_id
+        if !tc.is_enabled() {
+            return Err(UTXOpiaError::TokenDisabled.into());
+        }
+        (tc.token_id, tc.service_fee())
     };
 
     // NOTE: the deposit-receipt dedup PDA is created AFTER the npk-bound deposit output (and
@@ -394,8 +402,17 @@ pub fn process_verify_deposit(
         return Err(UTXOpiaError::AmountTooLarge.into());
     }
 
-    // Compute commitment ON-CHAIN: Poseidon(npk, token_id, amount)
-    let commitment = compute_commitment(&npk, &token_id, amount_sats)?;
+    // Apply deposit fees, mirroring complete_deposit: deposit_fee_bps (pool) + service_fee (token).
+    let protocol_fee = (amount_sats as u128 * deposit_fee_bps as u128 / 10_000) as u64;
+    let total_fee = protocol_fee
+        .checked_add(service_fee)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    let shielded_amount = amount_sats
+        .checked_sub(total_fee)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+
+    // Compute commitment ON-CHAIN: Poseidon(npk, token_id, shielded_amount)
+    let commitment = compute_commitment(&npk, &token_id, shielded_amount)?;
 
     // Insert commitment into Merkle tree
     let leaf_index = {
@@ -412,7 +429,7 @@ pub fn process_verify_deposit(
     let clock = Clock::get()?;
 
     // Emit stealth announcement as log event (LeafInserted merged into announcement)
-    let amount_bytes = amount_sats.to_le_bytes();
+    let amount_bytes = shielded_amount.to_le_bytes();
     crate::utils::events::emit_stealth_announcement(
         ANNOUNCEMENT_TYPE_DEPOSIT,
         &ephemeral_pub,
@@ -441,7 +458,7 @@ pub fn process_verify_deposit(
         zkbtc_mint,
         pool_vault,
         pool_state_info,
-        amount_sats,
+        shielded_amount,
         pool_signer_seeds,
     )?;
 
@@ -451,18 +468,19 @@ pub fn process_verify_deposit(
         let pool = PoolState::from_bytes_mut(&mut pool_data)?;
 
         pool.increment_deposit_count()?;
-        pool.add_minted(amount_sats)?;
-        pool.add_shielded(amount_sats)?;
+        pool.add_minted(shielded_amount)?;
+        pool.add_shielded(shielded_amount)?;
         pool.set_last_update(clock.unix_timestamp);
     }
 
     // Update token config: keep total_shielded symmetric with unshield.sub_shielded.
     // Without this, an unshield against a verified-deposit note would underflow on the
-    // TokenConfig.total_shielded counter.
+    // TokenConfig.total_shielded counter. Also credit the collected fee.
     {
         let mut tc_data = token_config_info.try_borrow_mut_data()?;
         let tc = TokenConfig::from_bytes_mut(&mut tc_data)?;
-        tc.add_shielded(amount_sats)?;
+        tc.add_shielded(shielded_amount)?;
+        tc.add_fees(total_fee)?;
     }
 
     // Close DepositIntent PDA — return rent to authority

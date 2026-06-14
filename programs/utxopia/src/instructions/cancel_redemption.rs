@@ -12,17 +12,26 @@ use pinocchio::{
 };
 
 use crate::error::UTXOpiaError;
+use crate::state::utxo::UTXO_RECORD_DISCRIMINATOR;
 use crate::state::TokenConfig;
-use crate::state::{CommitmentTree, PoolState, RedemptionRequest, RedemptionStatus};
+use crate::state::{
+    CommitmentTree, PoolState, RedemptionRequest, RedemptionStatus, UtxoRecord, UtxoStatus,
+};
 use crate::utils::crypto::compute_commitment;
 use crate::utils::{close_account_securely, validate_account_writable, validate_program_owner};
+
+/// Upper bound on reserved UTXOs released by a single cancel (matches mark_processing).
+const MAX_UTXOS_PER_CANCEL: usize = 20;
 
 /// Cancel redemption instruction data
 ///
 /// Layout:
-/// - npk: [u8; 32] - Note public key for the re-minted commitment
+/// - npk:        [u8; 32] - Note public key for the re-minted commitment
+/// - utxo_count: u8 (optional) - number of reserved UTXOs to release (Processing cancels);
+///   absent or 0 for Pending cancels, which never reserved any UTXOs.
 pub struct CancelRedemptionData {
     pub npk: [u8; 32],
+    pub utxo_count: usize,
 }
 
 impl CancelRedemptionData {
@@ -32,7 +41,11 @@ impl CancelRedemptionData {
         }
         let mut npk = [0u8; 32];
         npk.copy_from_slice(&data[0..32]);
-        Ok(Self { npk })
+        let utxo_count = if data.len() > 32 { data[32] as usize } else { 0 };
+        if utxo_count > MAX_UTXOS_PER_CANCEL {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        Ok(Self { npk, utxo_count })
     }
 }
 
@@ -45,6 +58,7 @@ impl CancelRedemptionData {
 /// 3. `[writable]` Commitment tree
 /// 4. `[]`         System program
 /// 5. `[writable]` TokenConfig PDA (for token_id to recompute commitment)
+/// 6..6+utxo_count. `[writable]` Reserved UtxoRecord PDAs to release (Processing cancels only)
 pub fn process_cancel_redemption(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -78,8 +92,9 @@ pub fn process_cancel_redemption(
     validate_account_writable(redemption_info)?;
     validate_account_writable(commitment_tree_info)?;
 
-    // Validate requester and status; capture the amount and the recorded token_id
-    let (amount_sats, token_id) = {
+    // Validate requester and status; capture amount, token_id, request_id, and whether the
+    // request was Processing (only Processing redemptions reserved UTXOs that must be released).
+    let (amount_sats, token_id, request_id, was_processing) = {
         let redemption_data = redemption_info.try_borrow_data()?;
         let redemption = RedemptionRequest::from_bytes(&redemption_data)?;
 
@@ -96,10 +111,8 @@ pub fn process_cancel_redemption(
         }
 
         // Allow cancel if Pending, or if Processing and timed out
-        match redemption.get_status() {
-            RedemptionStatus::Pending => {
-                // Always allowed to cancel when Pending
-            }
+        let was_processing = match redemption.get_status() {
+            RedemptionStatus::Pending => false,
             RedemptionStatus::Processing => {
                 // Allow cancel only if timed out
                 let clock = Clock::get()?;
@@ -110,13 +123,19 @@ pub fn process_cancel_redemption(
                     return Err(UTXOpiaError::RedemptionCancelNotAllowed.into());
                 }
                 // Timed out — allow cancellation
+                true
             }
             _ => {
                 return Err(UTXOpiaError::RedemptionCancelNotAllowed.into());
             }
-        }
+        };
 
-        (redemption.amount_sats(), *redemption.token_id())
+        (
+            redemption.amount_sats(),
+            *redemption.token_id(),
+            redemption.request_id(),
+            was_processing,
+        )
     };
 
     // Re-mint with the token_id recorded at redeem time, not one read from a
@@ -135,6 +154,44 @@ pub fn process_cancel_redemption(
             return Err(UTXOpiaError::Unauthorized.into());
         }
     }
+
+    // Release reserved UTXOs back to the pool. Only a Processing cancel reserved any (in
+    // mark_processing); a Pending cancel must pass none. Without this the reserved pool
+    // UTXOs stay locked forever and pool UTXO accounting never recovers.
+    if accounts.len() < 6 + ix_data.utxo_count {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+    let restored_total: u64 = if was_processing {
+        let mut total: u64 = 0;
+        for i in 0..ix_data.utxo_count {
+            let utxo_info = &accounts[6 + i];
+            validate_program_owner(utxo_info, program_id)?;
+            validate_account_writable(utxo_info)?;
+
+            let mut utxo_data = utxo_info.try_borrow_mut_data()?;
+            if utxo_data.is_empty() || utxo_data[0] != UTXO_RECORD_DISCRIMINATOR {
+                return Err(UTXOpiaError::InvalidUtxo.into());
+            }
+            let utxo = UtxoRecord::from_bytes_mut(&mut utxo_data)?;
+            // Must be Reserved for THIS request — prevents freeing another redemption's UTXOs.
+            if utxo.get_status() != UtxoStatus::Reserved
+                || utxo.reserved_for_request_id() != request_id
+            {
+                return Err(UTXOpiaError::InvalidUtxo.into());
+            }
+            utxo.set_status(UtxoStatus::Unspent);
+            utxo.set_reserved_for_request_id(0);
+            total = total
+                .checked_add(utxo.amount_sats())
+                .ok_or(ProgramError::ArithmeticOverflow)?;
+        }
+        total
+    } else {
+        if ix_data.utxo_count != 0 {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        0
+    };
 
     // Compute new commitment and insert into Merkle tree
     let commitment = compute_commitment(&ix_data.npk, &token_id, amount_sats)?;
@@ -166,6 +223,10 @@ pub fn process_cancel_redemption(
         let pool = PoolState::from_bytes_mut(&mut pool_data)?;
 
         pool.add_shielded(amount_sats)?;
+        // Reverse mark_processing's remove_utxo so released reservations are spendable again.
+        if restored_total > 0 {
+            pool.add_utxo(restored_total)?;
+        }
         let pending = pool.pending_redemptions();
         pool.set_pending_redemptions(pending.saturating_sub(1));
         pool.set_last_update(clock.unix_timestamp);
