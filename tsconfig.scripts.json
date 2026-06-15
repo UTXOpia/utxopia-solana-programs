@@ -12,6 +12,7 @@
     "scripts/relay-deposit.ts",
     "scripts/test-flow/**/*.ts",
     "scripts/test-helpers.ts",
-    "scripts/regtest-helpers.ts"
+    "scripts/regtest-helpers.ts",
+    "scripts/init-permissioned.ts"
   ]
 }
