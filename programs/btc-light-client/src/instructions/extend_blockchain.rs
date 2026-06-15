@@ -346,6 +346,20 @@ pub fn process_extend_blockchain(
     };
 
     if is_new_canonical {
+        // Finality fork-point gate (Sui parity; closes below-finality reorg vulnerability):
+        // reject heavier reorgs whose fork point is strictly below finalized_height, so
+        // already-finalized blocks can never be rewritten.  A parent AT finalized_height
+        // only rewrites heights >= finalized_height+1, which is safe.
+        // Mandatory + unconditional — not gated on an optional account.
+        {
+            let lc_data = light_client_info.try_borrow_data()?;
+            let lc = BitcoinLightClient::from_bytes(&lc_data)?;
+            let finalized = lc.finalized_height();
+            if parent_height < finalized {
+                return Err(ProgramError::InvalidArgument);
+            }
+        }
+
         // Create/update HeightIndex PDAs for each new block
         for i in 0..n {
             let header_offset = 1 + i * 80;

@@ -6,6 +6,8 @@
 //! 2026-06-14 hardening:
 //!   1. utxopia `complete_deposit` rejects a substituted token_config (cross-token mint).
 //!   2. btc-light-client `verify_transaction` requires finality (block <= finalized_height).
+//!   6. btc-light-client `extend_blockchain` rejects heavier forks whose fork point is
+//!      strictly below `finalized_height` (mandatory fork-point gate, Sui parity).
 //!
 //! Permissioned-pool gates (auditor signer checks, NotPermissioned, AuditorFrozen):
 //!   3. `set_auditor_frozen` / `set_auditor_viewing_pubkey` — auditor-only setters.
@@ -839,6 +841,199 @@ fn shield_permissioned_fails_when_auditor_frozen() {
     assert!(
         is_custom(&res.program_result, AUDITOR_FROZEN),
         "frozen auditor must return AuditorFrozen (6092), got {:?}",
+        res.program_result
+    );
+}
+
+// ============================================================================
+// 6. extend_blockchain mandatory fork-point gate (Sui parity).
+//
+// Regression test for the below-finality reorg vulnerability: a heavier fork
+// whose parent is STRICTLY BELOW `finalized_height` must be rejected by
+// `extend_blockchain` regardless of accumulated chainwork.  A fork whose parent
+// is AT `finalized_height` must pass the gate (it can only rewrite heights >=
+// finalized_height+1 which have not yet been finalized).
+//
+// Both tests use NETWORK_REGTEST (3) so PoW / difficulty checks are skipped;
+// the light client's `total_chainwork` is set to zero so any submitted block
+// becomes the heavier chain (is_new_canonical = true).
+// ============================================================================
+
+/// Discriminator / layout constants (mirror the program's repr(C) structs).
+const LC_NETWORK_OFFSET: usize = 3; // BitcoinLightClient.network
+const LC_TIP_HEIGHT_OFFSET: usize = 136; // BitcoinLightClient.tip_height  [u8;8]
+// LC_FINALIZED_HEIGHT_OFFSET = 144 (already declared as the literal in light_client_blob)
+
+const BH_BLOCK_HASH_OFFSET: usize = 84; // BlockHeader.block_hash  [u8;32]
+const BH_HEIGHT_OFFSET: usize = 148; // BlockHeader.height      [u8;8]
+
+const NETWORK_REGTEST: u8 = 3;
+
+/// Build a BitcoinLightClient account blob for `extend_blockchain` tests.
+/// `network` must be NETWORK_REGTEST (3) so PoW is skipped.
+/// `total_chainwork` is left zero so any submitted block becomes canonical.
+fn lc_blob_for_extend(tip_height: u64, finalized_height: u64) -> Vec<u8> {
+    let mut d = vec![0u8; LC_LEN];
+    d[0] = LC_DISC;
+    d[LC_NETWORK_OFFSET] = NETWORK_REGTEST;
+    // total_chainwork stays all-zero → any positive work beats it
+    d[LC_TIP_HEIGHT_OFFSET..LC_TIP_HEIGHT_OFFSET + 8]
+        .copy_from_slice(&tip_height.to_le_bytes());
+    d[144..152].copy_from_slice(&finalized_height.to_le_bytes());
+    // reinit_epoch = 0 (default); parent header must also carry 0
+    d
+}
+
+/// Build a BlockHeader account blob for a parent at the given height.
+/// `block_hash` is the 32-byte value stored in the `block_hash` field (what the
+/// instruction reads as `parent_hash`).  `reinit_epoch = 0` matches the LC blob.
+fn parent_block_header_blob(block_hash: &[u8; 32], height: u64) -> Vec<u8> {
+    let mut d = vec![0u8; BH_LEN];
+    d[0] = BH_DISC;
+    d[BH_BLOCK_HASH_OFFSET..BH_BLOCK_HASH_OFFSET + 32].copy_from_slice(block_hash);
+    d[BH_HEIGHT_OFFSET..BH_HEIGHT_OFFSET + 8].copy_from_slice(&height.to_le_bytes());
+    // chainwork stays zero; reinit_epoch (at offset 172) stays zero
+    d
+}
+
+/// Craft an 80-byte regtest block header whose `prev_hash` field (bytes 4..36)
+/// equals `parent_hash` and whose timestamp is 0 (passes the future-drift check).
+/// Returns both the raw header bytes and the resulting block hash (double-SHA256).
+fn make_raw_header(parent_hash: &[u8; 32]) -> ([u8; 80], [u8; 32]) {
+    let mut raw = [0u8; 80];
+    // version = 1 (bytes 0..4)
+    raw[0] = 1;
+    // prev_hash (bytes 4..36)
+    raw[4..36].copy_from_slice(parent_hash);
+    // merkle_root (bytes 36..68): all zero
+    // timestamp (bytes 68..72): 0 → passes clock check
+    // bits (bytes 72..76): 0x1d00ffff — gives positive chainwork for regtest
+    let bits: u32 = 0x1d00_ffff;
+    raw[72..76].copy_from_slice(&bits.to_le_bytes());
+    // nonce (bytes 76..80): 0
+    let block_hash = double_sha256(&raw);
+    (raw, block_hash)
+}
+
+/// Build a complete `extend_blockchain` (disc 1) call for a single-block batch.
+///
+/// Accounts (6 total, matching expected_accounts = 4 + 2*1):
+///   0  light_client_info   (writable, owned by pid)
+///   1  submitter           (signer, writable)
+///   2  system_program
+///   3  parent_header_info  (read, owned by pid, PDA ["block", parent_hash])
+///   4  block_header_info   (writable, empty, PDA ["block", new_block_hash])
+///   5  height_index_info   (writable, empty, PDA ["height_index", parent_height+1])
+///
+/// The parent is placed at `parent_height`; the light-client's `finalized_height`
+/// is the `finalized` argument.
+fn extend_blockchain_call(
+    pid: &Pubkey,
+    parent_height: u64,
+    finalized: u64,
+) -> (Instruction, Vec<(Pubkey, Account)>) {
+    let parent_hash = [0x42u8; 32]; // arbitrary deterministic value
+    let (raw_header, new_block_hash) = make_raw_header(&parent_hash);
+
+    // Derive PDAs using the same program_id the runtime will use
+    let (parent_pda, _) =
+        Pubkey::find_program_address(&[b"block", &parent_hash], pid);
+    let (block_pda, _) =
+        Pubkey::find_program_address(&[b"block", &new_block_hash], pid);
+    let new_height = parent_height + 1;
+    let (hi_pda, _) =
+        Pubkey::find_program_address(&[b"height_index", &new_height.to_le_bytes()], pid);
+
+    let light_client = Pubkey::new_unique();
+    let submitter = Pubkey::new_unique();
+    let (system_key, system_acct) = keyed_account_for_system_program();
+
+    // Instruction data: disc(1) + num_headers(1) + 80 bytes
+    let mut data = vec![1u8]; // discriminator
+    data.push(1u8); // num_headers = 1
+    data.extend_from_slice(&raw_header);
+
+    let metas = vec![
+        AccountMeta::new(light_client, false),
+        AccountMeta::new(submitter, true),
+        AccountMeta::new_readonly(system_key, false),
+        AccountMeta::new_readonly(parent_pda, false),
+        AccountMeta::new(block_pda, false),
+        AccountMeta::new(hi_pda, false),
+    ];
+    let ix = Instruction::new_with_bytes(*pid, &data, metas);
+
+    // tip_height of the LC doesn't affect the fork-point gate; set it equal to
+    // parent_height so the existing chain looks like it ends there.
+    let lc_data = lc_blob_for_extend(parent_height, finalized);
+    let parent_bh_data = parent_block_header_blob(&parent_hash, parent_height);
+
+    let accounts = vec![
+        (light_client, acct(10_000_000_000, lc_data, *pid)),
+        (submitter,    acct(10_000_000_000, vec![], SYSTEM_ID)),
+        (system_key,   system_acct),
+        (parent_pda,   acct(1_000_000, parent_bh_data, *pid)),
+        // New block header and height_index start empty (will be created by the program)
+        (block_pda,    acct(0, vec![], SYSTEM_ID)),
+        (hi_pda,       acct(0, vec![], SYSTEM_ID)),
+    ];
+
+    (ix, accounts)
+}
+
+/// Regression: a heavier fork whose parent is STRICTLY BELOW `finalized_height`
+/// must be rejected with InvalidArgument (the mandatory fork-point gate).
+///
+/// Setup: finalized_height=10, parent_height=5 → parent_height < finalized → REJECT.
+#[test]
+fn extend_blockchain_rejects_fork_below_finality() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "btc_light_client");
+
+    // parent at height 5, finalized at height 10 → fork point below finality
+    let (ix, accounts) = extend_blockchain_call(&pid, 5, 10);
+    let res = mollusk.process_instruction(&ix, &accounts);
+
+    assert!(
+        res.program_result.is_err(),
+        "heavier fork from below finalized_height must be rejected, got {:?}",
+        res.program_result
+    );
+    assert!(
+        matches!(
+            res.program_result,
+            ProgramResult::Failure(ProgramError::InvalidArgument)
+        ),
+        "must return InvalidArgument (fork-point gate), got {:?}",
+        res.program_result
+    );
+}
+
+/// A fork whose parent is AT `finalized_height` must pass the gate (it can only
+/// rewrite heights >= finalized_height+1, which are not yet finalized).
+///
+/// Setup: finalized_height=10, parent_height=10 → parent_height == finalized → gate PASSES.
+/// The instruction proceeds past the gate (may succeed fully or fail later for an
+/// unrelated reason); the important invariant is that the fork-point gate does NOT fire.
+#[test]
+fn extend_blockchain_accepts_fork_at_finality() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "btc_light_client");
+
+    // parent at height 10, finalized at height 10 → fork point AT finality boundary → OK
+    let (ix, accounts) = extend_blockchain_call(&pid, 10, 10);
+    let res = mollusk.process_instruction(&ix, &accounts);
+
+    // Gate must not fire: verify the error is NOT InvalidArgument from the gate.
+    // A full success is also acceptable.
+    assert!(
+        !matches!(
+            res.program_result,
+            ProgramResult::Failure(ProgramError::InvalidArgument)
+        ),
+        "fork at finalized_height must NOT be rejected by the fork-point gate, got {:?}",
         res.program_result
     );
 }
