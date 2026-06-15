@@ -201,6 +201,12 @@ pub enum UTXOpiaError {
 
     #[error("VK registry is frozen and can no longer be updated")]
     VkRegistryFrozen = 6090,
+
+    #[error("Operation requires a permissioned pool")]
+    NotPermissioned = 6091,
+
+    #[error("Auditor is frozen and cannot sign")]
+    AuditorFrozen = 6092,
 }
 
 impl From<UTXOpiaError> for ProgramError {

@@ -24,6 +24,7 @@
 //! | 18 | `mark_processing` | Redemption |
 //! | 19 | `cancel_redemption` | Redemption |
 //! | 21 | `initialize_permissioned` | Core |
+//! | 22 | `complete_deposit_permissioned` | Deposit |
 //! | 27 | `approve_redemption_signing` | Redemption |
 
 // Core operations

@@ -99,11 +99,13 @@ impl CompleteDepositData {
     }
 }
 
-/// Verify a note-public-key stealth deposit using VerifiedTransaction PDA
+/// Verify a note-public-key stealth deposit using VerifiedTransaction PDA (public pools only).
 ///
 /// Trustlessly extracts note_public_key + ephemeral_pubkey from the deposit TX's OP_RETURN.
 /// Verifies the sweep TX spends from the deposit TX (input linkage).
 /// Computes commitment on-chain, inserts into Merkle tree, emits stealth announcement event.
+///
+/// Rejects permissioned pools — use disc 22 (`complete_deposit_permissioned`) for those.
 ///
 /// # Accounts
 /// 0.  `[writable]` Pool state
@@ -134,6 +136,130 @@ pub fn process_complete_deposit(
     }
 
     let pool_state_info = &accounts[0];
+    let authority = &accounts[5];
+
+    // Authority must be signer
+    if !authority.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    // Parse instruction data
+    let ix_data = CompleteDepositData::from_bytes(data)?;
+
+    // Validate authority matches pool; reject permissioned pools on this path
+    validate_program_owner(pool_state_info, program_id)?;
+    {
+        let pool_data = pool_state_info.try_borrow_data()?;
+        let pool = PoolState::from_bytes(&pool_data)?;
+
+        // Public entry point must not be used for permissioned pools
+        if pool.permissioned() {
+            return Err(UTXOpiaError::NotPermissioned.into());
+        }
+
+        if pool.is_paused() {
+            return Err(UTXOpiaError::PoolPaused.into());
+        }
+
+        if authority.key().as_ref() != pool.authority {
+            return Err(UTXOpiaError::Unauthorized.into());
+        }
+    }
+
+    complete_deposit_inner(program_id, accounts, &ix_data, &[])
+}
+
+/// Auditor-gated deposit for permissioned pools (disc 22).
+///
+/// Same accounts as `process_complete_deposit` (indices 0-14), plus one
+/// appended account:
+///
+/// 15. `[signer]` Auditor — must match `pool.auditor()` and must not be frozen.
+///
+/// Instruction data layout:
+///   CompleteDepositData fixed part (80 bytes) || auditor_ciphertext (variable, may be empty)
+///
+/// Gate logic:
+/// - Pool MUST be permissioned (else InvalidInstructionData / wrong handler)
+/// - Auditor account must be a signer (MissingRequiredSignature)
+/// - Auditor account key must equal pool.auditor() (Unauthorized)
+/// - Pool auditor must not be frozen (AuditorFrozen)
+pub fn process_complete_deposit_permissioned(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: &[u8],
+) -> ProgramResult {
+    // Need the 15 base accounts + 1 auditor signer
+    if accounts.len() < 16 {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+
+    let pool_state_info = &accounts[0];
+    let authority = &accounts[5];
+
+    // Authority must be signer (same as public path — authority still pays for storage)
+    if !authority.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    // Parse the fixed header (80 bytes); trailing bytes are auditor_ciphertext
+    let ix_data = CompleteDepositData::from_bytes(data)?;
+    let auditor_ciphertext = &data[CompleteDepositData::HEADER_SIZE..];
+
+    // Validate authority + pool state; enforce permissioned gate
+    validate_program_owner(pool_state_info, program_id)?;
+    {
+        let pool_data = pool_state_info.try_borrow_data()?;
+        let pool = PoolState::from_bytes(&pool_data)?;
+
+        if pool.is_paused() {
+            return Err(UTXOpiaError::PoolPaused.into());
+        }
+
+        if authority.key().as_ref() != pool.authority {
+            return Err(UTXOpiaError::Unauthorized.into());
+        }
+
+        // Auditor gate — account 15 is the appended auditor signer
+        let auditor_info = &accounts[15];
+
+        if !auditor_info.is_signer() {
+            return Err(ProgramError::MissingRequiredSignature);
+        }
+
+        if auditor_info.key().as_ref() != pool.auditor() {
+            return Err(UTXOpiaError::Unauthorized.into());
+        }
+
+        if pool.auditor_is_frozen() {
+            return Err(UTXOpiaError::AuditorFrozen.into());
+        }
+
+        // Pool must actually be permissioned for this entry point to make sense.
+        // (A non-permissioned pool should use disc 11.)
+        if !pool.permissioned() {
+            return Err(UTXOpiaError::NotPermissioned.into());
+        }
+    }
+
+    complete_deposit_inner(program_id, accounts, &ix_data, auditor_ciphertext)
+}
+
+/// Core deposit logic shared by both public and permissioned entry points.
+///
+/// Receives the pre-parsed `ix_data` and an `auditor_ciphertext` slice
+/// (empty on the public path, caller-supplied on the permissioned path).
+/// The auditor ciphertext is emitted as an event when non-empty.
+///
+/// Callers are responsible for the authority/signer gate and pool-type
+/// check before calling this function.
+fn complete_deposit_inner(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    ix_data: &CompleteDepositData,
+    auditor_ciphertext: &[u8],
+) -> ProgramResult {
+    let pool_state_info = &accounts[0];
     let verified_tx_info = &accounts[1];
     let light_client_info = &accounts[2];
     let commitment_tree_info = &accounts[3];
@@ -148,12 +274,8 @@ pub fn process_complete_deposit(
     let utxo_record_info = &accounts[12];
     let token_config_info = &accounts[13];
 
-    // Parse instruction data (no trailing merkle proof)
-    let ix_data = CompleteDepositData::from_bytes(data)?;
-
     // Validate account owners
-    validate_program_owner(pool_state_info, program_id)?;
-    // VerifiedTransaction and Light client are owned by btc-light-client program
+    // (pool_state_info owner already validated by caller before reaching here)
     let btc_lc_id: &Pubkey = &crate::constants::BTC_LIGHT_CLIENT_PROGRAM_ID;
     validate_program_owner(verified_tx_info, btc_lc_id)?;
     validate_program_owner(light_client_info, btc_lc_id)?;
@@ -183,23 +305,10 @@ pub fn process_complete_deposit(
         }
     }
 
-    // Authority must be signer
-    if !authority.is_signer() {
-        return Err(ProgramError::MissingRequiredSignature);
-    }
-
-    // Validate authority matches pool and get bump + bounds + fee bps
+    // Load bump + bounds + fee bps (pool already validated by caller)
     let (pool_bump, min_deposit, max_deposit, deposit_fee_bps) = {
         let pool_data = pool_state_info.try_borrow_data()?;
         let pool = PoolState::from_bytes(&pool_data)?;
-
-        if pool.is_paused() {
-            return Err(UTXOpiaError::PoolPaused.into());
-        }
-
-        if authority.key().as_ref() != pool.authority {
-            return Err(UTXOpiaError::Unauthorized.into());
-        }
 
         validate_active_tree_pda(commitment_tree_info, program_id, pool.active_tree_index())?;
         (
@@ -497,6 +606,11 @@ pub fn process_complete_deposit(
     // Emit shield metadata (gross amount + Solana-side deposit fee) for indexer
     crate::utils::events::emit_shield_meta(amount_sats, total_fee, &token_id);
 
+    // Emit auditor ciphertext event on the permissioned path (non-empty only)
+    if !auditor_ciphertext.is_empty() {
+        crate::utils::events::emit_auditor_ciphertext(&commitment, auditor_ciphertext);
+    }
+
     // --- Create UTXO record PDA for the pool BTC output ---
     {
         let vout_le = sweep_vout.to_le_bytes();
@@ -599,4 +713,56 @@ fn expected_pool_tag(program_id: &Pubkey, pool_state: &Pubkey, zkbtc_mint: &Pubk
     let mut tag = [0u8; 8];
     tag.copy_from_slice(&hash[0..8]);
     tag
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that CompleteDepositData parses exactly the 80-byte fixed header and
+    /// that trailing bytes (auditor_ciphertext) are left in the slice without error.
+    #[test]
+    fn test_complete_deposit_data_parses_fixed_header() {
+        let mut data = [0u8; 80 + 16]; // 80-byte header + 16 bytes of fake ciphertext
+
+        // Fill sweep_txid with 0x01
+        data[0..32].fill(0x01);
+        // block_height = 123456 LE
+        data[32..40].copy_from_slice(&123456u64.to_le_bytes());
+        // sweep_tx_size = 500 LE
+        data[40..44].copy_from_slice(&500u32.to_le_bytes());
+        // deposit_tx_size = 250 LE
+        data[44..48].copy_from_slice(&250u32.to_le_bytes());
+        // deposit_txid with 0x02
+        data[48..80].fill(0x02);
+        // Trailing ciphertext bytes
+        data[80..96].fill(0xFF);
+
+        let ix = CompleteDepositData::from_bytes(&data).expect("should parse");
+        assert_eq!(ix.sweep_txid, [0x01u8; 32]);
+        assert_eq!(ix.block_height, 123456);
+        assert_eq!(ix.sweep_tx_size, 500);
+        assert_eq!(ix.deposit_tx_size, 250);
+        assert_eq!(ix.deposit_txid, [0x02u8; 32]);
+
+        // Auditor ciphertext is everything past the fixed header
+        let ciphertext = &data[CompleteDepositData::HEADER_SIZE..];
+        assert_eq!(ciphertext, &[0xFFu8; 16]);
+    }
+
+    /// Verify that data shorter than the fixed header is rejected.
+    #[test]
+    fn test_complete_deposit_data_rejects_short_input() {
+        let short = [0u8; 79]; // one byte under the required 80
+        assert!(CompleteDepositData::from_bytes(&short).is_err());
+    }
+
+    /// Verify that an empty auditor ciphertext slice (public path) is accepted
+    /// and no ciphertext bytes are emitted (slice is empty).
+    #[test]
+    fn test_auditor_ciphertext_empty_on_public_path() {
+        let data = [0u8; 80]; // exactly 80 bytes, no trailing ciphertext
+        let ciphertext = &data[CompleteDepositData::HEADER_SIZE..];
+        assert!(ciphertext.is_empty(), "public path must produce no ciphertext");
+    }
 }

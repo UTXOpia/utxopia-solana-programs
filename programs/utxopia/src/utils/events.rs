@@ -98,6 +98,15 @@ const EVENT_FEES_CLAIMED: u8 = 0x19;
 // disc 0x15 (EVENT_BTC_ORIGIN_ATTESTATION) plus a planned 0x18
 // (EVENT_ORIGIN_SCREENED) for passive attestation — see docs/COMPLIANCE.md.
 
+/// Event discriminator: auditor ciphertext for permissioned-pool deposits.
+///
+/// Emitted only when `complete_deposit_permissioned` is called.
+/// Lets the auditor's off-chain viewer recover the note plaintext without
+/// the pool authority having to share secrets with a third party.
+///
+/// Layout: disc(1) + commitment(32) + ciphertext(var)
+pub const EVENT_AUDITOR_CIPHERTEXT: u8 = 0x16;
+
 /// Max batch items for stack-allocated buffers.
 const MAX_BATCH: usize = crate::constants::MAX_SAFE_JOINSPLIT_SIZE;
 
@@ -369,6 +378,18 @@ pub fn emit_sender_memo(
     let disc = [EVENT_SENDER_MEMO];
     let li = leaf_index.to_le_bytes();
     sol_log_data(&[&disc, nonce, ciphertext_and_tag, commitment, &li]);
+}
+
+/// Emit auditor ciphertext for a permissioned-pool deposit.
+///
+/// Called only by `complete_deposit_permissioned` when `auditor_ciphertext`
+/// is non-empty. Gives the pool auditor's off-chain viewer the opaque blob
+/// it needs to reconstruct the note plaintext.
+///
+/// Layout: disc(1) + commitment(32) + ciphertext(var)
+pub fn emit_auditor_ciphertext(commitment: &[u8; 32], ciphertext: &[u8]) {
+    let disc = [EVENT_AUDITOR_CIPHERTEXT];
+    sol_log_data(&[&disc, commitment.as_ref(), ciphertext]);
 }
 
 /// Data for a single announcement in a batch (with token_id)
