@@ -15,7 +15,7 @@ pub struct PoolState {
     /// Bump seed for PDA derivation
     pub bump: u8,
 
-    /// Flags: bit 0 = paused
+    /// Flags: bit 0 = paused, bit 1 = permissioned, bit 2 = auditor_frozen
     pub flags: u8,
 
     /// Padding for alignment
@@ -101,7 +101,13 @@ pub struct PoolState {
     /// so existing pools decode identically). See `utxo_count` / `utxo_count()`.
     utxo_count_hi: [u8; 2],
 
-    /// Reserved for future use (remaining 4 bytes)
+    /// Auditor public key (ed25519 / Solana pubkey). Zero = no auditor assigned.
+    auditor: [u8; 32],
+
+    /// Auditor viewing public key (e.g. for encrypted-memo decryption). Zero = not set.
+    auditor_viewing_pubkey: [u8; 32],
+
+    /// Reserved for future use
     _reserved: [u8; 4],
 }
 
@@ -110,6 +116,8 @@ impl PoolState {
     pub const SEED: &'static [u8] = b"pool_state";
 
     const FLAG_PAUSED: u8 = 1 << 0;
+    const FLAG_PERMISSIONED: u8 = 1 << 1;
+    const FLAG_AUDITOR_FROZEN: u8 = 1 << 2;
 
     /// Parse from account data
     pub fn from_bytes(data: &[u8]) -> Result<&Self, ProgramError> {
@@ -148,6 +156,22 @@ impl PoolState {
     // Getters
     pub fn is_paused(&self) -> bool {
         self.flags & Self::FLAG_PAUSED != 0
+    }
+
+    pub fn permissioned(&self) -> bool {
+        self.flags & Self::FLAG_PERMISSIONED != 0
+    }
+
+    pub fn auditor_is_frozen(&self) -> bool {
+        self.flags & Self::FLAG_AUDITOR_FROZEN != 0
+    }
+
+    pub fn auditor(&self) -> &[u8; 32] {
+        &self.auditor
+    }
+
+    pub fn auditor_viewing_pubkey(&self) -> &[u8; 32] {
+        &self.auditor_viewing_pubkey
     }
 
     pub fn deposit_count(&self) -> u64 {
@@ -258,6 +282,30 @@ impl PoolState {
         } else {
             self.flags &= !Self::FLAG_PAUSED;
         }
+    }
+
+    pub fn set_permissioned(&mut self, permissioned: bool) {
+        if permissioned {
+            self.flags |= Self::FLAG_PERMISSIONED;
+        } else {
+            self.flags &= !Self::FLAG_PERMISSIONED;
+        }
+    }
+
+    pub fn set_auditor_frozen(&mut self, frozen: bool) {
+        if frozen {
+            self.flags |= Self::FLAG_AUDITOR_FROZEN;
+        } else {
+            self.flags &= !Self::FLAG_AUDITOR_FROZEN;
+        }
+    }
+
+    pub fn set_auditor(&mut self, pubkey: &[u8; 32]) {
+        self.auditor.copy_from_slice(pubkey);
+    }
+
+    pub fn set_auditor_viewing_pubkey(&mut self, pubkey: &[u8; 32]) {
+        self.auditor_viewing_pubkey.copy_from_slice(pubkey);
     }
 
     pub fn set_deposit_count(&mut self, value: u64) {
