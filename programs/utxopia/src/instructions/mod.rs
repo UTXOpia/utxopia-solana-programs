@@ -23,6 +23,7 @@
 //! | 17 | `complete_redemption` | Redemption |
 //! | 18 | `mark_processing` | Redemption |
 //! | 19 | `cancel_redemption` | Redemption |
+//! | 21 | `initialize_permissioned` | Core |
 //! | 27 | `approve_redemption_signing` | Redemption |
 
 // Core operations
@@ -31,6 +32,7 @@ pub mod cancel_redemption;
 pub mod complete_deposit;
 pub mod complete_redemption;
 pub mod initialize;
+pub mod initialize_permissioned;
 pub mod mark_processing;
 pub mod redeem;
 pub mod register_deposit_intent;
@@ -64,6 +66,7 @@ pub use complete_deposit::*;
 pub use complete_redemption::*;
 pub use init_vk_registry::*;
 pub use initialize::*;
+pub use initialize_permissioned::*;
 pub use mark_processing::*;
 pub use redeem::*;
 pub use register_deposit_intent::*;

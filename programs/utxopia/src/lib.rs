@@ -83,6 +83,9 @@ pub mod instruction {
     // Tree management (20)
     pub const ROTATE_TREE: u8 = 20;
 
+    // Permissioned pool initialization (21)
+    pub const INITIALIZE_PERMISSIONED: u8 = 21;
+
     // OP_RETURN-free deposits (24-25).
     // Backend's deposit_tracker uses 24 to register a DepositIntent PDA before
     // sweep, then 25 to verify the swept tx against that PDA on chain.
@@ -162,6 +165,10 @@ pub fn process_instruction(
         }
         // Tree management (20)
         instruction::ROTATE_TREE => instructions::process_rotate_tree(program_id, accounts, data),
+        // Permissioned pool initialization (21)
+        instruction::INITIALIZE_PERMISSIONED => {
+            instructions::process_initialize_permissioned(program_id, accounts, data)
+        }
         // OP_RETURN-free deposits (24-25)
         instruction::REGISTER_DEPOSIT_INTENT => {
             instructions::process_register_deposit_intent(program_id, accounts, data)
