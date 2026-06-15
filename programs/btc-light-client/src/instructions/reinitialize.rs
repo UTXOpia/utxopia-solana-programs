@@ -6,7 +6,6 @@ use pinocchio::{
     sysvars::{clock::Clock, Sysvar},
     ProgramResult,
 };
-use pinocchio_system::instructions::CreateAccount;
 
 use crate::constants::{
     BLOCK_HEADER_DISCRIMINATOR, BLOCK_HEADER_SEED, HEIGHT_INDEX_DISCRIMINATOR, HEIGHT_INDEX_SEED,
@@ -137,7 +136,7 @@ pub fn process_reinitialize(
     if block_header_info.key() != &expected_bh_pda {
         return Err(ProgramError::InvalidSeeds);
     }
-    if block_header_info.lamports() == 0 {
+    {
         let bh_bump_bytes = [bh_bump];
         let bh_signer_seeds: [Seed; 3] = [
             Seed::from(BLOCK_HEADER_SEED),
@@ -147,16 +146,14 @@ pub fn process_reinitialize(
         let bh_signer = [Signer::from(&bh_signer_seeds)];
 
         let bh_lamports = rent.minimum_balance(BlockHeader::LEN);
-        CreateAccount {
-            from: authority_info,
-            to: block_header_info,
-            lamports: bh_lamports,
-            space: BlockHeader::LEN as u64,
-            owner: program_id,
-        }
-        .invoke_signed(&bh_signer)?;
-    } else if block_header_info.owner() != program_id {
-        return Err(ProgramError::IllegalOwner);
+        crate::utils::create_or_claim_pda(
+            authority_info,
+            block_header_info,
+            program_id,
+            bh_lamports,
+            BlockHeader::LEN as u64,
+            &bh_signer,
+        )?;
     }
 
     {
@@ -181,7 +178,7 @@ pub fn process_reinitialize(
     if height_index_info.key() != &expected_hi_pda {
         return Err(ProgramError::InvalidSeeds);
     }
-    if height_index_info.lamports() == 0 {
+    {
         let hi_bump_bytes = [hi_bump];
         let hi_signer_seeds: [Seed; 3] = [
             Seed::from(HEIGHT_INDEX_SEED),
@@ -191,16 +188,14 @@ pub fn process_reinitialize(
         let hi_signer = [Signer::from(&hi_signer_seeds)];
 
         let hi_lamports = rent.minimum_balance(HeightIndex::LEN);
-        CreateAccount {
-            from: authority_info,
-            to: height_index_info,
-            lamports: hi_lamports,
-            space: HeightIndex::LEN as u64,
-            owner: program_id,
-        }
-        .invoke_signed(&hi_signer)?;
-    } else if height_index_info.owner() != program_id {
-        return Err(ProgramError::IllegalOwner);
+        crate::utils::create_or_claim_pda(
+            authority_info,
+            height_index_info,
+            program_id,
+            hi_lamports,
+            HeightIndex::LEN as u64,
+            &hi_signer,
+        )?;
     }
 
     {

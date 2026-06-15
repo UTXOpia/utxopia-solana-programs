@@ -19,6 +19,7 @@ use pinocchio::{
 use crate::error::UTXOpiaError;
 use crate::state::utxo::UTXO_RECORD_DISCRIMINATOR;
 use crate::state::{PoolState, RedemptionRequest, RedemptionStatus, UtxoRecord, UtxoStatus};
+use crate::utils::sighash::{canonical_sort, inputs_commitment, ReservedInput};
 use crate::utils::{validate_account_writable, validate_program_owner};
 
 /// Maximum UTXOs that can be selected in a single mark_processing call
@@ -102,6 +103,13 @@ pub fn process_mark_processing(
     let mut total_input_sats: u64 = 0;
     // Stack-allocated array to hold amounts for pool state update
     let mut utxo_amounts = [0u64; MAX_UTXOS_PER_MARK];
+    // Reserved input set (txid/vout/amount), committed below so approve can
+    // reconstruct the exact BTC tx the sighash is computed over.
+    let mut reserved = [ReservedInput {
+        txid: [0u8; 32],
+        vout: 0,
+        amount_sats: 0,
+    }; MAX_UTXOS_PER_MARK];
 
     for i in 0..utxo_count {
         let utxo_info = &accounts[3 + i];
@@ -126,6 +134,11 @@ pub fn process_mark_processing(
 
         let amount = utxo.amount_sats();
         utxo_amounts[i] = amount;
+        reserved[i] = ReservedInput {
+            txid: utxo.txid,
+            vout: utxo.vout(),
+            amount_sats: amount,
+        };
 
         // Sum amount
         total_input_sats = total_input_sats
@@ -136,6 +149,12 @@ pub fn process_mark_processing(
         utxo.set_status(UtxoStatus::Reserved);
         utxo.set_reserved_for_request_id(request_id);
     }
+
+    // Commit to the canonical-ordered reserved input set. approve_redemption_signing
+    // recomputes this from the supplied UTXO accounts and rejects any mismatch, so the
+    // BTC spend's inputs are pinned to trusted on-chain state (not the caller's sighash).
+    canonical_sort(&mut reserved[..utxo_count]);
+    let commitment = inputs_commitment(&reserved[..utxo_count]);
 
     // --- Phase 2: Update PoolState counters ---
     {
@@ -165,6 +184,10 @@ pub fn process_mark_processing(
 
         // Store total_input_sats (trustlessly computed from UTXO PDAs)
         redemption.set_total_input_sats(total_input_sats);
+
+        // Pin the reserved input set for trustless sighash reconstruction at approval.
+        redemption.set_reserved_count(utxo_count as u8);
+        redemption.set_inputs_commitment(&commitment);
 
         // Emit processing event
         let requester: &[u8; 32] = &redemption.requester;

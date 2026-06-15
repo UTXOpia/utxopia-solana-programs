@@ -449,7 +449,12 @@ pub fn process_verify_deposit(
         0,
     );
 
-    // Mint zkBTC to pool vault
+    // Mint zkBTC into the pool vault for the FULL deposit (shielded liability + fee).
+    // The whole `amount_sats` of BTC is held in pool-controlled (NPK-tweaked) custody, so
+    // minting the gross amount keeps the vault fully backed: `shielded_amount` backs the user's
+    // note and `total_fee` backs the accumulated_fees credited below (claimable via claim_fees).
+    // Minting only `shielded_amount` while crediting `total_fee` undercollateralized the vault
+    // when claim_fees withdrew the unbacked fees (audit f15).
     let pool_bump_bytes = [pool_bump];
     let pool_signer_seeds: &[&[u8]] = &[PoolState::SEED, &pool_bump_bytes];
 
@@ -458,7 +463,7 @@ pub fn process_verify_deposit(
         zkbtc_mint,
         pool_vault,
         pool_state_info,
-        shielded_amount,
+        amount_sats,
         pool_signer_seeds,
     )?;
 
@@ -468,7 +473,8 @@ pub fn process_verify_deposit(
         let pool = PoolState::from_bytes_mut(&mut pool_data)?;
 
         pool.increment_deposit_count()?;
-        pool.add_minted(shielded_amount)?;
+        // Gross amount actually minted into the vault (shielded note + claimable fee).
+        pool.add_minted(amount_sats)?;
         pool.add_shielded(shielded_amount)?;
         pool.set_last_update(clock.unix_timestamp);
     }

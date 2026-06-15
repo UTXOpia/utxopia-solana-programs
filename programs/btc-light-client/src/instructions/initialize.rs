@@ -196,14 +196,14 @@ pub fn process_initialize(
     let bh_signer = [Signer::from(&bh_signer_seeds)];
 
     let bh_lamports = rent.minimum_balance(BlockHeader::LEN);
-    CreateAccount {
-        from: payer,
-        to: block_header_info,
-        lamports: bh_lamports,
-        space: BlockHeader::LEN as u64,
-        owner: program_id,
-    }
-    .invoke_signed(&bh_signer)?;
+    crate::utils::create_or_claim_pda(
+        payer,
+        block_header_info,
+        program_id,
+        bh_lamports,
+        BlockHeader::LEN as u64,
+        &bh_signer,
+    )?;
 
     // Initialize genesis BlockHeader (minimal — we only know hash and height)
     {
@@ -238,14 +238,14 @@ pub fn process_initialize(
     let hi_signer = [Signer::from(&hi_signer_seeds)];
 
     let hi_lamports = rent.minimum_balance(HeightIndex::LEN);
-    CreateAccount {
-        from: payer,
-        to: height_index_info,
-        lamports: hi_lamports,
-        space: HeightIndex::LEN as u64,
-        owner: program_id,
-    }
-    .invoke_signed(&hi_signer)?;
+    crate::utils::create_or_claim_pda(
+        payer,
+        height_index_info,
+        program_id,
+        hi_lamports,
+        HeightIndex::LEN as u64,
+        &hi_signer,
+    )?;
 
     // Initialize HeightIndex
     {

@@ -94,7 +94,7 @@ pub fn process_cancel_redemption(
 
     // Validate requester and status; capture amount, token_id, request_id, and whether the
     // request was Processing (only Processing redemptions reserved UTXOs that must be released).
-    let (amount_sats, token_id, request_id, was_processing) = {
+    let (amount_sats, token_id, request_id, was_processing, reserved_count) = {
         let redemption_data = redemption_info.try_borrow_data()?;
         let redemption = RedemptionRequest::from_bytes(&redemption_data)?;
 
@@ -135,6 +135,7 @@ pub fn process_cancel_redemption(
             *redemption.token_id(),
             redemption.request_id(),
             was_processing,
+            redemption.reserved_count() as usize,
         )
     };
 
@@ -160,6 +161,15 @@ pub fn process_cancel_redemption(
     // UTXOs stay locked forever and pool UTXO accounting never recovers.
     if accounts.len() < 6 + ix_data.utxo_count {
         return Err(ProgramError::NotEnoughAccountKeys);
+    }
+    // Completeness: a Processing cancel MUST restore EXACTLY the set reserved at
+    // mark_processing. Otherwise a partial restore (e.g. utxo_count = 0) still re-mints the
+    // full note and closes the request, leaving the omitted reserved UTXOs stuck in Reserved
+    // forever (stranded collateral) with no surviving request able to free them. `reserved_count`
+    // is the count committed at mark_processing; with the per-UTXO Reserved+request_id binding
+    // below, requiring equality pins restoration to the full reserved set.
+    if was_processing && ix_data.utxo_count != reserved_count {
+        return Err(UTXOpiaError::InvalidUtxo.into());
     }
     let restored_total: u64 = if was_processing {
         let mut total: u64 = 0;

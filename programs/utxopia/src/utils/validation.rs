@@ -18,10 +18,18 @@ use crate::error::UTXOpiaError;
 // PDA CREATION HELPER (shared across all instructions)
 // ============================================================================
 
-/// Create a PDA account via CPI to system program
+/// Create a PDA account via CPI to system program.
 ///
 /// This is a shared helper to eliminate duplication across instruction files.
 /// Previously duplicated across account-creating instruction handlers.
+///
+/// # Security: pre-funded PDA poisoning resistance
+/// A bare `CreateAccount` fails if the target PDA already holds lamports
+/// (`SystemError::AccountAlreadyInUse`). Because every PDA address here is
+/// deterministic, a griefer can transfer 1 lamport to the known address before
+/// initialization and permanently block creation (DoS). To stay resilient we
+/// fall back to `Transfer` (top up rent) + `Allocate` + `Assign` — all signed by
+/// the PDA seeds — when the account is already funded but still uninitialized.
 #[inline]
 pub fn create_pda_account<'a>(
     payer: &'a AccountInfo,
@@ -31,14 +39,6 @@ pub fn create_pda_account<'a>(
     space: u64,
     signer_seeds: &[&[u8]],
 ) -> ProgramResult {
-    let create_account = pinocchio_system::instructions::CreateAccount {
-        from: payer,
-        to: pda_account,
-        lamports,
-        space,
-        owner: program_id,
-    };
-
     // Convert seeds to Pinocchio format
     let seeds: [Seed; 4] = [
         if !signer_seeds.is_empty() {
@@ -63,8 +63,46 @@ pub fn create_pda_account<'a>(
         },
     ];
 
-    let signer = Signer::from(&seeds[..signer_seeds.len()]);
-    create_account.invoke_signed(&[signer])
+    let signers = [Signer::from(&seeds[..signer_seeds.len()])];
+
+    if pda_account.lamports() == 0 {
+        pinocchio_system::instructions::CreateAccount {
+            from: payer,
+            to: pda_account,
+            lamports,
+            space,
+            owner: program_id,
+        }
+        .invoke_signed(&signers)
+    } else {
+        // Pre-funded PDA: a bare CreateAccount would fail, so reconstruct the
+        // account in place. Top up rent (if short), allocate space, then assign
+        // ownership to this program — all authorized by the PDA seeds.
+        let current = pda_account.lamports();
+        if lamports > current {
+            pinocchio_system::instructions::Transfer {
+                from: payer,
+                to: pda_account,
+                lamports: lamports - current,
+            }
+            .invoke()?;
+        }
+        if (pda_account.data_len() as u64) < space {
+            pinocchio_system::instructions::Allocate {
+                account: pda_account,
+                space,
+            }
+            .invoke_signed(&signers)?;
+        }
+        if pda_account.owner() != program_id {
+            pinocchio_system::instructions::Assign {
+                account: pda_account,
+                owner: program_id,
+            }
+            .invoke_signed(&signers)?;
+        }
+        Ok(())
+    }
 }
 
 // ============================================================================

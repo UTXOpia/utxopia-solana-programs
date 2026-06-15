@@ -6,7 +6,6 @@ use pinocchio::{
     sysvars::{clock::Clock, Sysvar},
     ProgramResult,
 };
-use pinocchio_system::instructions::CreateAccount;
 
 use crate::constants::{
     BLOCKS_PER_EPOCH, BLOCK_HEADER_DISCRIMINATOR, BLOCK_HEADER_SEED, HEIGHT_INDEX_DISCRIMINATOR,
@@ -253,14 +252,14 @@ pub fn process_extend_blockchain(
             let header_signer = [Signer::from(&header_signer_seeds)];
 
             let lamports = rent.minimum_balance(BlockHeader::LEN);
-            CreateAccount {
-                from: submitter,
-                to: block_header_info,
+            crate::utils::create_or_claim_pda(
+                submitter,
+                block_header_info,
+                program_id,
                 lamports,
-                space: BlockHeader::LEN as u64,
-                owner: program_id,
-            }
-            .invoke_signed(&header_signer)?;
+                BlockHeader::LEN as u64,
+                &header_signer,
+            )?;
         }
 
         // Write block header data
@@ -342,14 +341,14 @@ pub fn process_extend_blockchain(
                 let hi_signer = [Signer::from(&hi_signer_seeds)];
 
                 let lamports = rent.minimum_balance(HeightIndex::LEN);
-                CreateAccount {
-                    from: submitter,
-                    to: height_index_info,
+                crate::utils::create_or_claim_pda(
+                    submitter,
+                    height_index_info,
+                    program_id,
                     lamports,
-                    space: HeightIndex::LEN as u64,
-                    owner: program_id,
-                }
-                .invoke_signed(&hi_signer)?;
+                    HeightIndex::LEN as u64,
+                    &hi_signer,
+                )?;
             }
 
             // Write HeightIndex data (overwrite if reorg makes this fork canonical)

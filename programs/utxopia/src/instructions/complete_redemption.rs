@@ -306,6 +306,7 @@ pub fn process_complete_redemption(
         requester_key,
         request_id,
         total_input_sats,
+        reserved_count,
     ) = {
         let redemption_data = redemption_info.try_borrow_data()?;
         let redemption = RedemptionRequest::from_bytes(&redemption_data)?;
@@ -334,6 +335,7 @@ pub fn process_complete_redemption(
             req_key,
             redemption.request_id(),
             redemption.total_input_sats(),
+            redemption.reserved_count() as usize,
         )
     };
 
@@ -550,6 +552,17 @@ pub fn process_complete_redemption(
     let consumed_count = ix_data.consumed_utxo_count as usize;
     if consumed_count > MAX_CONSUMED_UTXOS {
         return Err(ProgramError::InvalidInstructionData);
+    }
+
+    // Completeness: the completion MUST consume EXACTLY the set reserved at mark_processing.
+    // Without this, a caller can complete while restoring/consuming only a subset of the
+    // reserved UTXOs; the omitted ones stay Reserved forever (stranded BTC collateral) once
+    // the RedemptionRequest is closed below. `reserved_count` is the count committed at
+    // mark_processing; combined with the per-UTXO Reserved+request_id checks and the
+    // inputs().count() == consumed_count check below, this pins the spend to the full reserved
+    // set. (Closes the partial-completion stranding finding.)
+    if consumed_count != reserved_count {
+        return Err(UTXOpiaError::InvalidUtxo.into());
     }
 
     let consumed_start = if ix_data.pool_script_len > 0 { 14 } else { 13 };

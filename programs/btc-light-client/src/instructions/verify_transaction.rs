@@ -6,7 +6,6 @@ use pinocchio::{
     sysvars::{clock::Clock, Sysvar},
     ProgramResult,
 };
-use pinocchio_system::instructions::CreateAccount;
 
 use crate::constants::{
     BLOCK_HEADER_DISCRIMINATOR, BLOCK_HEADER_SEED, HEIGHT_INDEX_DISCRIMINATOR, HEIGHT_INDEX_SEED,
@@ -181,11 +180,12 @@ pub fn process_verify_transaction(
             let sibling_offset = siblings_start + i * 32;
             let mut sibling = [0u8; 32];
             sibling.copy_from_slice(&proof_data[sibling_offset..sibling_offset + 32]);
-            // CVE-2012-2459: a node equal to its sibling marks a duplicated (forgeable)
-            // subtree. Honest proofs never present sibling == current.
-            if sibling == current {
-                return Err(ProgramError::InvalidArgument);
-            }
+            // NOTE: We intentionally do NOT reject `sibling == current`. Bitcoin's merkle
+            // tree duplicates the last node when a level has an odd count and hashes it with
+            // itself, so a transaction in an odd-tail position legitimately presents a sibling
+            // equal to itself. Rejecting it would wrongly fail valid proofs (DoS on honest
+            // deposits/redemptions). The real CVE-2012-2459 inner-node-as-leaf forgery is
+            // already prevented by the 64-byte tx_size guard above.
             let is_right = (path_bits >> i) & 1 == 1;
             current = if is_right {
                 double_sha256_pair(&sibling, &current)
@@ -231,14 +231,14 @@ pub fn process_verify_transaction(
     let rent = pinocchio::sysvars::rent::Rent::get()?;
     let lamports = rent.minimum_balance(VerifiedTransaction::LEN);
 
-    CreateAccount {
-        from: payer,
-        to: verified_tx_info,
+    crate::utils::create_or_claim_pda(
+        payer,
+        verified_tx_info,
+        program_id,
         lamports,
-        space: VerifiedTransaction::LEN as u64,
-        owner: program_id,
-    }
-    .invoke_signed(&signer)?;
+        VerifiedTransaction::LEN as u64,
+        &signer,
+    )?;
 
     // Initialize
     {

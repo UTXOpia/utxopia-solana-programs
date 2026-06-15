@@ -28,12 +28,12 @@ pub const BTC_LIGHT_CLIENT_PROGRAM_ID: [u8; 32] = [
     0xa7, 0x77, 0x67, 0x28, 0x6e, 0x4f, 0x27, 0x86, 0x50, 0x53, 0x3e, 0xa2, 0x3c, 0xce, 0x89, 0xb9,
 ];
 
-/// BTC Light Client — devnet-regtest hybrid (E3Q7dNDNw9W8oL1ghm62Ecau4zHBZ1W5zxrnNVaoRs6v)
-/// Same Solana devnet program account, but tracks REGTEST headers (network_byte=3).
+/// BTC Light Client — devnet-regtest hybrid (8hCSNKf8ByqZdet2D4SDiZHDrB1u9ohkhqKKzr9i7vfQ)
+/// Greenfield fresh deploy 2026-06-15. Tracks REGTEST headers (network_byte=3).
 #[cfg(feature = "devnet-regtest")]
 pub const BTC_LIGHT_CLIENT_PROGRAM_ID: [u8; 32] = [
-    0xc1, 0xc5, 0x3a, 0x1f, 0x0b, 0x32, 0x3f, 0x0f, 0x36, 0xd8, 0x6f, 0xe9, 0x13, 0xa4, 0x48, 0x8d,
-    0x2d, 0xd6, 0x4c, 0x28, 0xf7, 0x74, 0x9b, 0x4a, 0xd3, 0xc0, 0x0e, 0x91, 0x28, 0x34, 0x5f, 0x1f,
+    0x72, 0x4d, 0xf9, 0x1e, 0xc8, 0xc4, 0x80, 0x2c, 0x6a, 0x7c, 0x00, 0x7a, 0x03, 0x44, 0x91, 0x2c,
+    0x89, 0xe8, 0x73, 0x4e, 0x07, 0x71, 0x59, 0x93, 0xb3, 0x9c, 0xc3, 0xad, 0x89, 0x36, 0x61, 0x67,
 ];
 
 /// BTC Relay program ID — devnet (Ho6UTeF8yFnRdCK15tSZtcJozvkDABJZWYxkgGyWAfyq)
@@ -69,6 +69,20 @@ pub const CHAIN_ID: u64 = 101; // Solana mainnet
 /// Redemption processing timeout in slots (~24 hours at ~2.5 slots/sec).
 /// If a redemption stays in Processing longer than this, the user can cancel.
 pub const REDEMPTION_TIMEOUT_SLOTS: u64 = 216_000;
+
+/// Canonical Bitcoin redemption-tx parameters. The backend
+/// (`backend/src/redemption/builder.rs`) MUST construct redemption txs with
+/// exactly these values, otherwise the on-chain reconstructed sighash (see
+/// `approve_redemption_signing`) will not match the broadcast tx and approval
+/// will be rejected. These pin the otherwise non-deterministic tx fields so the
+/// program can re-derive the BIP-341 sighash from trusted state.
+pub const BTC_TX_VERSION: u32 = 2;
+pub const BTC_TX_LOCKTIME: u32 = 0;
+/// Per-input nSequence: ENABLE_RBF_NO_LOCKTIME (0xFFFFFFFD).
+pub const BTC_INPUT_SEQUENCE: u32 = 0xFFFF_FFFD;
+/// Dust threshold (sats): a change-to-pool output is only created when change
+/// strictly exceeds this. Must equal the backend's `BTC_DUST_THRESHOLD`.
+pub const BTC_DUST_THRESHOLD_SATS: u64 = 330;
 
 /// Timelock delay for pool parameter updates (48 hours in seconds)
 pub const TIMELOCK_DELAY_SECS: i64 = 48 * 60 * 60;

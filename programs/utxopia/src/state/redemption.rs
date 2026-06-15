@@ -34,6 +34,11 @@ pub enum RedemptionStatus {
 /// - total_input_sats:  8 bytes (sum of BTC input UTXOs, set at mark_processing by backend)
 /// - btc_script:        34 bytes (raw scriptPubKey for BTC withdrawal, not bech32 string)
 /// - token_id:          32 bytes (the redeemed token, recorded at redeem; cancel re-mints the same token)
+/// - reserved_count:    1 byte  (number of UTXOs reserved at mark_processing; 0 until Processing)
+/// - _padding2:         7 bytes (alignment/reserve)
+/// - inputs_commitment: 32 bytes (sha256 over canonical-ordered reserved inputs; binds the BTC
+///                                spend's input set so approve_redemption_signing can reconstruct
+///                                the exact sighash from trusted state)
 #[repr(C)]
 pub struct RedemptionRequest {
     /// Account discriminator
@@ -78,6 +83,20 @@ pub struct RedemptionRequest {
     /// Token id of the redeemed note, recorded at redeem; cancel_redemption
     /// re-mints with this and rejects a token_config whose token_id differs.
     pub token_id: [u8; 32],
+
+    /// Number of pool UTXOs reserved for this redemption at mark_processing.
+    /// 0 while Pending. approve_redemption_signing requires exactly this many
+    /// reserved UTXO accounts so the reconstructed BTC tx has the right inputs.
+    reserved_count: u8,
+
+    /// Alignment / future reserve.
+    _padding2: [u8; 7],
+
+    /// sha256 over the canonical-ordered reserved input set
+    /// (for each input in canonical order: txid(32) || vout(4 LE) || amount(8 LE)).
+    /// Set at mark_processing; checked at approve to prove the supplied UTXO set
+    /// is exactly the reserved set, in the order the sighash is computed over.
+    inputs_commitment: [u8; 32],
 }
 
 impl RedemptionRequest {
@@ -154,6 +173,14 @@ impl RedemptionRequest {
         &self.token_id
     }
 
+    pub fn reserved_count(&self) -> u8 {
+        self.reserved_count
+    }
+
+    pub fn inputs_commitment(&self) -> &[u8; 32] {
+        &self.inputs_commitment
+    }
+
     pub fn is_signing_approved(&self) -> bool {
         self.signing_approved != 0
     }
@@ -198,5 +225,13 @@ impl RedemptionRequest {
 
     pub fn set_token_id(&mut self, token_id: &[u8; 32]) {
         self.token_id = *token_id;
+    }
+
+    pub fn set_reserved_count(&mut self, value: u8) {
+        self.reserved_count = value;
+    }
+
+    pub fn set_inputs_commitment(&mut self, commitment: &[u8; 32]) {
+        self.inputs_commitment = *commitment;
     }
 }

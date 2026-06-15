@@ -534,9 +534,12 @@ pub fn process_complete_deposit(
         crate::utils::events::emit_utxo_created(&ix_data.sweep_txid, sweep_vout, amount_sats);
     }
 
-    // Mint zkBTC collateral to pool vault for the shielded liability only.
-    // The BTC fee remainder stays in the Ika vault as protocol revenue, not as
-    // a spendable private note.
+    // Mint zkBTC into the pool vault for the FULL deposit (shielded liability + fee).
+    // The whole `amount_sats` of BTC sits in custody, so minting the gross amount keeps the
+    // vault fully backed: `shielded_amount` backs the user's note and `total_fee` backs the
+    // accumulated_fees credited below (claimable via claim_fees, identical to the SPL shield
+    // path). Minting only `shielded_amount` while crediting `total_fee` to accumulated_fees let
+    // claim_fees withdraw user-backing tokens and undercollateralize the vault (audit f15).
     let pool_bump_bytes = [pool_bump];
     let pool_signer_seeds: &[&[u8]] = &[PoolState::SEED, &pool_bump_bytes];
 
@@ -545,7 +548,7 @@ pub fn process_complete_deposit(
         zkbtc_mint,
         pool_vault,
         pool_state_info,
-        shielded_amount,
+        amount_sats,
         pool_signer_seeds,
     )?;
 
@@ -555,7 +558,8 @@ pub fn process_complete_deposit(
         let pool = PoolState::from_bytes_mut(&mut pool_data)?;
 
         pool.increment_deposit_count()?;
-        pool.add_minted(shielded_amount)?;
+        // Gross amount actually minted into the vault (shielded note + claimable fee).
+        pool.add_minted(amount_sats)?;
         pool.add_shielded(shielded_amount)?;
         pool.add_utxo(amount_sats)?;
         pool.set_last_update(clock.unix_timestamp);
