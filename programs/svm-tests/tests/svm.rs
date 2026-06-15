@@ -323,6 +323,47 @@ fn verify_transaction_accepts_finalized_block() {
     );
 }
 
+/// Regression test for audit #32 off-by-one: a block at exactly
+/// `tip - (REQUIRED_CONFIRMATIONS - 1)` has exactly REQUIRED_CONFIRMATIONS
+/// confirmations (inclusive) and must be accepted. With the old formula
+/// (`finalized_height = tip - REQUIRED_CONFIRMATIONS`) this block was one
+/// above `finalized_height` and wrongly rejected.
+///
+/// Setup: tip=100, REQUIRED_CONFIRMATIONS=6, so finalized_height=95.
+/// Block 95 has 100-95+1=6 confs (exactly the minimum) → must be accepted.
+/// Block 96 has 5 confs → must be rejected.
+#[test]
+fn verify_transaction_accepts_exactly_required_confirmations() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "btc_light_client");
+
+    // tip=100, REQUIRED_CONFIRMATIONS=6 → finalized_height=95 (tip - (6-1))
+    let (ix, accounts) = verify_tx_call(&pid, 95, 95);
+    let res = mollusk.process_instruction(&ix, &accounts);
+    assert!(
+        res.program_result.is_ok(),
+        "block with exactly REQUIRED_CONFIRMATIONS should be accepted (off-by-one regression), got {:?}",
+        res.program_result
+    );
+}
+
+#[test]
+fn verify_transaction_rejects_one_below_required_confirmations() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "btc_light_client");
+
+    // Block 96 is above finalized_height 95 → has only 5 confs → must be rejected.
+    let (ix, accounts) = verify_tx_call(&pid, 96, 95);
+    let res = mollusk.process_instruction(&ix, &accounts);
+    assert!(
+        res.program_result.is_err(),
+        "block with fewer than REQUIRED_CONFIRMATIONS must be rejected, got {:?}",
+        res.program_result
+    );
+}
+
 // ============================================================================
 // 3. Permissioned-pool gate integration tests.
 //

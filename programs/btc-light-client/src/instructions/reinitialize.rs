@@ -90,7 +90,7 @@ pub fn process_reinitialize(
     lc.tip_hash = start_block_hash;
     lc.total_chainwork = [0u8; 32];
     lc.set_tip_height(start_height);
-    lc.set_finalized_height(start_height.saturating_sub(REQUIRED_CONFIRMATIONS));
+    lc.set_finalized_height(start_height.saturating_sub(REQUIRED_CONFIRMATIONS.saturating_sub(1)));
     lc.set_header_count(0);
     lc.set_expected_bits(0);
     lc.set_epoch_start_time(0);

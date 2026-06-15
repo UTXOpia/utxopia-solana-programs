@@ -430,8 +430,15 @@ pub fn process_extend_blockchain(
             // treats it as a one-way safety threshold; moving it back would let already-finalized
             // history be rewritten and re-pruned. A reorg can still advance the tip; it just can't
             // un-finalize.
-            if running_height > REQUIRED_CONFIRMATIONS {
-                let candidate = running_height - REQUIRED_CONFIRMATIONS;
+            //
+            // Confirmations are inclusive: a block at height H with tip at T has T-H+1
+            // confirmations. The deepest block with >= REQUIRED_CONFIRMATIONS confs is at
+            // T-(REQUIRED_CONFIRMATIONS-1). The prior formula (T-REQUIRED_CONFIRMATIONS) was
+            // off by one, causing verify_transaction to reject blocks with exactly the required
+            // confirmation count (audit parity with Sui fix #32).
+            {
+                let candidate =
+                    running_height.saturating_sub(REQUIRED_CONFIRMATIONS.saturating_sub(1));
                 if candidate > lc.finalized_height() {
                     lc.set_finalized_height(candidate);
                 }
