@@ -100,6 +100,10 @@ pub mod instruction {
 
     // Ika pre-broadcast signing approval (27)
     pub const APPROVE_REDEMPTION_SIGNING: u8 = 27;
+
+    // Auditor-only setters (28-29)
+    pub const SET_AUDITOR_FROZEN: u8 = 28;
+    pub const SET_AUDITOR_VIEWING_PUBKEY: u8 = 29;
 }
 
 #[cfg(not(feature = "no-entrypoint"))]
@@ -193,6 +197,13 @@ pub fn process_instruction(
         // Ika pre-broadcast signing approval (27)
         instruction::APPROVE_REDEMPTION_SIGNING => {
             instructions::process_approve_redemption_signing(program_id, accounts, data)
+        }
+        // Auditor-only setters (28-29)
+        instruction::SET_AUDITOR_FROZEN => {
+            instructions::process_set_auditor_frozen(program_id, accounts, data)
+        }
+        instruction::SET_AUDITOR_VIEWING_PUBKEY => {
+            instructions::process_set_auditor_viewing_pubkey(program_id, accounts, data)
         }
         _ => Err(ProgramError::InvalidInstructionData),
     }

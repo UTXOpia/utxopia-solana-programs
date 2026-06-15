@@ -27,6 +27,8 @@
 //! | 22 | `complete_deposit_permissioned` | Deposit |
 //! | 23 | `shield_permissioned` | Deposit |
 //! | 27 | `approve_redemption_signing` | Redemption |
+//! | 28 | `set_auditor_frozen` | Auditor admin |
+//! | 29 | `set_auditor_viewing_pubkey` | Auditor admin |
 
 // Core operations
 pub mod approve_redemption_signing;
@@ -49,6 +51,7 @@ pub mod unshield;
 pub mod update_token_config;
 
 // Admin utilities
+pub mod admin_auditor;
 pub mod admin_update_pool;
 pub mod set_pool_config;
 
@@ -60,6 +63,7 @@ pub mod joinsplit_common;
 pub mod rotate_tree;
 
 // Re-exports
+pub use admin_auditor::*;
 pub use admin_update_pool::*;
 pub use approve_redemption_signing::*;
 pub use cancel_redemption::*;
