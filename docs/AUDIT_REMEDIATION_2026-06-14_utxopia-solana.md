@@ -92,12 +92,24 @@ One item remains, **unsafe to rush** — it needs a reviewed consensus-reorg cha
   `extend_blockchain` calls and only later overtakes, only the final batch's `HeightIndex` entries
   are reindexed; ancestor heights from earlier non-canonical batches keep pointing at the old
   chain. **Impact is finality/PoW-gated** (a stale entry must be at a height `<= finalized_height`,
-  which on mainnet requires out-PoW past finality; cheap only on regtest, cf. f00). **Plan:**
-  enforce the invariant that promotion to canonical leaves every `HeightIndex` in
-  `[divergence_height ..= tip_height]` pointing at the canonical fork — i.e. require the caller to
-  pass (and the program to rewrite) the full HeightIndex range from the divergence point, or
-  forbid promoting a fork in a call that doesn't itself reindex every height since divergence.
-  Consensus-critical; needs dedicated review + tests before landing.
+  which on mainnet requires out-PoW past finality; cheap only on regtest, cf. f00).
+
+  **Recommended plan (require canonical parent — simplest correct fix):** add the parent's
+  `HeightIndex` account to `extend_blockchain` and assert it is canonical
+  (`HeightIndex[parent_height].block_hash == parent_hash`) before processing. This forbids the
+  only vulnerable pattern — building a detached fork incrementally across multiple calls (the
+  non-canonical `else` branch) — because a later batch's parent (a not-yet-canonical fork tip)
+  would fail the check. Under this rule a promotion's batch always spans exactly
+  `[parent_height+1 ..= new_tip]`, so the existing per-batch HeightIndex reindex is *complete*:
+  no ancestor height can keep a stale entry. Stale entries above `new_tip` are harmless (they're
+  `> finalized_height`, so `verify_transaction` rejects them).
+  - Trade-off: reorgs must be submitted in a single call from a canonical common ancestor
+    (bounded by `n` headers/call); incremental multi-batch fork building is no longer allowed.
+    Acceptable for realistic (shallow) reorgs; confirm against the backend's submission strategy.
+  - Adds one account (parent HeightIndex) → backend coordination.
+  - **Why still deferred:** consensus-critical with a catastrophic failure mode (a wrong canonical
+    check could reject all valid extensions → halt header ingestion → bridge stops). MUST land
+    with reorg integration tests, which don't exist in this repo yet. Do not merge blind.
 
 > **f32 update (FIXED 2026-06-15):** implemented by mirroring `complete_deposit` — `verify_deposit`
 > now records the sweep's pool output as a `UtxoRecord` + `pool.add_utxo`, idempotent for batched
