@@ -14,12 +14,11 @@ branch `audit-2026-06-14-fixes` (commits `214069d`, `5467f0d`) plus the backend 
 | Medium     | 9     | 7     | 0            | 2                | 0                  |
 | Minor      | 4     | 4     | 0            | 0                | 0                  |
 | Info       | 13    | 2     | 4            | 7                | 0                  |
-| Discussion | 12    | 9     | 1            | 0                | 2                  |
-| **Total**  | 43    | **27**| **5**        | **9**            | **2**              |
+| Discussion | 12    | 10    | 1            | 0                | 1                  |
+| **Total**  | 43    | **28**| **5**        | **9**            | **1**              |
 
-Deferred (f03, f32) are documented with concrete remediation plans below; they require
-consensus-reorg design / cross-component coordination and should be scheduled as reviewed work,
-not rushed into consensus code.
+Only f03 remains deferred (documented with a concrete remediation plan below); it requires a
+reviewed consensus-reorg change and should not be rushed into consensus code.
 
 ## Fixed (on-chain)
 
@@ -50,6 +49,7 @@ not rushed into consensus code.
 | f01 | disc | native SHA-256 fallback | host tests now use the real `sha2` digest (dev-dep). |
 | f27 | disc | vault not pool-controlled | `register_token` asserts vault authority == pool PDA. |
 | f11 | disc | timelocked bounds strand deposits | `process_execute_pool_update` is now authority-only (removes third-party activation timing); min/max kept as admission policy, `deposit_cap` is the hard invariant. |
+| f32 | disc | verify_deposit missing UtxoRecord | `verify_deposit` now records the sweep's pool output as a `UtxoRecord` + `pool.add_utxo` (idempotent for batched sweeps), via an OPTIONAL trailing account so rollout is non-breaking. Mirrors `complete_deposit`. The active deposit path (`complete_deposit`) already did this; the verify_deposit-intent backend caller is dormant/incompatible and annotated for revival. |
 
 ## Accepted-by-design / documented (no code change)
 
@@ -84,11 +84,9 @@ not rushed into consensus code.
 
 ## Requires coordinated / consensus work (not fixed in this pass)
 
-These two are real but unsafe to rush; each needs cross-component design. **Disposition
-accepted by the maintainer on 2026-06-15** as planned, review-gated work items (not landed
-blind into consensus/custody code). f32 additionally needs a sweep-fee accounting decision +
-a new instruction account (backend/SDK) + a deposit→redemption integration test; f03 needs a
-reviewed consensus-reorg change with tests.
+One item remains, **unsafe to rush** — it needs a reviewed consensus-reorg change with tests
+(maintainer-accepted as planned work on 2026-06-15, not landed blind into consensus code).
+(f32 was fixed; see the Fixed table.)
 
 - **f03 (disc) — multi-batch reorg HeightIndex corruption.** When a fork is built across several
   `extend_blockchain` calls and only later overtakes, only the final batch's `HeightIndex` entries
@@ -101,15 +99,11 @@ reviewed consensus-reorg change with tests.
   forbid promoting a fork in a call that doesn't itself reindex every height since divergence.
   Consensus-critical; needs dedicated review + tests before landing.
 
-- **f32 (disc) — missing UtxoRecord in `process_verify_deposit`.** The DepositIntent path mints a
-  shielded note but creates no `UtxoRecord` and never calls `pool.add_utxo`, so the corresponding
-  BTC is a minted liability invisible to the redemption asset set (custody understated). Note:
-  verify_deposit verifies a SWEEP that spends the NPK-tweaked deposit output, so the recordable
-  UTXO is the sweep's POOL-address output — spendable by the pool main key, **no signer tweak
-  needed**. **Plan:** mirror `complete_deposit`'s record creation — `find_output_by_script(pool_
-  script)` on the sweep, create `UtxoRecord[sweep_txid, sweep_vout]`, `pool.add_utxo` — with an
-  extra writable account. The care required (why it's deferred, not blind-edited): it must
-  **coordinate dedup with `complete_deposit`** so a sweep output isn't recorded twice and
-  `total_btc_held` isn't double-counted (which would over-credit redemptions → insolvency the
-  other direction). Needs the deposit/sweep architecture confirmed + the backend to pass the
-  account. Tractable but must be reviewed against the full deposit flow before landing.
+> **f32 update (FIXED 2026-06-15):** implemented by mirroring `complete_deposit` — `verify_deposit`
+> now records the sweep's pool output as a `UtxoRecord` + `pool.add_utxo`, idempotent for batched
+> sweeps, via an OPTIONAL trailing account (non-breaking rollout). Records the pool output's actual
+> value, so no double-count. The active deposit path (`complete_deposit`) already did this; the
+> dormant/incompatible verify_deposit-intent backend caller is annotated for revival. Residual
+> (separate, minor): verify_deposit credits the gross deposit while the recorded UTXO is the
+> post-sweep-fee pool output, so tracked BTC trails minted zkBTC by the sweep fee — same class as
+> the (accepted) deposit-fee handling, bounded and tiny.

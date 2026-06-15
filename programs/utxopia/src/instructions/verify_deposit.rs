@@ -37,8 +37,9 @@ use pinocchio::{
 use crate::error::UTXOpiaError;
 use crate::state::{
     deposit_receipt::DEPOSIT_RECEIPT_DISCRIMINATOR, light_client_tip_height,
-    pool_config::POOL_CONFIG_DISCRIMINATOR, CommitmentTree, DepositIntent, DepositReceipt,
-    PoolConfig, PoolState, TokenConfig, VerifiedTransactionView,
+    pool_config::POOL_CONFIG_DISCRIMINATOR, utxo::UTXO_RECORD_DISCRIMINATOR, CommitmentTree,
+    DepositIntent, DepositReceipt, PoolConfig, PoolState, TokenConfig, UtxoRecord,
+    VerifiedTransactionView,
 };
 use crate::utils::bitcoin::{compute_tx_hash, ParsedTransaction};
 use crate::utils::chadbuffer::read_transaction_from_buffer;
@@ -110,8 +111,11 @@ impl VerifyDepositData {
 /// 10. `[writable]` DepositIntent PDA
 /// 11. `[writable]` Deposit receipt PDA (prevents duplicate verification)
 /// 12. `[]`         TokenConfig PDA (for token_id)
-/// 13. `[]`         PoolConfig PDA (for Taproot npk verification)
+/// 13. `[]`         PoolConfig PDA (for Taproot npk verification + pool script)
 /// 14. `[]`         Deposit TX buffer (ChadBuffer, for Taproot verification)
+/// 15. `[writable]` (OPTIONAL) UtxoRecord PDA for the sweep's pool output —
+///     ["utxo", sweep_txid, sweep_vout]. When supplied, records the swept pool BTC so it can
+///     fund redemptions (audit f32). Omitting it preserves the old (untracked) behavior.
 pub fn process_verify_deposit(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -302,7 +306,7 @@ pub fn process_verify_deposit(
     validate_program_owner(pool_config_info, program_id)?;
     crate::utils::chadbuffer::validate_chadbuffer_owner(deposit_tx_buffer_info)?;
 
-    let ika_xonly = {
+    let (ika_xonly, pool_script, pool_script_len) = {
         let config_data = pool_config_info.try_borrow_data()?;
         if config_data.len() < PoolConfig::LEN || config_data[0] != POOL_CONFIG_DISCRIMINATOR {
             return Err(ProgramError::UninitializedAccount);
@@ -311,7 +315,15 @@ pub fn process_verify_deposit(
         if !config.has_ika_dwallet() || *config.get_ika_dwallet_xonly_pubkey() == [0u8; 32] {
             return Err(UTXOpiaError::IkaCpiAccountsMissing.into());
         }
-        *config.get_ika_dwallet_xonly_pubkey()
+        // Pool taproot scriptPubKey: the sweep sends the swept deposit to this address, and that
+        // output is the spendable pool UTXO we record below (audit f32).
+        let spk = config.get_pool_script();
+        let mut pool_script = [0u8; PoolConfig::MAX_SCRIPT_LEN];
+        let spk_len = spk.len();
+        if spk_len > 0 {
+            pool_script[..spk_len].copy_from_slice(spk);
+        }
+        (*config.get_ika_dwallet_xonly_pubkey(), pool_script, spk_len)
     };
 
     let deposit_buffer_data = deposit_tx_buffer_info
@@ -496,6 +508,69 @@ pub fn process_verify_deposit(
         }
         tc.add_shielded(shielded_amount)?;
         tc.add_fees(total_fee)?;
+    }
+
+    // --- Record the swept pool BTC output as a spendable UtxoRecord (audit f32) ---
+    // verify_deposit mints fully-redeemable zkBTC; without recording the sweep's pool output the
+    // backing BTC is invisible to mark_processing / complete_redemption and can never fund this
+    // note's eventual BTC redemption. Mirrors complete_deposit's UtxoRecord creation.
+    // The record account is an OPTIONAL trailing account (index 15) so the instruction stays
+    // backward-compatible during rollout; verify_deposit is authority-gated, so the backend
+    // always supplying it is sufficient. Idempotent: a batched sweep (several deposits → one
+    // pool output) records that UTXO exactly once. Records the pool output's actual value, so the
+    // on-chain UtxoRecord matches the real spendable BTC.
+    if accounts.len() > 15 && pool_script_len > 0 {
+        if let Some((pool_output, sweep_vout)) =
+            sweep_parsed.find_output_by_script(&pool_script[..pool_script_len])
+        {
+            let utxo_record_info = &accounts[15];
+            let vout_le = sweep_vout.to_le_bytes();
+            let utxo_seeds: &[&[u8]] = &[UtxoRecord::SEED, &ix_data.sweep_txid, &vout_le];
+            let (expected_utxo_pda, utxo_bump) = find_program_address(utxo_seeds, program_id);
+            if utxo_record_info.key() != &expected_utxo_pda {
+                return Err(ProgramError::InvalidSeeds);
+            }
+            let already_recorded = {
+                let d = utxo_record_info.try_borrow_data()?;
+                !d.is_empty() && d[0] == UTXO_RECORD_DISCRIMINATOR
+            };
+            if !already_recorded {
+                validate_account_writable(utxo_record_info)?;
+                let rent = Rent::get()?;
+                let utxo_bump_bytes = [utxo_bump];
+                let utxo_signer_seeds: &[&[u8]] = &[
+                    UtxoRecord::SEED,
+                    &ix_data.sweep_txid,
+                    &vout_le,
+                    &utxo_bump_bytes,
+                ];
+                create_pda_account(
+                    authority,
+                    utxo_record_info,
+                    program_id,
+                    rent.minimum_balance(UtxoRecord::LEN),
+                    UtxoRecord::LEN as u64,
+                    utxo_signer_seeds,
+                )?;
+                {
+                    let mut utxo_data = utxo_record_info.try_borrow_mut_data()?;
+                    let utxo = UtxoRecord::init(&mut utxo_data)?;
+                    utxo.set_txid(&ix_data.sweep_txid);
+                    utxo.set_vout(sweep_vout);
+                    utxo.set_amount_sats(pool_output.value);
+                }
+                {
+                    let mut pool_data = pool_state_info.try_borrow_mut_data()?;
+                    let pool = PoolState::from_bytes_mut(&mut pool_data)?;
+                    pool.add_utxo(pool_output.value)?;
+                }
+                crate::utils::events::emit_utxo_created(
+                    &ix_data.sweep_txid,
+                    sweep_vout,
+                    pool_output.value,
+                );
+            }
+        }
     }
 
     // Close DepositIntent PDA — return rent to authority
