@@ -84,17 +84,25 @@ pub fn process_propose_pool_update(
 }
 
 /// Execute a pending pool update after the timelock has elapsed.
-/// Permissionless — anyone can call this once the timelock expires.
+/// Authority-only: the authority chose the pending values, so letting a third party activate the
+/// tightening the instant the timelock expires (potentially stranding in-flight deposits that
+/// were valid when sent) adds attack surface for no benefit (audit f11). The authority controls
+/// the activation timing instead.
 pub fn process_execute_pool_update(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     _data: &[u8],
 ) -> ProgramResult {
-    if accounts.is_empty() {
+    if accounts.len() < 2 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
     let pool_state_info = &accounts[0];
+    let authority = &accounts[1];
+
+    if !authority.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
 
     validate_program_owner(pool_state_info, program_id)?;
     validate_account_writable(pool_state_info)?;
@@ -103,6 +111,10 @@ pub fn process_execute_pool_update(
 
     let mut pool_data = pool_state_info.try_borrow_mut_data()?;
     let pool = PoolState::from_bytes_mut(&mut pool_data)?;
+
+    if authority.key().as_ref() != pool.authority {
+        return Err(UTXOpiaError::Unauthorized.into());
+    }
 
     if !pool.has_pending_proposal() {
         return Err(UTXOpiaError::NoPendingProposal.into());

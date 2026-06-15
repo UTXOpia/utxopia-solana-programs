@@ -18,5 +18,9 @@ mainnet = []
 pinocchio = "0.9"
 pinocchio-system = "0.3"
 
+[dev-dependencies]
+# Real SHA-256 for host tests so assertions exercise genuine digests (audit f01).
+sha2 = "0.10"
+
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ["cfg(target_os, values(\"solana\"))"] }

@@ -65,6 +65,22 @@ pub fn process_register_token(
     // Validate mint is Token-2022
     validate_token_owner(mint_info)?;
 
+    // Vault must be an SPL token account whose authority is the pool PDA. Deposits land in this
+    // vault and unshield/claim_fees sign transfers OUT of it as the pool PDA; if the vault were
+    // controlled by anyone else, those flows would break and deposited funds would be
+    // misdirected to an account the program cannot spend from (audit f27). Token account layout:
+    // [0..32] mint, [32..64] owner/authority.
+    validate_token_owner(vault_info)?;
+    {
+        let vault_data = vault_info.try_borrow_data()?;
+        if vault_data.len() < 64 {
+            return Err(UTXOpiaError::InvalidAccountData.into());
+        }
+        if vault_data[32..64] != pool_state_info.key()[..] {
+            return Err(UTXOpiaError::InvalidVault.into());
+        }
+    }
+
     // Read decimals from mint (offset 44 in Token-2022 mint layout) and reject fee-on-transfer
     // mints. A TransferFeeConfig extension makes the vault receive fewer tokens than the credited
     // amount on the withdrawal side and strands protocol fees; refuse such mints at registration.

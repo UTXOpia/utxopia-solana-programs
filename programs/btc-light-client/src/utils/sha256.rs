@@ -12,9 +12,18 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
         }
     }
 
-    #[cfg(not(target_os = "solana"))]
+    // Tests use the real digest so host-side assertions exercise genuine SHA-256, not a
+    // placeholder that could mask a real hashing bug (audit f01).
+    #[cfg(all(not(target_os = "solana"), test))]
     {
-        // Simple fallback for off-chain testing
+        use sha2::{Digest, Sha256};
+        result.copy_from_slice(&Sha256::digest(data));
+    }
+
+    // Non-test, non-Solana builds (e.g. `cargo check`) never reach consensus; a cheap
+    // placeholder is fine here.
+    #[cfg(all(not(target_os = "solana"), not(test)))]
+    {
         for (i, byte) in data.iter().enumerate() {
             result[i % 32] ^= byte;
             result[(i + 1) % 32] = result[(i + 1) % 32].wrapping_add(*byte);

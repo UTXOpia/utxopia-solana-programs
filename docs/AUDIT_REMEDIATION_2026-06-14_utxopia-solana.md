@@ -7,14 +7,19 @@ branch `audit-2026-06-14-fixes` (commits `214069d`, `5467f0d`) plus the backend 
 
 ## Summary
 
-| Severity   | Count | Fixed | Accepted/Doc | False-positive/Already-fixed |
-|------------|-------|-------|--------------|------------------------------|
-| Critical   | 1     | 1     | 0            | 0                            |
-| Major      | 4     | 4     | 0            | 0                            |
-| Medium     | 9     | 7     | 0            | 2 (already-fixed)            |
-| Minor      | 4     | 4     | 0            | 0                            |
-| Info       | 13    | 4     | 4            | 5                            |
-| Discussion | 12    | 4     | 4            | 4                            |
+| Severity   | Count | Fixed | Accepted/Doc | Already-fixed/FP | Deferred (planned) |
+|------------|-------|-------|--------------|------------------|--------------------|
+| Critical   | 1     | 1     | 0            | 0                | 0                  |
+| Major      | 4     | 4     | 0            | 0                | 0                  |
+| Medium     | 9     | 7     | 0            | 2                | 0                  |
+| Minor      | 4     | 4     | 0            | 0                | 0                  |
+| Info       | 13    | 2     | 4            | 7                | 0                  |
+| Discussion | 12    | 9     | 1            | 0                | 2                  |
+| **Total**  | 43    | **27**| **5**        | **9**            | **2**              |
+
+Deferred (f03, f32) are documented with concrete remediation plans below; they require
+consensus-reorg design / cross-component coordination and should be scheduled as reviewed work,
+not rushed into consensus code.
 
 ## Fixed (on-chain)
 
@@ -42,33 +47,27 @@ branch `audit-2026-06-14-fixes` (commits `214069d`, `5467f0d`) plus the backend 
 | f23 | disc | O(N) `validate_frozen_tree` | stored `tree_index`, O(1) check. |
 | f40 | disc | `segwit_body_end` overflow | checked arithmetic. |
 | f37 | info | TokenConfig re-init wipe | `AlreadyInitialized` guard. |
+| f01 | disc | native SHA-256 fallback | host tests now use the real `sha2` digest (dev-dep). |
+| f27 | disc | vault not pool-controlled | `register_token` asserts vault authority == pool PDA. |
+| f11 | disc | timelocked bounds strand deposits | `process_execute_pool_update` is now authority-only (removes third-party activation timing); min/max kept as admission policy, `deposit_cap` is the hard invariant. |
 
 ## Accepted-by-design / documented (no code change)
 
 - **f00 (info) — regtest chainwork grindable.** Regtest deliberately skips PoW/difficulty
   (matches Bitcoin Core regtest). Not a production-bearing mode. Production networks
   (mainnet/testnet4) enforce PoW + difficulty continuity.
-- **f01 (disc) — native SHA-256 fallback.** The XOR fallback is `#[cfg(not(target_os="solana"))]`
-  only; the deployed SBF artifact always uses the `sol_sha256` syscall. Test-quality only.
 - **f16 (info) — sweep binds to first deposit output.** The deposit output value is used only as
   a `min()` cap; the credited amount is bound to the pool-script sweep output. User can only ever
   be under-credited, never over-credited — no theft.
-- **f27 (disc) — registered vault not pool-controlled.** Authority-only footgun; unshield/claim
-  sign as the pool PDA and simply fail on a non-pool vault. Optional hardening: assert vault
-  authority == pool PDA in `register_token`.
 - **f33 (info) — bridge uses pool-level (not per-token) min/max.** Bridge is BTC/zkBTC-only and
   authority-gated; pool-level bounds are operative. Per-token bounds are an SPL-shield concern.
 - **f38 (info) — reorged-out VerifiedTransaction proofs.** A VT can only be minted at
   `height <= finalized_height` (monotonic), so orphaning one requires out-PoW past the finality
   horizon — infeasible on mainnet. Shares the regtest-insecure assumption (f00).
-- **f11 (disc) — timelocked bounds strand in-flight deposits.** Per-deposit min/max are *admission*
-  policy; `deposit_cap` (now enforced everywhere, f36) is the hard exposure invariant. Operational
-  mitigation: do not tighten min/max while deposits are in flight. A code fix (snapshot bounds at
-  deposit-intent time, or drop the credit-time re-check) is deferred as it changes admission policy.
-- **f28 (disc) — unauthenticated sender memos.** Memos are best-effort metadata and are NOT
-  authoritative; change-note recovery does not depend on them (commitment + leaf_index are emitted
-  via the stealth announcement). Binding memos into the proof requires prover/circuit coordination
-  and is deferred; documented as non-authoritative.
+- **f28 (disc) — unauthenticated sender memos.** Confirmed disposition (product decision): memos
+  are best-effort, NON-authoritative metadata. Change-note recovery does not depend on them
+  (commitment + leaf_index are emitted via the stealth announcement). No wire/circuit change; the
+  SDK should document memos as non-authoritative.
 
 ## Already-fixed / false-positive (verified)
 
@@ -99,10 +98,14 @@ These two are real but unsafe to rush; each needs cross-component design.
   Consensus-critical; needs dedicated review + tests before landing.
 
 - **f32 (disc) — missing UtxoRecord in `process_verify_deposit`.** The DepositIntent path mints a
-  shielded note but creates no `UtxoRecord` and never calls `pool.add_utxo`, so that BTC is a
-  minted liability invisible to the redemption asset set (custody understated). A complete fix
-  must also let the redemption signer spend the NPK-tweaked deposit output (per-UTXO taproot
-  tweak), which is a backend/signer feature — creating an on-chain record the signer can't spend
-  would be worse. **Plan:** add the per-UTXO tweak to the backend signer + Ika approval path, then
-  create the `UtxoRecord` (keyed on the pool-controlled deposit output) and `pool.add_utxo` in
-  `verify_deposit` with the extra writable account. Cross-component; coordinate with backend.
+  shielded note but creates no `UtxoRecord` and never calls `pool.add_utxo`, so the corresponding
+  BTC is a minted liability invisible to the redemption asset set (custody understated). Note:
+  verify_deposit verifies a SWEEP that spends the NPK-tweaked deposit output, so the recordable
+  UTXO is the sweep's POOL-address output — spendable by the pool main key, **no signer tweak
+  needed**. **Plan:** mirror `complete_deposit`'s record creation — `find_output_by_script(pool_
+  script)` on the sweep, create `UtxoRecord[sweep_txid, sweep_vout]`, `pool.add_utxo` — with an
+  extra writable account. The care required (why it's deferred, not blind-edited): it must
+  **coordinate dedup with `complete_deposit`** so a sweep output isn't recorded twice and
+  `total_btc_held` isn't double-counted (which would over-credit redemptions → insolvency the
+  other direction). Needs the deposit/sweep architecture confirmed + the backend to pass the
+  account. Tractable but must be reviewed against the full deposit flow before landing.
