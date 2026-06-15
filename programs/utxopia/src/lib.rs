@@ -89,6 +89,9 @@ pub mod instruction {
     // Auditor-gated deposit for permissioned pools (22)
     pub const COMPLETE_DEPOSIT_PERMISSIONED: u8 = 22;
 
+    // Auditor-gated SPL shield for permissioned pools (23)
+    pub const SHIELD_PERMISSIONED: u8 = 23;
+
     // OP_RETURN-free deposits (24-25).
     // Backend's deposit_tracker uses 24 to register a DepositIntent PDA before
     // sweep, then 25 to verify the swept tx against that PDA on chain.
@@ -175,6 +178,10 @@ pub fn process_instruction(
         // Auditor-gated deposit for permissioned pools (22)
         instruction::COMPLETE_DEPOSIT_PERMISSIONED => {
             instructions::process_complete_deposit_permissioned(program_id, accounts, data)
+        }
+        // Auditor-gated SPL shield for permissioned pools (23)
+        instruction::SHIELD_PERMISSIONED => {
+            instructions::process_shield_permissioned(program_id, accounts, data)
         }
         // OP_RETURN-free deposits (24-25)
         instruction::REGISTER_DEPOSIT_INTENT => {
