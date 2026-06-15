@@ -51,7 +51,9 @@ pub fn process_extend_blockchain(
         return Err(ProgramError::InvalidInstructionData);
     }
 
-    // Need: lc(1) + submitter(1) + system(1) + parent(1) + N block_headers + N height_indices
+    // Need: lc(1) + submitter(1) + system(1) + parent(1) + N block_headers + N height_indices.
+    // OPTIONAL trailing account at index `4 + 2n`: the parent's HeightIndex, used to enforce the
+    // parent is canonical (audit f03). Omitting it preserves the prior behavior.
     let expected_accounts = 4 + 2 * n;
     if accounts.len() < expected_accounts {
         return Err(ProgramError::NotEnoughAccountKeys);
@@ -126,6 +128,40 @@ pub fn process_extend_blockchain(
     // (audit f07/f08). Genesis headers are stamped with the live epoch at (re)initialize.
     if parent_reinit_epoch != lc_reinit_epoch {
         return Err(ProgramError::InvalidAccountData);
+    }
+
+    // f03: optionally enforce that the parent is the CURRENT canonical block at its height.
+    // When the caller supplies the parent's HeightIndex as a trailing account (index `4+2n`),
+    // reject any parent that is not canonical. This forbids building a detached fork
+    // incrementally across calls and then overtaking — the pattern that leaves earlier-batch
+    // ancestor HeightIndex entries stale (multi-batch reorg corruption). With this enforced, a
+    // promotion's batch always spans `[parent_height+1 ..= new_tip]`, so the per-batch HeightIndex
+    // reindex below is complete. Normal extension (parent == canonical tip) and single-call
+    // reorgs from a canonical ancestor both pass. The account is OPTIONAL so rollout is
+    // non-breaking; verify_transaction's finality gate bounds the residual until the backend
+    // opts in by supplying it.
+    if accounts.len() > expected_accounts {
+        let parent_hi_info = &accounts[expected_accounts];
+        if parent_hi_info.owner() != program_id {
+            return Err(ProgramError::IllegalOwner);
+        }
+        let parent_height_le = parent_height.to_le_bytes();
+        let (expected_parent_hi, _) = pinocchio::pubkey::find_program_address(
+            &[HEIGHT_INDEX_SEED, &parent_height_le],
+            program_id,
+        );
+        if parent_hi_info.key() != &expected_parent_hi {
+            return Err(ProgramError::InvalidSeeds);
+        }
+        let hi_data = parent_hi_info.try_borrow_data()?;
+        if hi_data.len() < HeightIndex::LEN || hi_data[0] != HEIGHT_INDEX_DISCRIMINATOR {
+            return Err(ProgramError::InvalidAccountData);
+        }
+        let parent_hi = unsafe { &*(hi_data.as_ptr() as *const HeightIndex) };
+        if parent_hi.block_hash != parent_hash {
+            // Parent is not the canonical block at its height → detached fork; reject.
+            return Err(ProgramError::InvalidAccountData);
+        }
     }
 
     // Verify parent BlockHeader PDA address: seeds = ["block", parent_hash]

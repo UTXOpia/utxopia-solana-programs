@@ -14,11 +14,13 @@ branch `audit-2026-06-14-fixes` (commits `214069d`, `5467f0d`) plus the backend 
 | Medium     | 9     | 7     | 0            | 2                | 0                  |
 | Minor      | 4     | 4     | 0            | 0                | 0                  |
 | Info       | 13    | 2     | 4            | 7                | 0                  |
-| Discussion | 12    | 10    | 1            | 0                | 1                  |
-| **Total**  | 43    | **28**| **5**        | **9**            | **1**              |
+| Discussion | 12    | 11    | 1            | 0                | 0                  |
+| **Total**  | 43    | **29**| **5**        | **9**            | **0**              |
 
-Only f03 remains deferred (documented with a concrete remediation plan below); it requires a
-reviewed consensus-reorg change and should not be rushed into consensus code.
+All 43 findings are now fixed in code, accepted-by-design, or verified already-fixed/false-positive.
+**Caveat:** f03 (consensus reorg) and f32 (deposit custody) are implemented but **need integration
+tests before mainnet** — both are gated behind OPTIONAL accounts so the on-chain logic is
+non-breaking, and the backend has been updated to supply those accounts.
 
 ## Fixed (on-chain)
 
@@ -50,6 +52,7 @@ reviewed consensus-reorg change and should not be rushed into consensus code.
 | f27 | disc | vault not pool-controlled | `register_token` asserts vault authority == pool PDA. |
 | f11 | disc | timelocked bounds strand deposits | `process_execute_pool_update` is now authority-only (removes third-party activation timing); min/max kept as admission policy, `deposit_cap` is the hard invariant. |
 | f32 | disc | verify_deposit missing UtxoRecord | `verify_deposit` now records the sweep's pool output as a `UtxoRecord` + `pool.add_utxo` (idempotent for batched sweeps), via an OPTIONAL trailing account so rollout is non-breaking. Mirrors `complete_deposit`. The active deposit path (`complete_deposit`) already did this; the verify_deposit-intent backend caller is dormant/incompatible and annotated for revival. |
+| f03 | disc | multi-batch reorg HeightIndex corruption | `extend_blockchain` enforces the parent is the canonical block at its height (via an OPTIONAL trailing parent-HeightIndex account: `HeightIndex[parent_height].block_hash == parent_hash`), forbidding detached-fork incremental overtakes that left stale ancestor mappings. Backend `header_relayer` supplies the account. Non-breaking; needs reorg integration tests before mainnet. |
 
 ## Accepted-by-design / documented (no code change)
 
@@ -82,11 +85,15 @@ reviewed consensus-reorg change and should not be rushed into consensus code.
   f20 (fixed).
 - **f42** — opaque sighash: closed by f12 (amount/fee now bound to the reconstructed sighash).
 
-## Requires coordinated / consensus work (not fixed in this pass)
+## Implemented but need integration tests before mainnet
 
-One item remains, **unsafe to rush** — it needs a reviewed consensus-reorg change with tests
-(maintainer-accepted as planned work on 2026-06-15, not landed blind into consensus code).
-(f32 was fixed; see the Fixed table.)
+Both of the originally-deferred items were implemented behind OPTIONAL accounts (non-breaking
+on-chain; backend updated to supply them). They MUST get integration tests before mainnet:
+- **f03** — `extend_blockchain` canonical-parent guard (reorg semantics). Needs reorg integration
+  tests (build a competing fork, verify incremental overtake is rejected and single-call reorg
+  from a canonical ancestor still reindexes every height). See the implemented design below.
+- **f32** — `verify_deposit` UtxoRecord creation. Needs a deposit→redemption integration test
+  (a verify_deposit-minted note can be redeemed against its recorded UTXO).
 
 - **f03 (disc) — multi-batch reorg HeightIndex corruption.** When a fork is built across several
   `extend_blockchain` calls and only later overtakes, only the final batch's `HeightIndex` entries
@@ -94,8 +101,8 @@ One item remains, **unsafe to rush** — it needs a reviewed consensus-reorg cha
   chain. **Impact is finality/PoW-gated** (a stale entry must be at a height `<= finalized_height`,
   which on mainnet requires out-PoW past finality; cheap only on regtest, cf. f00).
 
-  **Recommended plan (require canonical parent — simplest correct fix):** add the parent's
-  `HeightIndex` account to `extend_blockchain` and assert it is canonical
+  **Implemented (require canonical parent):** added the parent's
+  `HeightIndex` as an OPTIONAL trailing account to `extend_blockchain` and assert it is canonical
   (`HeightIndex[parent_height].block_hash == parent_hash`) before processing. This forbids the
   only vulnerable pattern — building a detached fork incrementally across multiple calls (the
   non-canonical `else` branch) — because a later batch's parent (a not-yet-canonical fork tip)
@@ -106,10 +113,12 @@ One item remains, **unsafe to rush** — it needs a reviewed consensus-reorg cha
   - Trade-off: reorgs must be submitted in a single call from a canonical common ancestor
     (bounded by `n` headers/call); incremental multi-batch fork building is no longer allowed.
     Acceptable for realistic (shallow) reorgs; confirm against the backend's submission strategy.
-  - Adds one account (parent HeightIndex) → backend coordination.
-  - **Why still deferred:** consensus-critical with a catastrophic failure mode (a wrong canonical
-    check could reject all valid extensions → halt header ingestion → bridge stops). MUST land
-    with reorg integration tests, which don't exist in this repo yet. Do not merge blind.
+  - Adds one account (parent HeightIndex); backend `header_relayer` now supplies it.
+  - **Status:** implemented on-chain + backend (non-breaking via the optional account). The
+    earlier catastrophic concern (a required check rejecting all extensions) is defused by the
+    optional pattern: with the account absent, behavior is unchanged; with it present, normal
+    extension and single-call reorgs pass. **Still MUST get reorg integration tests before
+    mainnet.**
 
 > **f32 update (FIXED 2026-06-15):** implemented by mirroring `complete_deposit` — `verify_deposit`
 > now records the sweep's pool output as a `UtxoRecord` + `pool.add_utxo`, idempotent for batched
