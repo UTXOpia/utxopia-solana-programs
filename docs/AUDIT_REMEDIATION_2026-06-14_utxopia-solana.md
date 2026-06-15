@@ -84,7 +84,11 @@ not rushed into consensus code.
 
 ## Requires coordinated / consensus work (not fixed in this pass)
 
-These two are real but unsafe to rush; each needs cross-component design.
+These two are real but unsafe to rush; each needs cross-component design. **Disposition
+accepted by the maintainer on 2026-06-15** as planned, review-gated work items (not landed
+blind into consensus/custody code). f32 additionally needs a sweep-fee accounting decision +
+a new instruction account (backend/SDK) + a deposit→redemption integration test; f03 needs a
+reviewed consensus-reorg change with tests.
 
 - **f03 (disc) — multi-batch reorg HeightIndex corruption.** When a fork is built across several
   `extend_blockchain` calls and only later overtakes, only the final batch's `HeightIndex` entries
