@@ -88,16 +88,17 @@ pub fn process_mark_processing(
         return Err(ProgramError::InvalidInstructionData);
     }
 
-    // Read the request_id up front so each reserved UTXO can be bound to THIS redemption.
-    // We re-validate the Pending status here; Phase 3 transitions it to Processing.
-    let request_id = {
+    // Reservation key binds each reserved UTXO to THIS redemption's unique PDA (not the
+    // caller-chosen nonce, which two users can collide on — audit f26).
+    let reservation_key = crate::utils::validation::redemption_reservation_key(redemption_info.key());
+    // Re-validate Pending status here; Phase 3 transitions it to Processing.
+    {
         let redemption_data = redemption_info.try_borrow_data()?;
         let redemption = RedemptionRequest::from_bytes(&redemption_data)?;
         if redemption.get_status() != RedemptionStatus::Pending {
             return Err(UTXOpiaError::InvalidRedemptionState.into());
         }
-        redemption.request_id()
-    };
+    }
 
     // --- Phase 1: Validate and read UTXO amounts, mark as Reserved ---
     let mut total_input_sats: u64 = 0;
@@ -145,9 +146,9 @@ pub fn process_mark_processing(
             .checked_add(amount)
             .ok_or(ProgramError::ArithmeticOverflow)?;
 
-        // Mark as Reserved and bind to this specific redemption request.
+        // Mark as Reserved and bind to this specific redemption (by unique PDA-derived key).
         utxo.set_status(UtxoStatus::Reserved);
-        utxo.set_reserved_for_request_id(request_id);
+        utxo.set_reserved_for_request_id(reservation_key);
     }
 
     // Commit to the canonical-ordered reserved input set. approve_redemption_signing

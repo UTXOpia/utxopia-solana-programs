@@ -116,6 +116,7 @@ pub fn process_rotate_tree(
         let mut tree_data = new_tree_info.try_borrow_mut_data()?;
         let tree = CommitmentTree::init(&mut tree_data)?;
         tree.bump = new_bump;
+        tree.set_tree_index(new_index); // bind for O(1) frozen-tree validation (f23)
     }
 
     // Update pool state

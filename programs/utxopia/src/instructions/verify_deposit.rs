@@ -485,6 +485,15 @@ pub fn process_verify_deposit(
     {
         let mut tc_data = token_config_info.try_borrow_mut_data()?;
         let tc = TokenConfig::from_bytes_mut(&mut tc_data)?;
+        // Enforce the per-token deposit cap on the bridge minting path too (audit f36).
+        if tc
+            .total_shielded()
+            .checked_add(shielded_amount)
+            .ok_or(ProgramError::ArithmeticOverflow)?
+            > tc.deposit_cap()
+        {
+            return Err(UTXOpiaError::DepositCapExceeded.into());
+        }
         tc.add_shielded(shielded_amount)?;
         tc.add_fees(total_fee)?;
     }

@@ -569,6 +569,16 @@ pub fn process_complete_deposit(
     {
         let mut tc_data = token_config_info.try_borrow_mut_data()?;
         let tc = TokenConfig::from_bytes_mut(&mut tc_data)?;
+        // Enforce the per-token deposit cap on every minting path, not just SPL shield (audit
+        // f36): the cap is a hard exposure invariant and the bridge must honour it too.
+        if tc
+            .total_shielded()
+            .checked_add(shielded_amount)
+            .ok_or(ProgramError::ArithmeticOverflow)?
+            > tc.deposit_cap()
+        {
+            return Err(UTXOpiaError::DepositCapExceeded.into());
+        }
         tc.add_shielded(shielded_amount)?;
         tc.add_fees(total_fee)?;
     }

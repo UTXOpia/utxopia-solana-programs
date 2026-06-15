@@ -78,6 +78,7 @@ pub fn process_extend_blockchain(
         parent_timestamp,
         parent_epoch_bits,
         parent_epoch_start,
+        parent_reinit_epoch,
     ) = {
         if parent_header_info.owner() != program_id {
             return Err(ProgramError::IllegalOwner);
@@ -100,11 +101,12 @@ pub fn process_extend_blockchain(
             ts,
             parent.epoch_bits(),
             parent.epoch_start_time(),
+            parent.reinit_epoch(),
         )
     };
 
     // Read light client state
-    let (network, _lc_tip_height, lc_chainwork, lc_expected_bits, lc_epoch_start_time) = {
+    let (network, _lc_tip_height, lc_chainwork, lc_expected_bits, lc_epoch_start_time, lc_reinit_epoch) = {
         let lc_data = light_client_info.try_borrow_data()?;
         let lc = BitcoinLightClient::from_bytes(&lc_data)?;
         let mut cw = [0u8; 32];
@@ -115,8 +117,16 @@ pub fn process_extend_blockchain(
             cw,
             lc.expected_bits(),
             lc.epoch_start_time(),
+            lc.reinit_epoch(),
         )
     };
+
+    // Bind the parent to the current chain instance: a header written before a reinitialization
+    // carries the old epoch and must not seed an extension onto the freshly reinitialized chain
+    // (audit f07/f08). Genesis headers are stamped with the live epoch at (re)initialize.
+    if parent_reinit_epoch != lc_reinit_epoch {
+        return Err(ProgramError::InvalidAccountData);
+    }
 
     // Verify parent BlockHeader PDA address: seeds = ["block", parent_hash]
     let (expected_parent_pda, _) =
@@ -280,6 +290,7 @@ pub fn process_extend_blockchain(
             header.chainwork = new_chainwork;
             header.set_epoch_bits(header_epoch_bits);
             header.set_epoch_start_time(header_epoch_start);
+            header.set_reinit_epoch(lc_reinit_epoch); // bind to current chain instance (f07/f08)
             header.submitted_at = clock.unix_timestamp.to_le_bytes();
         }
 

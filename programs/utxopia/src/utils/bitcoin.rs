@@ -172,7 +172,12 @@ fn segwit_body_end(raw_tx: &[u8]) -> Option<usize> {
     for _ in 0..input_count {
         offset += 36; // prev outpoint
         let (script_len, vi) = read_varint(raw_tx.get(offset..)?).ok()?;
-        offset += vi + script_len as usize + 4; // script + sequence
+        // Checked: a malicious 0xff varint script_len (full u64) could otherwise wrap `offset`
+        // backwards so the bounds check below passes and the same region is re-parsed (audit f40).
+        offset = offset
+            .checked_add(vi)?
+            .checked_add(script_len as usize)?
+            .checked_add(4)?; // script + sequence
         if offset > raw_tx.len() {
             return None;
         }
@@ -183,7 +188,8 @@ fn segwit_body_end(raw_tx: &[u8]) -> Option<usize> {
     for _ in 0..output_count {
         offset += 8; // value
         let (script_len, vi) = read_varint(raw_tx.get(offset..)?).ok()?;
-        offset += vi + script_len as usize;
+        // Checked add to prevent offset wraparound on a malicious script_len (audit f40).
+        offset = offset.checked_add(vi)?.checked_add(script_len as usize)?;
         if offset > raw_tx.len() {
             return None;
         }

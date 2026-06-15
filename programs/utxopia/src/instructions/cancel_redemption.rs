@@ -94,7 +94,7 @@ pub fn process_cancel_redemption(
 
     // Validate requester and status; capture amount, token_id, request_id, and whether the
     // request was Processing (only Processing redemptions reserved UTXOs that must be released).
-    let (amount_sats, token_id, request_id, was_processing, reserved_count) = {
+    let (amount_sats, token_id, was_processing, reserved_count) = {
         let redemption_data = redemption_info.try_borrow_data()?;
         let redemption = RedemptionRequest::from_bytes(&redemption_data)?;
 
@@ -133,7 +133,6 @@ pub fn process_cancel_redemption(
         (
             redemption.amount_sats(),
             *redemption.token_id(),
-            redemption.request_id(),
             was_processing,
             redemption.reserved_count() as usize,
         )
@@ -171,6 +170,9 @@ pub fn process_cancel_redemption(
     if was_processing && ix_data.utxo_count != reserved_count {
         return Err(UTXOpiaError::InvalidUtxo.into());
     }
+    // Reservation key for THIS redemption's unique PDA (audit f26).
+    let reservation_key =
+        crate::utils::validation::redemption_reservation_key(redemption_info.key());
     let restored_total: u64 = if was_processing {
         let mut total: u64 = 0;
         for i in 0..ix_data.utxo_count {
@@ -183,9 +185,10 @@ pub fn process_cancel_redemption(
                 return Err(UTXOpiaError::InvalidUtxo.into());
             }
             let utxo = UtxoRecord::from_bytes_mut(&mut utxo_data)?;
-            // Must be Reserved for THIS request — prevents freeing another redemption's UTXOs.
+            // Must be Reserved for THIS redemption (by unique PDA key) — prevents freeing
+            // another redemption's UTXOs even if a different user picked the same nonce.
             if utxo.get_status() != UtxoStatus::Reserved
-                || utxo.reserved_for_request_id() != request_id
+                || utxo.reserved_for_request_id() != reservation_key
             {
                 return Err(UTXOpiaError::InvalidUtxo.into());
             }
@@ -233,9 +236,11 @@ pub fn process_cancel_redemption(
         let pool = PoolState::from_bytes_mut(&mut pool_data)?;
 
         pool.add_shielded(amount_sats)?;
-        // Reverse mark_processing's remove_utxo so released reservations are spendable again.
+        // Reverse mark_processing's per-UTXO remove_utxo: restore the SAME count of UTXOs that
+        // were reserved (ix_data.utxo_count == reserved_count, enforced above), not just one, so
+        // the pool's utxo_count stays consistent (audit f13).
         if restored_total > 0 {
-            pool.add_utxo(restored_total)?;
+            pool.add_utxos(restored_total, ix_data.utxo_count as u32)?;
         }
         let pending = pool.pending_redemptions();
         pool.set_pending_redemptions(pending.saturating_sub(1));

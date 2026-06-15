@@ -130,7 +130,6 @@ pub fn process_approve_redemption_signing(
 
     // Capture the redemption's authoritative fields for trustless sighash reconstruction.
     let (
-        request_id,
         amount_sats,
         service_fee,
         total_input_sats,
@@ -163,7 +162,6 @@ pub fn process_approve_redemption_signing(
         let mut recipient_script = [0u8; MAX_BTC_SCRIPT_LEN];
         recipient_script[..script.len()].copy_from_slice(script);
         (
-            redemption.request_id(),
             redemption.amount_sats(),
             redemption.service_fee(),
             redemption.total_input_sats(),
@@ -242,6 +240,9 @@ pub fn process_approve_redemption_signing(
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
+    // Reservation key for THIS redemption's unique PDA (audit f26).
+    let reservation_key =
+        crate::utils::validation::redemption_reservation_key(redemption_info.key());
     let mut reserved: std::vec::Vec<ReservedInput> = std::vec::Vec::with_capacity(reserved_count);
     let mut sum_inputs: u64 = 0;
     for j in 0..reserved_count {
@@ -255,7 +256,7 @@ pub fn process_approve_redemption_signing(
         if utxo.get_status() != UtxoStatus::Reserved {
             return Err(UTXOpiaError::UtxoNotUnspent.into());
         }
-        if utxo.reserved_for_request_id() != request_id {
+        if utxo.reserved_for_request_id() != reservation_key {
             return Err(UTXOpiaError::InvalidUtxo.into());
         }
         sum_inputs = sum_inputs

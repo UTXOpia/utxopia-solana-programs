@@ -123,6 +123,12 @@ pub fn process_unshield(
         let recipient = &accounts[FIXED_ACCOUNTS + k];
         validate_token_owner(recipient)?;
         validate_account_writable(recipient)?;
+        // Reject recipient == vault: a self-transfer moves no tokens, but the note is still
+        // nullified and total_shielded decremented below, permanently stranding the payout
+        // (audit f29; mirrors the guard in claim_fees.rs).
+        if recipient.key() == vault.key() {
+            return Err(ProgramError::InvalidArgument);
+        }
     }
 
     // Verify bound params hash — binds recipient addresses + stealth data to proof.
@@ -279,7 +285,13 @@ pub fn process_unshield(
 
     for k in 0..n_public_outputs {
         let amount = unshield_amounts[k];
-        let protocol_fee = (amount as u128 * withdrawal_fee_bps as u128 / 10_000) as u64;
+        let mut protocol_fee = (amount as u128 * withdrawal_fee_bps as u128 / 10_000) as u64;
+        // Floor the fee to 1 sat for any nonzero output when a fee is configured: per-output
+        // integer truncation otherwise rounds the fee to 0 for small outputs, letting a user
+        // split a withdrawal into dust outputs and pay no protocol fee (audit f30).
+        if protocol_fee == 0 && withdrawal_fee_bps > 0 && amount > 0 {
+            protocol_fee = 1;
+        }
         let payout = amount
             .checked_sub(protocol_fee)
             .ok_or(ProgramError::ArithmeticOverflow)?;

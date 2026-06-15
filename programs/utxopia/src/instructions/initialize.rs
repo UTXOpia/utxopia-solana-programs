@@ -194,6 +194,7 @@ pub fn process_initialize(
         let mut tree_data = accounts.commitment_tree.try_borrow_mut_data()?;
         let tree = CommitmentTree::init(&mut tree_data)?;
         tree.bump = tree_bump;
+        tree.set_tree_index(0); // first tree; enables O(1) frozen-tree validation (f23)
     }
 
     Ok(())

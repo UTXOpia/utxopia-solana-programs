@@ -408,7 +408,13 @@ pub fn process_complete_redemption(
     let expected_send = amount_sats
         .checked_sub(service_fee)
         .ok_or(ProgramError::ArithmeticOverflow)?;
-    let min_amount = expected_send.saturating_sub(MAX_FEE_SATS);
+    // Recipient must receive ~expected_send. The miner-fee tolerance is the flat MAX_FEE_SATS,
+    // but for SMALL redemptions that flat allowance would let min_amount collapse to 0 and a
+    // dust (1-sat) recipient payout would pass (audit f19). Floor the tolerance at 1% of the
+    // send so the recipient can never be shortchanged to dust regardless of size.
+    let min_amount = expected_send
+        .saturating_sub(MAX_FEE_SATS)
+        .max(expected_send.saturating_sub(expected_send / 100));
 
     // Sum the value of EVERY output paying the recipient script. Taking only the first
     // matching output under-counts the BTC actually sent when a completion tx splits the
@@ -424,8 +430,11 @@ pub fn process_complete_redemption(
                 .ok_or(ProgramError::ArithmeticOverflow)?;
         }
     }
-    // Require at least one recipient output and that the aggregate meets the lower bound.
-    if !matched_recipient || actual_received < min_amount {
+    // Require at least one recipient output and that the aggregate is within tolerance of the
+    // net owed. The upper bound (audit f21) ensures the real BTC outflow can't exceed the
+    // requested amount, so the MAX_REDEMPTION_AMOUNT_SATS cap (checked via the request amount)
+    // genuinely binds the verified outflow rather than just the request.
+    if !matched_recipient || actual_received < min_amount || actual_received > expected_send {
         return Err(UTXOpiaError::RedemptionOutputMismatch.into());
     }
 
@@ -440,6 +449,13 @@ pub fn process_complete_redemption(
     } else {
         &[]
     };
+    // Recipient must differ from the pool change script. If they collide, every pool output is
+    // counted as a recipient payout, the single-change-output invariant in
+    // redemption_outputs_within_policy is bypassed, and a second pool output goes untracked and
+    // is stranded (audit f20). A redemption paying the pool's own custody script is nonsensical.
+    if !pool_script_slice.is_empty() && expected_script_slice == pool_script_slice {
+        return Err(UTXOpiaError::RedemptionOutputMismatch.into());
+    }
     if !redemption_outputs_within_policy(&parsed_tx, expected_script_slice, pool_script_slice) {
         return Err(UTXOpiaError::RedemptionOutputMismatch.into());
     }
@@ -570,6 +586,11 @@ pub fn process_complete_redemption(
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
+    // Reservation key for THIS redemption's unique PDA (audit f26): bind consumed UTXOs to the
+    // PDA, not the caller-chosen nonce two users can collide on.
+    let reservation_key =
+        crate::utils::validation::redemption_reservation_key(redemption_info.key());
+
     if consumed_count > 0 {
         for i in 0..consumed_count {
             let consumed_utxo_info = &accounts[consumed_start + i];
@@ -591,7 +612,7 @@ pub fn process_complete_redemption(
                 // SECURITY: Verify the UTXO was reserved for THIS redemption. Without this,
                 // one redemption could complete by consuming UTXOs reserved for a different
                 // in-flight redemption, desynchronizing pool accounting.
-                if utxo.reserved_for_request_id() != request_id {
+                if utxo.reserved_for_request_id() != reservation_key {
                     return Err(UTXOpiaError::InvalidUtxo.into());
                 }
                 let amount = utxo.amount_sats();

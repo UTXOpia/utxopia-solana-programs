@@ -168,6 +168,9 @@ pub fn process_reinitialize(
         bh.bits = start_bits.to_le_bytes();
         bh.set_epoch_bits(initial_bits);
         bh.set_epoch_start_time(epoch_start);
+        // Stamp the new chain instance's epoch so extend_blockchain accepts this genesis as a
+        // parent (and rejects pre-reinit headers carrying the old epoch) — audit f07/f08.
+        bh.set_reinit_epoch(next_epoch);
         bh.submitted_at = clock.unix_timestamp.to_le_bytes();
     }
 

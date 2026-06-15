@@ -49,4 +49,20 @@ impl BlockHeader {
     pub fn set_epoch_start_time(&mut self, value: u32) {
         self._reserved[4..8].copy_from_slice(&value.to_le_bytes());
     }
+
+    /// Chain-instance epoch this header was written under (mirrors
+    /// BitcoinLightClient.reinit_epoch). Binds the header to the current chain instance so a
+    /// stale pre-reinitialization header cannot be used as an extension parent (audit f07/f08).
+    pub fn reinit_epoch(&self) -> u32 {
+        u32::from_le_bytes([
+            self._reserved[8],
+            self._reserved[9],
+            self._reserved[10],
+            self._reserved[11],
+        ])
+    }
+
+    pub fn set_reinit_epoch(&mut self, value: u32) {
+        self._reserved[8..12].copy_from_slice(&value.to_le_bytes());
+    }
 }

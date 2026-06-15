@@ -14,6 +14,20 @@ use pinocchio::{
 use crate::constants::{TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID};
 use crate::error::UTXOpiaError;
 
+/// Derive the UTXO reservation key for a redemption from its (globally-unique) PDA address.
+///
+/// Reserved UTXOs are bound to this value at mark_processing and checked at approve / complete /
+/// cancel. Using the redemption PDA (unique per requester+nonce) instead of the caller-chosen
+/// nonce alone closes the cross-request confusion where two different users picking the same
+/// nonce shared a reservation id (audit f26). Stored in the existing 8-byte UtxoRecord field as
+/// the first 8 bytes of sha256(pda); a 64-bit collision/grind buys an attacker nothing and is
+/// infeasible, and this keeps the on-chain layout unchanged.
+#[inline]
+pub fn redemption_reservation_key(redemption_pda: &Pubkey) -> u64 {
+    let h = crate::utils::bitcoin::sha256(redemption_pda.as_ref());
+    u64::from_le_bytes(h[..8].try_into().unwrap())
+}
+
 // ============================================================================
 // PDA CREATION HELPER (shared across all instructions)
 // ============================================================================
@@ -405,19 +419,23 @@ pub fn validate_frozen_tree(
 
     let tree = CommitmentTree::from_bytes(&tree_data)?;
 
-    // Verify PDA matches some index < active_index, then accept the proof's root if it is the
-    // frozen tree's current root or any root still in its history (consistent with how the active
-    // tree is validated). A frozen tree no longer mutates, so its roots are stable.
-    for idx in 0..active_index {
-        let idx_bytes = idx.to_le_bytes();
-        let seeds: &[&[u8]] = &[CommitmentTree::SEED_PREFIX, &idx_bytes];
-        let (pda, _) = find_program_address(seeds, program_id);
-        if tree_account.key() == &pda {
-            return Ok(tree.is_valid_root(expected_root));
-        }
+    // O(1) validation (audit f23): the tree stores its own rotation index, so we derive and
+    // compare a SINGLE PDA instead of looping 0..active_index (which exhausted the compute
+    // budget after enough rotations and bricked old-note spends). The stored index must be a
+    // genuinely frozen tree (strictly less than the active index), and the derived PDA must
+    // match the supplied account — so the index can't be forged. A frozen tree no longer
+    // mutates, so accepting any root still in its history is safe.
+    let idx = tree.tree_index();
+    if idx >= active_index {
+        return Err(ProgramError::InvalidSeeds);
     }
-
-    Err(ProgramError::InvalidSeeds)
+    let idx_bytes = idx.to_le_bytes();
+    let seeds: &[&[u8]] = &[CommitmentTree::SEED_PREFIX, &idx_bytes];
+    let (pda, _) = find_program_address(seeds, program_id);
+    if tree_account.key() != &pda {
+        return Err(ProgramError::InvalidSeeds);
+    }
+    Ok(tree.is_valid_root(expected_root))
 }
 
 #[cfg(test)]

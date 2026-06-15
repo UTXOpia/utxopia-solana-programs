@@ -93,6 +93,18 @@ pub fn process_register_token(
     let mint_bytes: &[u8; 32] = mint_info.key().as_ref().try_into().unwrap();
     let token_id = compute_token_id(mint_bytes)?;
 
+    // Reject re-registration of an already-initialized token: create_pda_account is a no-op on
+    // an existing PDA, so without this guard the authority could re-run register_token and wipe
+    // a live TokenConfig (accumulated_fees, total_shielded, etc.) back to zero (audit f37).
+    {
+        let tc_data = token_config_info.try_borrow_data()?;
+        if !tc_data.is_empty()
+            && tc_data[0] == crate::state::token_config::TOKEN_CONFIG_DISCRIMINATOR
+        {
+            return Err(UTXOpiaError::AlreadyInitialized.into());
+        }
+    }
+
     // Create TokenConfig PDA
     let rent = Rent::get()?;
     let lamports = rent.minimum_balance(TokenConfig::LEN);

@@ -18,8 +18,12 @@ pub const COMMITMENT_TREE_DISCRIMINATOR: u8 = 0x05;
 /// Reduced from 20 for JoinSplit circuit compatibility.
 pub const TREE_DEPTH: usize = 16;
 
-/// Number of historical roots to keep (for front-running protection)
-pub const ROOT_HISTORY_SIZE: usize = 100;
+/// Number of historical roots to keep (for front-running protection).
+/// Each inserted leaf records a root, and a multi-output JoinSplit inserts up to
+/// MAX_SAFE_JOINSPLIT_SIZE leaves, so a small burst of txs could otherwise evict a root a
+/// victim is still proving against and revert their spend. 256 raises that eviction bar well
+/// above any realistic insertion rate over a proof-generation window (audit f02).
+pub const ROOT_HISTORY_SIZE: usize = 256;
 
 /// Pre-computed zero hashes for each level of the tree
 /// ZERO[0] = 0 (empty leaf)
@@ -57,7 +61,7 @@ pub const ZERO_HASHES: [[u8; 32]; TREE_DEPTH + 1] = [
 /// - current_root: 32 bytes
 /// - next_index: 8 bytes
 /// - frontier: 16 * 32 = 512 bytes (rightmost filled nodes at each level)
-/// - root_history: 100 * 32 = 3200 bytes
+/// - root_history: 256 * 32 = 8192 bytes
 /// - root_history_index: 4 bytes
 /// - reserved: 60 bytes
 #[repr(C)]
@@ -88,8 +92,14 @@ pub struct CommitmentTree {
     /// Current root history index
     root_history_index: [u8; 4],
 
+    /// This tree's own rotation index (matches the PDA seed
+    /// [SEED_PREFIX, tree_index]). Lets validate_frozen_tree confirm a historical tree in O(1)
+    /// instead of deriving every index 0..active_index (audit f23). Carved from _reserved, so
+    /// the layout/size is unchanged; legacy index-0 trees decode correctly (zero).
+    tree_index: [u8; 4],
+
     /// Reserved for future use
-    _reserved: [u8; 60],
+    _reserved: [u8; 56],
 }
 
 impl CommitmentTree {
@@ -144,6 +154,14 @@ impl CommitmentTree {
 
     pub fn root_history_index(&self) -> u32 {
         u32::from_le_bytes(self.root_history_index)
+    }
+
+    pub fn tree_index(&self) -> u32 {
+        u32::from_le_bytes(self.tree_index)
+    }
+
+    pub fn set_tree_index(&mut self, value: u32) {
+        self.tree_index = value.to_le_bytes();
     }
 
     // Setters

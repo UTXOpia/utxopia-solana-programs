@@ -87,7 +87,9 @@ pub struct PoolState {
     /// Sum of all Unspent UTXO amounts (satoshis).
     total_btc_held: [u8; 8],
 
-    /// Number of Unspent UTXOs.
+    /// Number of Unspent UTXOs — LOW 16 bits (kept at this offset for backward compat).
+    /// Combined with `utxo_count_hi` into a u32 so permissionless deposits can't saturate the
+    /// counter at 65535 and brick add_utxo / core flows (audit f34).
     utxo_count: [u8; 2],
 
     /// Active commitment tree index for tree rotation.
@@ -95,8 +97,12 @@ pub struct PoolState {
     /// to increment this and create a new tree PDA.
     active_tree_index: [u8; 4],
 
-    /// Reserved for future use (remaining 6 bytes)
-    _reserved: [u8; 6],
+    /// HIGH 16 bits of the UTXO count (carved from former _reserved; zero in legacy accounts,
+    /// so existing pools decode identically). See `utxo_count` / `utxo_count()`.
+    utxo_count_hi: [u8; 2],
+
+    /// Reserved for future use (remaining 4 bytes)
+    _reserved: [u8; 4],
 }
 
 impl PoolState {
@@ -236,8 +242,9 @@ impl PoolState {
         u64::from_le_bytes(self.total_btc_held)
     }
 
-    pub fn utxo_count(&self) -> u16 {
-        u16::from_le_bytes(self.utxo_count)
+    pub fn utxo_count(&self) -> u32 {
+        (u16::from_le_bytes(self.utxo_count) as u32)
+            | ((u16::from_le_bytes(self.utxo_count_hi) as u32) << 16)
     }
 
     pub fn active_tree_index(&self) -> u32 {
@@ -321,8 +328,9 @@ impl PoolState {
         self.total_btc_held = value.to_le_bytes();
     }
 
-    pub fn set_utxo_count(&mut self, value: u16) {
-        self.utxo_count = value.to_le_bytes();
+    pub fn set_utxo_count(&mut self, value: u32) {
+        self.utxo_count = ((value & 0xFFFF) as u16).to_le_bytes();
+        self.utxo_count_hi = ((value >> 16) as u16).to_le_bytes();
     }
 
     pub fn set_active_tree_index(&mut self, value: u32) {
@@ -413,6 +421,22 @@ impl PoolState {
                 .checked_add(1)
                 .ok_or(ProgramError::ArithmeticOverflow)?,
         );
+        Ok(())
+    }
+
+    /// Restore `count` UTXOs totalling `amount` in one call. Used when a redemption is cancelled
+    /// and N reserved UTXOs return to the pool: `remove_utxo` decremented the count once per UTXO
+    /// at mark_processing, so the restore must re-increment by the same N. A single `add_utxo`
+    /// (count += 1) would drift the counter down by N-1 per multi-input cancel and eventually
+    /// underflow `remove_utxo`, bricking withdrawals (audit f13).
+    pub fn add_utxos(&mut self, amount: u64, count: u32) -> Result<(), ProgramError> {
+        let held = self.total_btc_held();
+        self.set_total_btc_held(
+            held.checked_add(amount)
+                .ok_or(ProgramError::ArithmeticOverflow)?,
+        );
+        let c = self.utxo_count();
+        self.set_utxo_count(c.checked_add(count).ok_or(ProgramError::ArithmeticOverflow)?);
         Ok(())
     }
 
