@@ -55,7 +55,20 @@ pub fn process_extend_blockchain(
     // OPTIONAL trailing account at index `4 + 2n`: the parent's HeightIndex, used to enforce the
     // parent is canonical (audit f03). Omitting it preserves the prior behavior.
     let expected_accounts = 4 + 2 * n;
-    if accounts.len() < expected_accounts {
+    // Optional trailing data byte: number of parent-ancestor BlockHeader PDAs supplied for the
+    // Median-Time-Past check (audit #3). Backward-compatible: absent => 0 (regtest/localnet skip
+    // MTP). Mainnet/testnet4 require enough ancestors to cover the previous 11 blocks (enforced
+    // below). Ancestors occupy accounts[expected_accounts .. expected_accounts + num_ancestors];
+    // the optional parent-HeightIndex (f03) then follows them.
+    let num_ancestors = if data.len() > 1 + n * 80 {
+        data[1 + n * 80] as usize
+    } else {
+        0
+    };
+    if num_ancestors > 10 {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    if accounts.len() < expected_accounts + num_ancestors {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
@@ -81,6 +94,7 @@ pub fn process_extend_blockchain(
         parent_epoch_bits,
         parent_epoch_start,
         parent_reinit_epoch,
+        parent_prev_hash,
     ) = {
         if parent_header_info.owner() != program_id {
             return Err(ProgramError::IllegalOwner);
@@ -94,6 +108,8 @@ pub fn process_extend_blockchain(
         hash.copy_from_slice(&parent.block_hash);
         let mut cw = [0u8; 32];
         cw.copy_from_slice(&parent.chainwork);
+        let mut phash = [0u8; 32];
+        phash.copy_from_slice(&parent.prev_block_hash);
         let h = parent.height();
         let ts = u32::from_le_bytes(parent.timestamp);
         (
@@ -104,15 +120,18 @@ pub fn process_extend_blockchain(
             parent.epoch_bits(),
             parent.epoch_start_time(),
             parent.reinit_epoch(),
+            phash,
         )
     };
 
     // Read light client state
-    let (network, _lc_tip_height, lc_chainwork, lc_expected_bits, lc_epoch_start_time, lc_reinit_epoch) = {
+    let (network, _lc_tip_height, lc_chainwork, lc_expected_bits, lc_epoch_start_time, lc_reinit_epoch, lc_genesis_hash) = {
         let lc_data = light_client_info.try_borrow_data()?;
         let lc = BitcoinLightClient::from_bytes(&lc_data)?;
         let mut cw = [0u8; 32];
         cw.copy_from_slice(&lc.total_chainwork);
+        let mut gh = [0u8; 32];
+        gh.copy_from_slice(&lc.genesis_hash);
         (
             lc.network,
             lc.tip_height(),
@@ -120,6 +139,7 @@ pub fn process_extend_blockchain(
             lc.expected_bits(),
             lc.epoch_start_time(),
             lc.reinit_epoch(),
+            gh,
         )
     };
 
@@ -140,8 +160,8 @@ pub fn process_extend_blockchain(
     // reorgs from a canonical ancestor both pass. The account is OPTIONAL so rollout is
     // non-breaking; verify_transaction's finality gate bounds the residual until the backend
     // opts in by supplying it.
-    if accounts.len() > expected_accounts {
-        let parent_hi_info = &accounts[expected_accounts];
+    if accounts.len() > expected_accounts + num_ancestors {
+        let parent_hi_info = &accounts[expected_accounts + num_ancestors];
         if parent_hi_info.owner() != program_id {
             return Err(ProgramError::IllegalOwner);
         }
@@ -175,6 +195,62 @@ pub fn process_extend_blockchain(
     let first_prev_hash: &[u8; 32] = data[1 + 4..1 + 36].try_into().unwrap();
     if *first_prev_hash != parent_hash {
         return Err(ProgramError::InvalidArgument);
+    }
+
+    // ---- Median Time Past window (audit #3) ----
+    // Mainnet/testnet4 enforce Bitcoin's MTP rule: a block's timestamp must strictly exceed the
+    // median of the previous 11 block timestamps. The caller supplies the parent's ancestor
+    // BlockHeader PDAs (most-recent first) at accounts[expected_accounts ..]; we verify they
+    // chain back from the parent and collect their timestamps into a sliding window (oldest
+    // first), seeded with the parent. Regtest/localnet skip MTP (num_ancestors = 0).
+    let enforce_mtp = network == crate::constants::NETWORK_MAINNET
+        || network == crate::constants::NETWORK_TESTNET4;
+    let mut mtp_window = [0u32; 11];
+    let mut mtp_len = 0usize;
+    if enforce_mtp {
+        let mut expect_hash = parent_prev_hash;
+        let mut anc_ts = [0u32; 10];
+        let mut last_hash = parent_hash;
+        for a in 0..num_ancestors {
+            let info = &accounts[expected_accounts + a];
+            if info.owner() != program_id {
+                return Err(ProgramError::IllegalOwner);
+            }
+            let d = info.try_borrow_data()?;
+            if d.len() < BlockHeader::LEN || d[0] != BLOCK_HEADER_DISCRIMINATOR {
+                return Err(ProgramError::InvalidAccountData);
+            }
+            let hdr = unsafe { &*(d.as_ptr() as *const BlockHeader) };
+            // Linkage: each ancestor must be the predecessor of the previous one.
+            if hdr.block_hash != expect_hash {
+                return Err(ProgramError::InvalidArgument);
+            }
+            // Canonical PDA for this ancestor's block hash (prevents spoofed timestamps).
+            let (pda, _) = pinocchio::pubkey::find_program_address(
+                &[BLOCK_HEADER_SEED, &hdr.block_hash],
+                program_id,
+            );
+            if info.key() != &pda {
+                return Err(ProgramError::InvalidSeeds);
+            }
+            anc_ts[a] = u32::from_le_bytes(hdr.timestamp);
+            last_hash = hdr.block_hash;
+            expect_hash = hdr.prev_block_hash;
+        }
+        // Mandatory: must supply 10 ancestors, unless the chain genuinely reaches genesis sooner.
+        // Otherwise an attacker could omit ancestors to skip the MTP check entirely.
+        if num_ancestors < 10 && last_hash != lc_genesis_hash {
+            return Err(ProgramError::InvalidArgument);
+        }
+        // Window oldest-first: reversed ancestors followed by the parent.
+        let mut a = num_ancestors;
+        while a > 0 {
+            a -= 1;
+            mtp_window[mtp_len] = anc_ts[a];
+            mtp_len += 1;
+        }
+        mtp_window[mtp_len] = parent_timestamp;
+        mtp_len += 1;
     }
 
     let clock = Clock::get()?;
@@ -217,6 +293,24 @@ pub fn process_extend_blockchain(
         // Validate chain continuity
         if *header_prev_hash != prev_hash {
             return Err(ProgramError::InvalidArgument);
+        }
+
+        // Median Time Past (audit #3): timestamp must strictly exceed the median of the previous
+        // 11 blocks. Slide the window forward so later in-batch headers are checked correctly.
+        if enforce_mtp {
+            let median = median_timestamp(&mtp_window[..mtp_len]);
+            if timestamp <= median {
+                return Err(ProgramError::InvalidArgument);
+            }
+            if mtp_len < 11 {
+                mtp_window[mtp_len] = timestamp;
+                mtp_len += 1;
+            } else {
+                for k in 0..10 {
+                    mtp_window[k] = mtp_window[k + 1];
+                }
+                mtp_window[10] = timestamp;
+            }
         }
 
         let block_hash = double_sha256(raw_header);
@@ -483,4 +577,48 @@ pub fn process_extend_blockchain(
     }
 
     Ok(())
+}
+
+/// Median of up to 11 recent block timestamps (Bitcoin's Median Time Past). Sorts a copy and
+/// returns the middle element; with fewer than 11 (near genesis) it uses what is available,
+/// matching Bitcoin's behaviour at low heights. `window` is never empty when called (it always
+/// contains at least the parent timestamp).
+fn median_timestamp(window: &[u32]) -> u32 {
+    let n = window.len();
+    let mut sorted = [0u32; 11];
+    sorted[..n].copy_from_slice(window);
+    let s = &mut sorted[..n];
+    let mut i = 0;
+    while i < n {
+        let mut m = i;
+        let mut j = i + 1;
+        while j < n {
+            if s[j] < s[m] {
+                m = j;
+            }
+            j += 1;
+        }
+        s.swap(i, m);
+        i += 1;
+    }
+    sorted[n / 2]
+}
+
+#[cfg(test)]
+mod mtp_tests {
+    use super::median_timestamp;
+
+    #[test]
+    fn median_of_eleven_is_middle_element() {
+        // Bitcoin MTP: sort the 11 timestamps and take index 5 (the median).
+        let w = [10, 1, 9, 2, 8, 3, 7, 4, 6, 5, 11];
+        assert_eq!(median_timestamp(&w), 6);
+    }
+
+    #[test]
+    fn median_with_fewer_than_eleven_uses_available() {
+        assert_eq!(median_timestamp(&[5]), 5);
+        assert_eq!(median_timestamp(&[3, 1, 2]), 2); // sorted 1,2,3 -> idx1
+        assert_eq!(median_timestamp(&[4, 2]), 4); // sorted 2,4 -> idx1 (n/2)
+    }
 }
