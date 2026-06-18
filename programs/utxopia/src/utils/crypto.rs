@@ -253,17 +253,43 @@ pub fn compute_bound_params_hash_unshield(
     reduce_to_field_exact(&hash)
 }
 
+/// Length-prefixed hash of a list of byte-strings (audit #4 parity with the Sui program):
+///   sha256( u32_le(count) || for each item [ u32_le(len) || bytes ] )
+///
+/// Binding the count and per-item length means two different partitions of the same
+/// concatenated bytes can never collide — a redeem proof cannot be replayed with the
+/// scripts re-sliced into attacker-chosen boundaries. Bounded to the redeem script limits
+/// (`MAX_PUBLIC_OUTPUTS` scripts of `MAX_BTC_SCRIPT_LEN` bytes); callers validate both before
+/// calling, so the stack buffer never overflows.
+fn length_prefixed_hash(items: &[&[u8]]) -> [u8; 32] {
+    use super::sha256;
+    const CAP: usize = 4
+        + crate::instructions::joinsplit_common::MAX_PUBLIC_OUTPUTS
+            * (4 + crate::constants::MAX_BTC_SCRIPT_LEN);
+    let mut buf = [0u8; CAP];
+    let mut off = 0usize;
+    buf[off..off + 4].copy_from_slice(&(items.len() as u32).to_le_bytes());
+    off += 4;
+    for it in items {
+        buf[off..off + 4].copy_from_slice(&(it.len() as u32).to_le_bytes());
+        off += 4;
+        buf[off..off + it.len()].copy_from_slice(it);
+        off += it.len();
+    }
+    sha256(&buf[..off])
+}
+
 /// Compute bound params hash for redeem (JoinSplit → BTC withdrawal).
 /// Must match SDK's `computeBoundParamsHash(createRedeemBoundParams(...))`.
 ///
-/// Layout (77 bytes LE):
-///   treeNumber(4) + flag(1) + address(32) + chainId(8) + stealthDataHash(32)
+/// Layout (109 bytes LE):
+///   treeNumber(4) + flag(1) + scriptsHash(32) + chainId(8) + stealthDataHash(32) + requester(32)
 ///   → SHA256 → mod BN254_SCALAR_FIELD
 ///
-/// For redeem: treeNumber=0, flag=2, address=SHA256(btcScript)
+/// For redeem: treeNumber=0, flag=2, scriptsHash=length_prefixed_hash(btc_scripts).
 pub fn compute_bound_params_hash_redeem(
     chain_id: u64,
-    btc_script: &[u8],
+    btc_scripts: &[&[u8]],
     stealth_data_hash: &[u8; 32],
     requester: &[u8; 32],
 ) -> [u8; 32] {
@@ -275,7 +301,7 @@ pub fn compute_bound_params_hash_redeem(
     // later cancel it to recover the shielded value.
     let mut buf = [0u8; 109];
     buf[4] = 2; // flag = 2 (redeem)
-    let script_hash: [u8; 32] = sha256(btc_script);
+    let script_hash: [u8; 32] = length_prefixed_hash(btc_scripts);
     buf[5..37].copy_from_slice(&script_hash);
     buf[37..45].copy_from_slice(&chain_id.to_le_bytes());
     buf[45..77].copy_from_slice(stealth_data_hash);

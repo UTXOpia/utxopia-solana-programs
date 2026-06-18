@@ -114,17 +114,12 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
     }
 
     // Verify bound params hash — binds BTC scripts + stealth data to proof.
-    // destinations_hash = SHA256(script_1 || script_2 || ...)
+    // scriptsHash = length_prefixed_hash(script_1, script_2, ...) so the scripts cannot be
+    // re-partitioned to the same concatenation (audit #4 parity with the Sui program).
     {
-        // Concatenate all scripts for hashing
-        let scripts_total_len: usize = btc_script_lens.iter().take(n_public_outputs).sum();
-        // Use a stack buffer for concatenated scripts (max 3 * 62 = 186 bytes)
-        let mut scripts_concat = [0u8; MAX_PUBLIC_OUTPUTS * 62];
-        let mut soff = 0usize;
+        let mut script_slices: [&[u8]; MAX_PUBLIC_OUTPUTS] = [&[]; MAX_PUBLIC_OUTPUTS];
         for k in 0..n_public_outputs {
-            let s = &data[btc_script_starts[k]..btc_script_starts[k] + btc_script_lens[k]];
-            scripts_concat[soff..soff + btc_script_lens[k]].copy_from_slice(s);
-            soff += btc_script_lens[k];
+            script_slices[k] = &data[btc_script_starts[k]..btc_script_starts[k] + btc_script_lens[k]];
         }
 
         let stealth_data_hash = crate::utils::sha256(&data[stealth_data_start..stealth_data_end]);
@@ -132,7 +127,7 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
         // different signer to hijack ownership of the resulting RedemptionRequest PDAs.
         let expected = crate::utils::crypto::compute_bound_params_hash_redeem(
             crate::constants::CHAIN_ID,
-            &scripts_concat[..scripts_total_len],
+            &script_slices[..n_public_outputs],
             &stealth_data_hash,
             accounts[3].key(),
         );

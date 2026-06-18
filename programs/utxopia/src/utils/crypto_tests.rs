@@ -52,19 +52,21 @@
         let stealth = [0u8; 32];
         let requester = [0xDDu8; 32];
 
-        let h = compute_bound_params_hash_redeem(103, &script, &stealth, &requester);
+        let h = compute_bound_params_hash_redeem(103, &[&script[..]], &stealth, &requester);
         let hex: String = h.iter().map(|b| format!("{:02x}", b)).collect();
         // Cross-layer vector — must equal the TS SDK output for the same inputs.
+        // Length-prefixed scripts encoding (audit #4): scriptsHash =
+        // sha256(u32_le(count) || per-script [u32_le(len) || bytes]).
         assert_eq!(
             hex,
-            "0a2d4cdcdeff70c6c7036a7177b3a9380e838ea433471280fd1a5a7ba4ae2e28",
+            "2bd645748800b0c1d5ba5c25fb9ea6bab8e018686d4e215b3c9b5b5905304121",
             "redeem bound-params vector"
         );
 
         // Changing the requester must change the hash (the whole point of #9).
         let mut requester2 = requester;
         requester2[0] ^= 0x01;
-        let h2 = compute_bound_params_hash_redeem(103, &script, &stealth, &requester2);
+        let h2 = compute_bound_params_hash_redeem(103, &[&script[..]], &stealth, &requester2);
         assert_ne!(h, h2, "requester must be bound into the hash");
     }
 
