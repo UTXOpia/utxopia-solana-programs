@@ -52,7 +52,7 @@ pub fn required_bits_for_next_block(
         return 0;
     }
 
-    if block_height.is_multiple_of(BLOCKS_PER_EPOCH) {
+    if block_height % BLOCKS_PER_EPOCH == 0 {
         // saturating_sub (not wrapping_sub): an out-of-order epoch boundary timestamp would
         // otherwise underflow to a huge timespan and be clamped to MAX, spuriously easing
         // difficulty. Saturating to 0 clamps to the minimum timespan (hardest) — fail-safe.

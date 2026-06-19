@@ -234,7 +234,7 @@ impl CommitmentTree {
 
         // Walk up the tree from leaf to root
         for (level, zero_hash) in ZERO_HASHES.iter().enumerate().take(TREE_DEPTH) {
-            if current_index.is_multiple_of(2) {
+            if current_index % 2 == 0 {
                 // This is a left child - save to frontier and pair with zero hash
                 self.frontier[level] = current_hash;
                 current_hash = poseidon2_hash(&current_hash, zero_hash)?;
