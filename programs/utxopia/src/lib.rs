@@ -92,18 +92,15 @@ pub mod instruction {
     // Auditor-gated SPL shield for permissioned pools (23)
     pub const SHIELD_PERMISSIONED: u8 = 23;
 
-    // OP_RETURN-free deposits (24-25).
-    // Backend's deposit_tracker uses 24 to register a DepositIntent PDA before
-    // sweep, then 25 to verify the swept tx against that PDA on chain.
-    pub const REGISTER_DEPOSIT_INTENT: u8 = 24;
-    pub const VERIFY_DEPOSIT: u8 = 25;
-
     // Ika pre-broadcast signing approval (27)
     pub const APPROVE_REDEMPTION_SIGNING: u8 = 27;
 
     // Auditor-only setters (28-29)
     pub const SET_AUDITOR_FROZEN: u8 = 28;
     pub const SET_AUDITOR_VIEWING_PUBKEY: u8 = 29;
+
+    // Dev-only state reset (30) — handler is compiled in only under `devnet-regtest`
+    pub const DEVNET_RESET: u8 = 30;
 }
 
 #[cfg(not(feature = "no-entrypoint"))]
@@ -187,13 +184,6 @@ pub fn process_instruction(
         instruction::SHIELD_PERMISSIONED => {
             instructions::process_shield_permissioned(program_id, accounts, data)
         }
-        // OP_RETURN-free deposits (24-25)
-        instruction::REGISTER_DEPOSIT_INTENT => {
-            instructions::process_register_deposit_intent(program_id, accounts, data)
-        }
-        instruction::VERIFY_DEPOSIT => {
-            instructions::process_verify_deposit(program_id, accounts, data)
-        }
         // Ika pre-broadcast signing approval (27)
         instruction::APPROVE_REDEMPTION_SIGNING => {
             instructions::process_approve_redemption_signing(program_id, accounts, data)
@@ -204,6 +194,11 @@ pub fn process_instruction(
         }
         instruction::SET_AUDITOR_VIEWING_PUBKEY => {
             instructions::process_set_auditor_viewing_pubkey(program_id, accounts, data)
+        }
+        // Dev-only state reset (30) — devnet-regtest builds only
+        #[cfg(feature = "devnet-regtest")]
+        instruction::DEVNET_RESET => {
+            instructions::process_devnet_reset(program_id, accounts, data)
         }
         _ => Err(ProgramError::InvalidInstructionData),
     }

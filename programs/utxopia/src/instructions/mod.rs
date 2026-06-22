@@ -39,9 +39,7 @@ pub mod initialize;
 pub mod initialize_permissioned;
 pub mod mark_processing;
 pub mod redeem;
-pub mod register_deposit_intent;
 pub mod transact;
-pub mod verify_deposit;
 
 // Multi-token operations
 pub mod claim_fees;
@@ -62,6 +60,10 @@ pub mod init_vk_registry;
 pub mod joinsplit_common;
 pub mod rotate_tree;
 
+// Dev-only state reset (devnet-regtest builds only)
+#[cfg(feature = "devnet-regtest")]
+pub mod devnet_reset;
+
 // Re-exports
 pub use admin_auditor::*;
 pub use admin_update_pool::*;
@@ -75,7 +77,6 @@ pub use initialize::*;
 pub use initialize_permissioned::*;
 pub use mark_processing::*;
 pub use redeem::*;
-pub use register_deposit_intent::*;
 pub use register_token::*;
 pub use rotate_tree::*;
 pub use set_pool_config::*;
@@ -83,4 +84,5 @@ pub use shield::*;
 pub use transact::*;
 pub use unshield::*;
 pub use update_token_config::*;
-pub use verify_deposit::*;
+#[cfg(feature = "devnet-regtest")]
+pub use devnet_reset::*;
