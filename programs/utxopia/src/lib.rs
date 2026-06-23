@@ -101,6 +101,8 @@ pub mod instruction {
 
     // Dev-only state reset (30) — handler is compiled in only under `devnet-regtest`
     pub const DEVNET_RESET: u8 = 30;
+    // Dev-only force-close of stale program-owned accounts (31) — devnet-regtest only
+    pub const DEVNET_CLOSE: u8 = 31;
 }
 
 #[cfg(not(feature = "no-entrypoint"))]
@@ -199,6 +201,10 @@ pub fn process_instruction(
         #[cfg(feature = "devnet-regtest")]
         instruction::DEVNET_RESET => {
             instructions::process_devnet_reset(program_id, accounts, data)
+        }
+        #[cfg(feature = "devnet-regtest")]
+        instruction::DEVNET_CLOSE => {
+            instructions::process_devnet_close(program_id, accounts, data)
         }
         _ => Err(ProgramError::InvalidInstructionData),
     }

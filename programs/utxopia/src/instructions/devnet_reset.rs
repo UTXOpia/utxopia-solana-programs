@@ -41,3 +41,28 @@ pub fn process_devnet_reset(
 
     Ok(())
 }
+
+/// DEV-ONLY: force-close arbitrary program-owned accounts by raw lamport-drain (no layout
+/// parse), to clear stale PDAs the current program can no longer parse/cancel — e.g. old-layout
+/// RedemptionRequest accounts left after a redeploy that clog the redemption scan. devnet-regtest
+/// only; signer-gated; every target must be owned by this program.
+///
+/// Accounts:
+///   [0]    authority   (signer; lamport recipient)
+///   [1..]  targets     (writable, program-owned accounts to close)
+pub fn process_devnet_close(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    _data: &[u8],
+) -> ProgramResult {
+    let authority = &accounts[0];
+    if !authority.is_signer() {
+        return Err(UTXOpiaError::Unauthorized.into());
+    }
+    for target in &accounts[1..] {
+        validate_program_owner(target, program_id)?;
+        validate_account_writable(target)?;
+        close_account_securely(target, authority)?;
+    }
+    Ok(())
+}
