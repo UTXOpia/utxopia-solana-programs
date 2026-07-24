@@ -8,7 +8,9 @@ use pinocchio::{
     ProgramResult,
 };
 
-use crate::utils::{create_pda_account, validate_system_program, validate_token_owner};
+use crate::utils::{
+    create_pda_account, validate_pool_controlled_zkbtc_mint, validate_system_program,
+};
 
 use crate::constants::{MAX_DEPOSIT_SATS, MAX_FEE_BPS, MIN_DEPOSIT_SATS};
 use crate::error::UTXOpiaError;
@@ -38,14 +40,23 @@ impl InitializePermissionedData {
         auditor.copy_from_slice(&data[6..38]);
         let mut auditor_viewing_pubkey = [0u8; 32];
         auditor_viewing_pubkey.copy_from_slice(&data[38..70]);
-        Ok(Self {
+        let parsed = Self {
             pool_bump: data[0],
             tree_bump: data[1],
             deposit_fee_bps: u16::from_le_bytes(data[2..4].try_into().unwrap()),
             withdrawal_fee_bps: u16::from_le_bytes(data[4..6].try_into().unwrap()),
             auditor,
             auditor_viewing_pubkey,
-        })
+        };
+        parsed.validate()?;
+        Ok(parsed)
+    }
+
+    fn validate(&self) -> Result<(), ProgramError> {
+        if self.auditor == [0u8; 32] || self.auditor_viewing_pubkey == [0u8; 32] {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        Ok(())
     }
 }
 
@@ -100,8 +111,6 @@ pub fn process_initialize_permissioned(
     let accounts = InitializePermissionedAccounts::from_accounts(accounts)?;
     let ix_data = InitializePermissionedData::from_bytes(data)?;
 
-    // Validate zkbtc_mint is owned by Token-2022
-    validate_token_owner(accounts.zkbtc_mint)?;
     validate_system_program(accounts.system_program)?;
 
     // Verify pool_state PDA
@@ -110,6 +119,7 @@ pub fn process_initialize_permissioned(
     if accounts.pool_state.key() != &expected_pool_pda {
         return Err(ProgramError::InvalidSeeds);
     }
+    validate_pool_controlled_zkbtc_mint(accounts.zkbtc_mint, accounts.pool_state.key())?;
 
     // Verify commitment_tree PDA
     let tree_index_bytes = 0u32.to_le_bytes();
@@ -230,10 +240,10 @@ mod tests {
         let viewing_key: [u8; 32] = [0xCD; 32];
 
         let mut raw = vec![0u8; 70];
-        raw[0] = 7u8;  // pool_bump
-        raw[1] = 3u8;  // tree_bump
-        raw[2..4].copy_from_slice(&50u16.to_le_bytes());   // deposit_fee_bps = 50
-        raw[4..6].copy_from_slice(&100u16.to_le_bytes());  // withdrawal_fee_bps = 100
+        raw[0] = 7u8; // pool_bump
+        raw[1] = 3u8; // tree_bump
+        raw[2..4].copy_from_slice(&50u16.to_le_bytes()); // deposit_fee_bps = 50
+        raw[4..6].copy_from_slice(&100u16.to_le_bytes()); // withdrawal_fee_bps = 100
         raw[6..38].copy_from_slice(&auditor_key);
         raw[38..70].copy_from_slice(&viewing_key);
 
@@ -249,6 +259,17 @@ mod tests {
     #[test]
     fn test_initialize_permissioned_data_too_short() {
         let raw = vec![0u8; 69]; // one byte short of MIN_LEN
+        assert!(InitializePermissionedData::from_bytes(&raw).is_err());
+    }
+
+    #[test]
+    fn test_initialize_permissioned_rejects_zero_auditor_configuration() {
+        let mut raw = vec![0u8; 70];
+        raw[6..38].copy_from_slice(&[1u8; 32]);
+        assert!(InitializePermissionedData::from_bytes(&raw).is_err());
+
+        raw[6..38].fill(0);
+        raw[38..70].copy_from_slice(&[2u8; 32]);
         assert!(InitializePermissionedData::from_bytes(&raw).is_err());
     }
 

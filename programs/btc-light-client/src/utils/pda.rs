@@ -1,8 +1,6 @@
 //! PDA creation helper with pre-funded-account poisoning resistance.
 
-use pinocchio::{
-    account_info::AccountInfo, instruction::Signer, pubkey::Pubkey, ProgramResult,
-};
+use pinocchio::{account_info::AccountInfo, instruction::Signer, pubkey::Pubkey, ProgramResult};
 use pinocchio_system::instructions::{Allocate, Assign, CreateAccount, Transfer};
 
 /// Create a program-owned PDA, tolerating a pre-funded (poisoned) target.

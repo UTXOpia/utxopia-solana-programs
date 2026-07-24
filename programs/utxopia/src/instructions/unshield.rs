@@ -48,7 +48,7 @@ use crate::instructions::joinsplit_common::{
     MAX_PUBLIC_OUTPUTS, STEALTH_DATA_PER_OUTPUT,
 };
 use crate::state::{CommitmentTree, NullifierOperationType, PoolState, TokenConfig};
-use crate::utils::token::transfer_zkbtc;
+use crate::utils::token::{is_native_sol_account, transfer_zkbtc, unwrap_lamports_signed};
 use crate::utils::{
     validate_account_writable, validate_active_tree_pda, validate_any_token_program_key,
     validate_program_owner, validate_system_program, validate_token_owner,
@@ -118,16 +118,36 @@ pub fn process_unshield(
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    // Validate recipient token accounts
+    // Native SOL is inferred from the registered vault's canonical native mint.
+    // Instruction data and proof format stay unchanged: the proof already binds
+    // the recipient's 32-byte Solana address.
+    let native_sol = is_native_sol_account(vault, token_program)?;
+
+    // Validate public destinations. SPL outputs use token accounts; native SOL
+    // outputs use the proof-bound recipient account directly.
     for k in 0..n_public_outputs {
         let recipient = &accounts[FIXED_ACCOUNTS + k];
-        validate_token_owner(recipient)?;
         validate_account_writable(recipient)?;
         // Reject recipient == vault: a self-transfer moves no tokens, but the note is still
         // nullified and total_shielded decremented below, permanently stranding the payout
         // (audit f29; mirrors the guard in claim_fees.rs).
         if recipient.key() == vault.key() {
             return Err(ProgramError::InvalidArgument);
+        }
+        if native_sol {
+            // Never unwrap into another token-owned account. This also prevents
+            // treating a wSOL ATA as a native destination by mistake.
+            let owner = recipient.owner().as_ref();
+            if owner == crate::constants::TOKEN_PROGRAM_ID
+                || owner == crate::constants::TOKEN_2022_PROGRAM_ID
+            {
+                return Err(ProgramError::InvalidAccountOwner);
+            }
+        } else {
+            validate_token_owner(recipient)?;
+            if recipient.owner() != token_program.key() {
+                return Err(ProgramError::InvalidAccountOwner);
+            }
         }
     }
 
@@ -137,11 +157,15 @@ pub fn process_unshield(
         let mut owners_concat = [0u8; MAX_PUBLIC_OUTPUTS * 32]; // stack-allocated
         for k in 0..n_public_outputs {
             let recipient = &accounts[FIXED_ACCOUNTS + k];
-            let uta_data = recipient.try_borrow_data()?;
-            if uta_data.len() < 64 {
-                return Err(ProgramError::InvalidAccountData);
+            if native_sol {
+                owners_concat[k * 32..(k + 1) * 32].copy_from_slice(recipient.key().as_ref());
+            } else {
+                let uta_data = recipient.try_borrow_data()?;
+                if uta_data.len() < 64 {
+                    return Err(ProgramError::InvalidAccountData);
+                }
+                owners_concat[k * 32..(k + 1) * 32].copy_from_slice(&uta_data[32..64]);
             }
-            owners_concat[k * 32..(k + 1) * 32].copy_from_slice(&uta_data[32..64]);
         }
         let stealth_data_hash = crate::utils::sha256(&data[stealth_data_start..stealth_data_end]);
         let expected = crate::utils::crypto::compute_bound_params_hash_unshield(
@@ -304,25 +328,45 @@ pub fn process_unshield(
             .ok_or(ProgramError::ArithmeticOverflow)?;
 
         let recipient = &accounts[FIXED_ACCOUNTS + k];
+        let recipient_address: [u8; 32] = if native_sol {
+            recipient.key().as_ref().try_into().unwrap()
+        } else {
+            let recipient_data = recipient.try_borrow_data()?;
+            recipient_data[32..64]
+                .try_into()
+                .map_err(|_| ProgramError::InvalidAccountData)?
+        };
 
         // Emit unshield metadata per output
         crate::utils::events::emit_unshield_meta(
             amount,
             protocol_fee,
             payout,
-            user.key().as_ref().try_into().unwrap(),
+            &recipient_address,
             &token_id,
         );
 
-        // Transfer payout from vault to recipient (signed by pool PDA)
-        transfer_zkbtc(
-            token_program,
-            vault,
-            recipient,
-            pool_state_info,
-            payout,
-            pool_signer_seeds,
-        )?;
+        if native_sol {
+            // Partial unwrap keeps the pool vault open and sends the exact net
+            // payout as lamports to the proof-bound recipient.
+            unwrap_lamports_signed(
+                token_program,
+                vault,
+                recipient,
+                pool_state_info,
+                payout,
+                pool_signer_seeds,
+            )?;
+        } else {
+            transfer_zkbtc(
+                token_program,
+                vault,
+                recipient,
+                pool_state_info,
+                payout,
+                pool_signer_seeds,
+            )?;
+        }
     }
 
     // Update token config: decrement total_shielded by sum, add total fees

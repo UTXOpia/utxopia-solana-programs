@@ -271,7 +271,11 @@ pub fn verify_vk_merkle_and_proof(
     // with matching size fields; re-deriving the address proves it is the admin-registered,
     // freezable VK for this circuit size and not a substituted account with forged delta_g2/ic.
     let (expected_vk, _) = find_program_address(
-        &[VkRegistry::SEED, &[header.n_inputs as u8], &[header.n_outputs as u8]],
+        &[
+            VkRegistry::SEED,
+            &[header.n_inputs as u8],
+            &[header.n_outputs as u8],
+        ],
         program_id,
     );
     if vk_registry_info.key() != &expected_vk {

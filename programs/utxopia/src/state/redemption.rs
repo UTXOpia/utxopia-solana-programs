@@ -35,7 +35,8 @@ pub enum RedemptionStatus {
 /// - btc_script:        34 bytes (raw scriptPubKey for BTC withdrawal, not bech32 string)
 /// - token_id:          32 bytes (the redeemed token, recorded at redeem; cancel re-mints the same token)
 /// - reserved_count:    1 byte  (number of UTXOs reserved at mark_processing; 0 until Processing)
-/// - _padding2:         7 bytes (alignment/reserve)
+/// - approved_inputs:   4 bytes (u32 LE bitset; one bit per Ika-approved BTC input)
+/// - _padding2:         3 bytes (alignment/reserve)
 /// - inputs_commitment: 32 bytes (sha256 over canonical-ordered reserved inputs; binds the BTC
 ///                                spend's input set so approve_redemption_signing can reconstruct
 ///                                the exact sighash from trusted state)
@@ -89,8 +90,13 @@ pub struct RedemptionRequest {
     /// reserved UTXO accounts so the reconstructed BTC tx has the right inputs.
     reserved_count: u8,
 
+    /// Per-input signing approval bitset. The global `signing_approved` flag is set only after
+    /// every reserved input has an approval, so a failed multi-input approval can still time out
+    /// and be cancelled safely.
+    approved_inputs: [u8; 4],
+
     /// Alignment / future reserve.
-    _padding2: [u8; 7],
+    _padding2: [u8; 3],
 
     /// sha256 over the canonical-ordered reserved input set
     /// (for each input in canonical order: txid(32) || vout(4 LE) || amount(8 LE)).
@@ -185,6 +191,10 @@ impl RedemptionRequest {
         self.signing_approved != 0
     }
 
+    pub fn is_input_signing_approved(&self, input_index: u32) -> bool {
+        input_index < 32 && (u32::from_le_bytes(self.approved_inputs) & (1u32 << input_index)) != 0
+    }
+
     // Setters
     pub fn set_status(&mut self, status: RedemptionStatus) {
         self.status = status as u8;
@@ -192,6 +202,30 @@ impl RedemptionRequest {
 
     pub fn set_signing_approved(&mut self) {
         self.signing_approved = 1;
+    }
+
+    pub fn mark_input_signing_approved(&mut self, input_index: u32) -> Result<(), ProgramError> {
+        if input_index >= 32 || input_index >= self.reserved_count as u32 {
+            return Err(ProgramError::InvalidArgument);
+        }
+        let mask = u32::from_le_bytes(self.approved_inputs) | (1u32 << input_index);
+        self.approved_inputs = mask.to_le_bytes();
+        if self.all_inputs_signing_approved() {
+            self.set_signing_approved();
+        }
+        Ok(())
+    }
+
+    pub fn all_inputs_signing_approved(&self) -> bool {
+        if self.reserved_count == 0 || self.reserved_count > 32 {
+            return false;
+        }
+        let required = if self.reserved_count == 32 {
+            u32::MAX
+        } else {
+            (1u32 << self.reserved_count) - 1
+        };
+        u32::from_le_bytes(self.approved_inputs) & required == required
     }
 
     pub fn set_request_id(&mut self, value: u64) {
@@ -233,5 +267,33 @@ impl RedemptionRequest {
 
     pub fn set_inputs_commitment(&mut self, commitment: &[u8; 32]) {
         self.inputs_commitment = *commitment;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multi_input_approval_sets_global_flag_only_when_complete() {
+        let mut data = vec![0u8; RedemptionRequest::LEN];
+        let redemption = RedemptionRequest::init(&mut data).unwrap();
+        redemption.set_reserved_count(3);
+
+        redemption.mark_input_signing_approved(1).unwrap();
+        assert!(!redemption.is_signing_approved());
+        redemption.mark_input_signing_approved(0).unwrap();
+        assert!(!redemption.is_signing_approved());
+        redemption.mark_input_signing_approved(2).unwrap();
+        assert!(redemption.is_signing_approved());
+        assert!(redemption.all_inputs_signing_approved());
+    }
+
+    #[test]
+    fn input_approval_rejects_out_of_range_index() {
+        let mut data = vec![0u8; RedemptionRequest::LEN];
+        let redemption = RedemptionRequest::init(&mut data).unwrap();
+        redemption.set_reserved_count(2);
+        assert!(redemption.mark_input_signing_approved(2).is_err());
     }
 }

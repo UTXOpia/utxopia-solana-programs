@@ -352,6 +352,9 @@ mod tests {
     fn test_auditor_ciphertext_empty_on_public_path() {
         let data = [0u8; SHIELD_DATA_HEADER]; // exactly 72 bytes, no trailing ciphertext
         let ciphertext = &data[SHIELD_DATA_HEADER..];
-        assert!(ciphertext.is_empty(), "public path must produce no ciphertext");
+        assert!(
+            ciphertext.is_empty(),
+            "public path must produce no ciphertext"
+        );
     }
 }

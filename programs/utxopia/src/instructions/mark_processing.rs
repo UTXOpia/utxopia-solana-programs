@@ -90,7 +90,8 @@ pub fn process_mark_processing(
 
     // Reservation key binds each reserved UTXO to THIS redemption's unique PDA (not the
     // caller-chosen nonce, which two users can collide on — audit f26).
-    let reservation_key = crate::utils::validation::redemption_reservation_key(redemption_info.key());
+    let reservation_key =
+        crate::utils::validation::redemption_reservation_key(redemption_info.key());
     // Re-validate Pending status here; Phase 3 transitions it to Processing.
     {
         let redemption_data = redemption_info.try_borrow_data()?;

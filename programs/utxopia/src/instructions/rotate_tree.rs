@@ -1,6 +1,6 @@
 //! Rotate commitment tree (disc 20)
 //!
-//! Authority-only instruction. When the active commitment tree is full
+//! Permissionless maintenance instruction. When the active commitment tree is full
 //! (next_index >= 2^16), creates a new tree PDA with the next index
 //! and updates the pool's active_tree_index.
 //!
@@ -11,7 +11,7 @@
 //! 0. [writable] Pool state PDA
 //! 1. [writable] Current commitment tree (must be full)
 //! 2. [writable] New commitment tree PDA (to be created)
-//! 3. [signer]   Authority
+//! 3. [signer]   Payer
 //! 4. []         System program
 
 use pinocchio::{
@@ -22,7 +22,6 @@ use pinocchio::{
     ProgramResult,
 };
 
-use crate::error::UTXOpiaError;
 use crate::state::{CommitmentTree, PoolState};
 use crate::utils::{
     create_pda_account, validate_account_writable, validate_program_owner, validate_system_program,
@@ -40,11 +39,11 @@ pub fn process_rotate_tree(
     let pool_state_info = &accounts[0];
     let current_tree_info = &accounts[1];
     let new_tree_info = &accounts[2];
-    let authority = &accounts[3];
+    let payer = &accounts[3];
     let system_program = &accounts[4];
 
     // Validate
-    if !authority.is_signer() {
+    if !payer.is_signer() {
         return Err(ProgramError::MissingRequiredSignature);
     }
     validate_program_owner(pool_state_info, program_id)?;
@@ -57,10 +56,6 @@ pub fn process_rotate_tree(
     let current_index = {
         let pool_data = pool_state_info.try_borrow_data()?;
         let pool = PoolState::from_bytes(&pool_data)?;
-
-        if authority.key().as_ref() != pool.authority {
-            return Err(UTXOpiaError::Unauthorized.into());
-        }
 
         pool.active_tree_index()
     };
@@ -103,7 +98,7 @@ pub fn process_rotate_tree(
     ];
 
     create_pda_account(
-        authority,
+        payer,
         new_tree_info,
         program_id,
         tree_lamports,
@@ -126,6 +121,6 @@ pub fn process_rotate_tree(
         pool.set_active_tree_index(new_index);
     }
 
-    pinocchio::msg!("UTXOpia: tree rotated");
+    pinocchio::msg!("UTXOpia: tree rotated permissionlessly");
     Ok(())
 }

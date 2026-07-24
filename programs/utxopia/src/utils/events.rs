@@ -149,7 +149,8 @@ pub fn emit_stealth_announcement(
 /// Emit when a redemption is completed (before PDA is closed).
 ///
 /// Layout: disc(1) + requester(32) + amount_sats(8) + actual_received(8) + service_fee(8)
-///         + request_id(8) + btc_txid(32) + btc_script_len(1) + btc_script(var)
+///         + request_id(8) + btc_txid(32) + burn_amount(8) + protocol_revenue(8)
+///         + btc_script_len(1) + btc_script(var)
 /// = 114 + btc_script_len bytes
 ///
 /// Trustless accounting:

@@ -392,6 +392,10 @@ impl<'a> ParsedTransaction<'a> {
         }
     }
 
+    pub fn input_count(&self) -> usize {
+        self.input_count
+    }
+
     /// Check if any input spends exactly the given previous outpoint.
     ///
     /// Deposit verification must bind the credited deposit output to the sweep

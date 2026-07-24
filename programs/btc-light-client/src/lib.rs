@@ -13,12 +13,12 @@ use pinocchio::{
     ProgramResult,
 };
 
+#[cfg(not(feature = "mainnet"))]
+use instructions::process_reinitialize;
 use instructions::{
     process_extend_blockchain, process_initialize, process_prune_obsolete_blocks,
     process_verify_transaction,
 };
-#[cfg(not(feature = "mainnet"))]
-use instructions::process_reinitialize;
 
 entrypoint!(process_instruction);
 

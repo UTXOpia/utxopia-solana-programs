@@ -158,7 +158,7 @@ async function main() {
   const zkbtcMint = await createMint(
     connection,
     authority,
-    authority.publicKey,
+    poolStatePda,
     null,
     8, // 8 decimals
     Keypair.generate(),

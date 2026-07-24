@@ -25,8 +25,8 @@ use crate::state::{
     light_client_tip_height,
     pool_config::POOL_CONFIG_DISCRIMINATOR,
     utxo::UTXO_RECORD_DISCRIMINATOR,
-    PoolConfig, PoolState, RedemptionRequest, RedemptionStatus, UtxoRecord, UtxoStatus,
-    VerifiedTransactionView,
+    PoolConfig, PoolState, RedemptionRequest, RedemptionStatus, TokenConfig, UtxoRecord,
+    UtxoStatus, VerifiedTransactionView,
 };
 use crate::utils::bitcoin::{compute_tx_hash, ParsedTransaction};
 use crate::utils::chadbuffer::read_transaction_from_buffer;
@@ -176,6 +176,7 @@ pub(crate) fn redemption_outputs_within_policy(
 /// 12. `[]`         Pool config PDA (stores on-chain pool_script; validates backend-provided script)
 /// 13. `[writable]` Change UTXO record PDA (if change exists; else system program as placeholder)
 ///     14..14+N `[writable]` Consumed UTXO PDAs (for closing, N = consumed_utxo_count)
+///     After the consumed UTXOs: `[writable]` zkBTC TokenConfig PDA (credits claimable revenue)
 ///
 pub fn process_complete_redemption(
     program_id: &Pubkey,
@@ -581,9 +582,27 @@ pub fn process_complete_redemption(
         return Err(UTXOpiaError::InvalidUtxo.into());
     }
 
-    let consumed_start = if ix_data.pool_script_len > 0 { 14 } else { 13 };
-    if accounts.len() < consumed_start + consumed_count {
+    let consumed_start: usize = if ix_data.pool_script_len > 0 { 14 } else { 13 };
+    let token_config_index = consumed_start
+        .checked_add(consumed_count)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    if accounts.len() <= token_config_index {
         return Err(ProgramError::NotEnoughAccountKeys);
+    }
+    let token_config_info = &accounts[token_config_index];
+    validate_program_owner(token_config_info, program_id)?;
+    validate_account_writable(token_config_info)?;
+    {
+        let tc_data = token_config_info.try_borrow_data()?;
+        let tc = TokenConfig::from_bytes(&tc_data)?;
+        let (expected_tc, _) =
+            find_program_address(&[TokenConfig::SEED, zkbtc_mint.key().as_ref()], program_id);
+        if token_config_info.key() != &expected_tc
+            || tc.mint != *zkbtc_mint.key()
+            || tc.vault != *pool_vault.key()
+        {
+            return Err(UTXOpiaError::InvalidTokenConfig.into());
+        }
     }
 
     // Reservation key for THIS redemption's unique PDA (audit f26): bind consumed UTXOs to the
@@ -660,6 +679,13 @@ pub fn process_complete_redemption(
 
         pool.set_pending_redemptions(pending_redemptions.saturating_sub(1));
         pool.set_last_update(clock.unix_timestamp);
+    }
+    if protocol_revenue > 0 {
+        let mut tc_data = token_config_info.try_borrow_mut_data()?;
+        let tc = TokenConfig::from_bytes_mut(&mut tc_data)?;
+        // The retained BTC backs zkBTC already left in the pool vault. Credit the existing
+        // claim_fees path so redemption revenue is realizable instead of trapped forever.
+        tc.add_fees(protocol_revenue)?;
     }
 
     // --- Emit completion event (before PDA is closed) ---

@@ -38,13 +38,14 @@ use pinocchio::{
 use crate::error::UTXOpiaError;
 use crate::state::{
     deposit_receipt::DEPOSIT_RECEIPT_DISCRIMINATOR, light_client_tip_height,
-    pool_config::POOL_CONFIG_DISCRIMINATOR, CommitmentTree, DepositReceipt, PoolConfig, PoolState,
-    TokenConfig, UtxoRecord, VerifiedTransactionView,
+    pool_config::POOL_CONFIG_DISCRIMINATOR, utxo::UTXO_RECORD_DISCRIMINATOR, CommitmentTree,
+    DepositReceipt, PoolConfig, PoolState, TokenConfig, UtxoRecord, VerifiedTransactionView,
 };
 use crate::utils::bitcoin::{compute_tx_hash, sha256, DepositOpReturn, ParsedTransaction};
 use crate::utils::chadbuffer::read_transaction_from_buffer;
 use crate::utils::crypto::compute_commitment;
 use crate::utils::events::ANNOUNCEMENT_TYPE_DEPOSIT;
+use crate::utils::secp256k1::verify_taproot_output_key;
 use crate::utils::{
     create_pda_account, mint_zkbtc, validate_account_writable, validate_active_tree_pda,
     validate_any_token_program_key, validate_program_owner, validate_system_program,
@@ -283,6 +284,9 @@ fn complete_deposit_inner(
     validate_token_owner(zkbtc_mint)?;
     validate_token_owner(pool_vault)?;
     validate_any_token_program_key(token_program)?;
+    if zkbtc_mint.owner() != token_program.key() || pool_vault.owner() != token_program.key() {
+        return Err(ProgramError::InvalidAccountOwner);
+    }
     validate_system_program(system_program)?;
 
     // SECURITY: Validate writable accounts
@@ -310,6 +314,11 @@ fn complete_deposit_inner(
         let pool_data = pool_state_info.try_borrow_data()?;
         let pool = PoolState::from_bytes(&pool_data)?;
 
+        if zkbtc_mint.key().as_ref() != pool.zkbtc_mint
+            || pool_vault.key().as_ref() != pool.pool_vault
+        {
+            return Err(UTXOpiaError::InvalidVault.into());
+        }
         validate_active_tree_pda(commitment_tree_info, program_id, pool.active_tree_index())?;
         (
             pool.bump,
@@ -323,6 +332,12 @@ fn complete_deposit_inner(
     let (token_id, service_fee) = {
         let tc_data = token_config_info.try_borrow_data()?;
         let tc = TokenConfig::from_bytes(&tc_data)?;
+        if !tc.is_enabled() {
+            return Err(UTXOpiaError::TokenDisabled.into());
+        }
+        if tc.mint != *zkbtc_mint.key() || tc.vault != *pool_vault.key() {
+            return Err(UTXOpiaError::InvalidTokenConfig.into());
+        }
         (tc.token_id, tc.service_fee())
     };
 
@@ -478,22 +493,6 @@ fn complete_deposit_inner(
         return Err(UTXOpiaError::InvalidStealthOpReturn.into());
     }
 
-    // --- Verify sweep TX spends the exact credited deposit outpoint ---
-    // A txid-only linkage is insufficient when the deposit transaction has
-    // multiple outputs. Bind the sweep to the specific output that supplied the
-    // user's original deposit value.
-    let original_deposit_output = if direct_to_pool {
-        None
-    } else {
-        let (output, deposit_vout) = deposit_parsed
-            .find_deposit_output_with_vout()
-            .ok_or(UTXOpiaError::InvalidSpvProof)?;
-        if !sweep_parsed.find_input_with_prev_outpoint(&ix_data.deposit_txid, deposit_vout) {
-            return Err(UTXOpiaError::InvalidSpvProof.into());
-        }
-        Some(output)
-    };
-
     let pool_config_info = &accounts[14];
     validate_program_owner(pool_config_info, program_id)?;
     let config_data = pool_config_info.try_borrow_data()?;
@@ -505,6 +504,51 @@ fn complete_deposit_inner(
     if pool_script.is_empty() {
         return Err(UTXOpiaError::IkaCpiAccountsMissing.into());
     }
+
+    // --- Verify sweep TX spends the exact credited deposit outpoint ---
+    // A txid-only linkage is insufficient when the deposit transaction has
+    // multiple outputs. Bind the sweep to the specific output that supplied the
+    // user's original deposit value.
+    let original_deposit_output = if direct_to_pool {
+        None
+    } else {
+        // Batched consolidation cannot allocate one sweep miner fee across independently
+        // completed deposits without additional shared accounting state. Require a one-to-one
+        // sweep so minted liabilities can never exceed the actual pool output.
+        if sweep_parsed.input_count() != 1 {
+            return Err(UTXOpiaError::InvalidSpvProof.into());
+        }
+        // Bind the selected output to the OP_RETURN note key. Selecting the first positive
+        // output is unsafe because ordinary wallet change can precede the actual deposit.
+        let internal_key = config.get_ika_dwallet_xonly_pubkey();
+        if *internal_key == [0u8; 32] {
+            return Err(UTXOpiaError::IkaCpiAccountsMissing.into());
+        }
+        let mut matched_output = None;
+        for (vout, output) in deposit_parsed.outputs().enumerate() {
+            let script = output.script_pubkey;
+            if output.value == 0 || script.len() != 34 || script[0] != 0x51 || script[1] != 0x20 {
+                continue;
+            }
+            let output_key: &[u8; 32] = script[2..34]
+                .try_into()
+                .map_err(|_| UTXOpiaError::TaprootVerificationFailed)?;
+            if verify_taproot_output_key(internal_key, &note_public_key, output_key).is_ok() {
+                // Multiple outputs to the same derived address are ambiguous. Refuse instead of
+                // silently choosing one and crediting a value the depositor did not intend.
+                if matched_output.is_some() {
+                    return Err(UTXOpiaError::InvalidSpvProof.into());
+                }
+                matched_output = Some((output, vout as u32));
+            }
+        }
+        let (output, deposit_vout) =
+            matched_output.ok_or(UTXOpiaError::TaprootVerificationFailed)?;
+        if !sweep_parsed.find_input_with_prev_outpoint(&ix_data.deposit_txid, deposit_vout) {
+            return Err(UTXOpiaError::InvalidSpvProof.into());
+        }
+        Some(output)
+    };
 
     // Extract pool output amount and vout. The credited output must match the
     // configured pool script so the recorded UTXO is controlled by Ika custody.
@@ -524,17 +568,9 @@ fn complete_deposit_inner(
             .unwrap_or(pool_output_value)
     };
 
-    // Bind the credited amount to the claimant's OWN deposit. A batched/consolidating sweep
-    // produces a single pool output that aggregates many users' deposits; crediting that whole
-    // output to one completer would let a small deposit mint against the entire aggregate and
-    // claim others' funds. In sweep mode, cap the credit at the traced deposit output value
-    // (the user can never be credited more than they actually deposited). Direct-to-pool mode
-    // has no intermediate sweep, so the pool output IS the user's deposit.
-    let amount_sats = if direct_to_pool {
-        pool_output_value
-    } else {
-        core::cmp::min(original_deposit_sats, pool_output_value)
-    };
+    // Credit exactly the BTC that reached pool custody. Sweep mode is restricted to one input
+    // above, so this also accounts for its miner fee without cross-deposit allocation ambiguity.
+    let amount_sats = pool_output_value;
 
     // Validate extracted amount is within bounds
     if amount_sats < min_deposit {
@@ -611,7 +647,13 @@ fn complete_deposit_inner(
         crate::utils::events::emit_auditor_ciphertext(&commitment, auditor_ciphertext);
     }
 
-    // --- Create UTXO record PDA for the pool BTC output ---
+    // --- Record the pool BTC output as a spendable UtxoRecord ---
+    // The PDA is keyed by (sweep_txid, sweep_vout), so a batched/consolidating sweep that
+    // aggregates several deposits into ONE pool output maps every one of those completions to the
+    // same UtxoRecord. Create it idempotently — exactly once per pool output — and record the
+    // FULL `pool_output_value` (the real spendable BTC), not the per-claimant `amount_sats`.
+    // Crediting per-claimant value or creating unconditionally caused the second completion of a
+    // shared output to revert and understated the tracked BTC (audit batched-sweep finding).
     {
         let vout_le = sweep_vout.to_le_bytes();
         let utxo_seeds: &[&[u8]] = &[UtxoRecord::SEED, &ix_data.sweep_txid, &vout_le];
@@ -620,32 +662,52 @@ fn complete_deposit_inner(
             return Err(ProgramError::InvalidSeeds);
         }
 
-        let rent = Rent::get()?;
-        let utxo_bump_bytes = [utxo_bump];
-        let utxo_signer_seeds: &[&[u8]] = &[
-            UtxoRecord::SEED,
-            &ix_data.sweep_txid,
-            &vout_le,
-            &utxo_bump_bytes,
-        ];
+        let already_recorded = {
+            let d = utxo_record_info.try_borrow_data()?;
+            !d.is_empty() && d[0] == UTXO_RECORD_DISCRIMINATOR
+        };
 
-        create_pda_account(
-            authority,
-            utxo_record_info,
-            program_id,
-            rent.minimum_balance(UtxoRecord::LEN),
-            UtxoRecord::LEN as u64,
-            utxo_signer_seeds,
-        )?;
+        if !already_recorded {
+            let rent = Rent::get()?;
+            let utxo_bump_bytes = [utxo_bump];
+            let utxo_signer_seeds: &[&[u8]] = &[
+                UtxoRecord::SEED,
+                &ix_data.sweep_txid,
+                &vout_le,
+                &utxo_bump_bytes,
+            ];
 
-        let mut utxo_data = utxo_record_info.try_borrow_mut_data()?;
-        let utxo = UtxoRecord::init(&mut utxo_data)?;
-        utxo.set_txid(&ix_data.sweep_txid);
-        utxo.set_vout(sweep_vout);
-        utxo.set_amount_sats(amount_sats);
-        // status defaults to Unspent (0)
+            create_pda_account(
+                authority,
+                utxo_record_info,
+                program_id,
+                rent.minimum_balance(UtxoRecord::LEN),
+                UtxoRecord::LEN as u64,
+                utxo_signer_seeds,
+            )?;
 
-        crate::utils::events::emit_utxo_created(&ix_data.sweep_txid, sweep_vout, amount_sats);
+            {
+                let mut utxo_data = utxo_record_info.try_borrow_mut_data()?;
+                let utxo = UtxoRecord::init(&mut utxo_data)?;
+                utxo.set_txid(&ix_data.sweep_txid);
+                utxo.set_vout(sweep_vout);
+                utxo.set_amount_sats(pool_output_value);
+                // status defaults to Unspent (0)
+            }
+
+            // Track the spendable BTC exactly once for this pool output.
+            {
+                let mut pool_data = pool_state_info.try_borrow_mut_data()?;
+                let pool = PoolState::from_bytes_mut(&mut pool_data)?;
+                pool.add_utxo(pool_output_value)?;
+            }
+
+            crate::utils::events::emit_utxo_created(
+                &ix_data.sweep_txid,
+                sweep_vout,
+                pool_output_value,
+            );
+        }
     }
 
     // Mint zkBTC into the pool vault for the FULL deposit (shielded liability + fee).
@@ -675,7 +737,8 @@ fn complete_deposit_inner(
         // Gross amount actually minted into the vault (shielded note + claimable fee).
         pool.add_minted(amount_sats)?;
         pool.add_shielded(shielded_amount)?;
-        pool.add_utxo(amount_sats)?;
+        // NOTE: pool.add_utxo() for the spendable BTC is done once per pool output in the
+        // idempotent UtxoRecord block above, using the full pool_output_value.
         pool.set_last_update(clock.unix_timestamp);
     }
 
@@ -763,6 +826,9 @@ mod tests {
     fn test_auditor_ciphertext_empty_on_public_path() {
         let data = [0u8; 80]; // exactly 80 bytes, no trailing ciphertext
         let ciphertext = &data[CompleteDepositData::HEADER_SIZE..];
-        assert!(ciphertext.is_empty(), "public path must produce no ciphertext");
+        assert!(
+            ciphertext.is_empty(),
+            "public path must produce no ciphertext"
+        );
     }
 }

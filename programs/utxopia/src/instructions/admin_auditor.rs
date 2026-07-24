@@ -14,10 +14,7 @@
 //!   1. [signer]   Auditor
 
 use pinocchio::{
-    account_info::AccountInfo,
-    program_error::ProgramError,
-    pubkey::Pubkey,
-    ProgramResult,
+    account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, ProgramResult,
 };
 
 use crate::error::UTXOpiaError;
@@ -135,7 +132,10 @@ mod tests {
     #[test]
     fn frozen_empty_data_is_rejected() {
         let data: &[u8] = &[];
-        assert!(data.is_empty(), "empty data should trigger InvalidInstructionData");
+        assert!(
+            data.is_empty(),
+            "empty data should trigger InvalidInstructionData"
+        );
     }
 
     // --- set_auditor_viewing_pubkey data parsing ---

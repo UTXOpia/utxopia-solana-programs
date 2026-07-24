@@ -125,7 +125,15 @@ pub fn process_extend_blockchain(
     };
 
     // Read light client state
-    let (network, _lc_tip_height, lc_chainwork, lc_expected_bits, lc_epoch_start_time, lc_reinit_epoch, lc_genesis_hash) = {
+    let (
+        network,
+        _lc_tip_height,
+        lc_chainwork,
+        lc_expected_bits,
+        lc_epoch_start_time,
+        lc_reinit_epoch,
+        lc_genesis_hash,
+    ) = {
         let lc_data = light_client_info.try_borrow_data()?;
         let lc = BitcoinLightClient::from_bytes(&lc_data)?;
         let mut cw = [0u8; 32];
@@ -146,7 +154,9 @@ pub fn process_extend_blockchain(
     // Bind the parent to the current chain instance: a header written before a reinitialization
     // carries the old epoch and must not seed an extension onto the freshly reinitialized chain
     // (audit f07/f08). Genesis headers are stamped with the live epoch at (re)initialize.
-    if parent_reinit_epoch != lc_reinit_epoch {
+    let legacy_regtest_parent =
+        network == crate::constants::NETWORK_REGTEST && parent_reinit_epoch == 0;
+    if parent_reinit_epoch != lc_reinit_epoch && !legacy_regtest_parent {
         return Err(ProgramError::InvalidAccountData);
     }
 

@@ -1,166 +1,157 @@
-    use super::*;
-    use crate::utils::bitcoin::ParsedTransaction;
+use super::*;
+use crate::utils::bitcoin::ParsedTransaction;
 
-    fn p2tr(tag: u8) -> Vec<u8> {
-        let mut s = vec![0x51u8, 0x20];
-        s.extend_from_slice(&[tag; 32]);
-        s
+fn p2tr(tag: u8) -> Vec<u8> {
+    let mut s = vec![0x51u8, 0x20];
+    s.extend_from_slice(&[tag; 32]);
+    s
+}
+
+fn op_return() -> Vec<u8> {
+    vec![0x6a, 0x04, 0xde, 0xad, 0xbe, 0xef]
+}
+
+/// Build a minimal legacy tx (1 input, given outputs). Counts assumed < 253.
+fn tx_with_outputs(outputs: &[(u64, Vec<u8>)]) -> Vec<u8> {
+    let mut t = vec![1u8, 0, 0, 0]; // version
+    t.push(1); // input count
+    t.extend_from_slice(&[0u8; 32]); // prev txid
+    t.extend_from_slice(&[0u8; 4]); // prev vout
+    t.push(0); // scriptSig len
+    t.extend_from_slice(&[0xffu8; 4]); // sequence
+    t.push(outputs.len() as u8); // output count
+    for (val, script) in outputs {
+        t.extend_from_slice(&val.to_le_bytes());
+        t.push(script.len() as u8);
+        t.extend_from_slice(script);
     }
+    t.extend_from_slice(&[0u8; 4]); // locktime
+    t
+}
 
-    fn op_return() -> Vec<u8> {
-        vec![0x6a, 0x04, 0xde, 0xad, 0xbe, 0xef]
-    }
+const RECIPIENT: u8 = 0xAA;
+const POOL: u8 = 0xBB;
+const ATTACKER: u8 = 0xCC;
 
-    /// Build a minimal legacy tx (1 input, given outputs). Counts assumed < 253.
-    fn tx_with_outputs(outputs: &[(u64, Vec<u8>)]) -> Vec<u8> {
-        let mut t = vec![1u8, 0, 0, 0]; // version
-        t.push(1); // input count
-        t.extend_from_slice(&[0u8; 32]); // prev txid
-        t.extend_from_slice(&[0u8; 4]); // prev vout
-        t.push(0); // scriptSig len
-        t.extend_from_slice(&[0xffu8; 4]); // sequence
-        t.push(outputs.len() as u8); // output count
-        for (val, script) in outputs {
-            t.extend_from_slice(&val.to_le_bytes());
-            t.push(script.len() as u8);
-            t.extend_from_slice(script);
-        }
-        t.extend_from_slice(&[0u8; 4]); // locktime
-        t
-    }
+#[test]
+fn allows_recipient_only() {
+    let tx = tx_with_outputs(&[(100_000, p2tr(RECIPIENT))]);
+    let parsed = ParsedTransaction::parse(&tx).unwrap();
+    assert!(redemption_outputs_within_policy(
+        &parsed,
+        &p2tr(RECIPIENT),
+        &p2tr(POOL)
+    ));
+}
 
-    const RECIPIENT: u8 = 0xAA;
-    const POOL: u8 = 0xBB;
-    const ATTACKER: u8 = 0xCC;
+#[test]
+fn allows_recipient_plus_pool_change_and_op_return() {
+    let tx = tx_with_outputs(&[
+        (100_000, p2tr(RECIPIENT)),
+        (50_000, p2tr(POOL)),
+        (0, op_return()),
+    ]);
+    let parsed = ParsedTransaction::parse(&tx).unwrap();
+    assert!(redemption_outputs_within_policy(
+        &parsed,
+        &p2tr(RECIPIENT),
+        &p2tr(POOL)
+    ));
+}
 
-    #[test]
-    fn allows_recipient_only() {
-        let tx = tx_with_outputs(&[(100_000, p2tr(RECIPIENT))]);
-        let parsed = ParsedTransaction::parse(&tx).unwrap();
-        assert!(redemption_outputs_within_policy(
-            &parsed,
-            &p2tr(RECIPIENT),
-            &p2tr(POOL)
-        ));
-    }
+/// The core skim attack: an extra output to an attacker-controlled address must be rejected.
+#[test]
+fn rejects_attacker_skim_output() {
+    let tx = tx_with_outputs(&[
+        (100_000, p2tr(RECIPIENT)),
+        (800_000, p2tr(ATTACKER)), // skim
+    ]);
+    let parsed = ParsedTransaction::parse(&tx).unwrap();
+    assert!(!redemption_outputs_within_policy(
+        &parsed,
+        &p2tr(RECIPIENT),
+        &p2tr(POOL)
+    ));
+}
 
-    #[test]
-    fn allows_recipient_plus_pool_change_and_op_return() {
-        let tx = tx_with_outputs(&[
-            (100_000, p2tr(RECIPIENT)),
-            (50_000, p2tr(POOL)),
-            (0, op_return()),
-        ]);
-        let parsed = ParsedTransaction::parse(&tx).unwrap();
-        assert!(redemption_outputs_within_policy(
-            &parsed,
-            &p2tr(RECIPIENT),
-            &p2tr(POOL)
-        ));
-    }
+/// With no pool_script declared, ANY non-recipient/non-OP_RETURN output is a skim.
+#[test]
+fn rejects_change_when_pool_script_absent() {
+    let tx = tx_with_outputs(&[
+        (100_000, p2tr(RECIPIENT)),
+        (50_000, p2tr(POOL)), // would-be change, but pool_script not provided
+    ]);
+    let parsed = ParsedTransaction::parse(&tx).unwrap();
+    assert!(!redemption_outputs_within_policy(
+        &parsed,
+        &p2tr(RECIPIENT),
+        &[]
+    ));
+}
 
-    /// The core skim attack: an extra output to an attacker-controlled address must be rejected.
-    #[test]
-    fn rejects_attacker_skim_output() {
-        let tx = tx_with_outputs(&[
-            (100_000, p2tr(RECIPIENT)),
-            (800_000, p2tr(ATTACKER)), // skim
-        ]);
-        let parsed = ParsedTransaction::parse(&tx).unwrap();
-        assert!(!redemption_outputs_within_policy(
-            &parsed,
-            &p2tr(RECIPIENT),
-            &p2tr(POOL)
-        ));
-    }
+/// Non-zero-value OP_RETURN would destroy pool BTC outside burn accounting — must reject.
+#[test]
+fn rejects_nonzero_value_op_return() {
+    let tx = tx_with_outputs(&[
+        (100_000, p2tr(RECIPIENT)),
+        (25_000, op_return()), // burns real sats into an unspendable output
+    ]);
+    let parsed = ParsedTransaction::parse(&tx).unwrap();
+    assert!(!redemption_outputs_within_policy(
+        &parsed,
+        &p2tr(RECIPIENT),
+        &p2tr(POOL)
+    ));
+}
 
-    /// With no pool_script declared, ANY non-recipient/non-OP_RETURN output is a skim.
-    #[test]
-    fn rejects_change_when_pool_script_absent() {
-        let tx = tx_with_outputs(&[
-            (100_000, p2tr(RECIPIENT)),
-            (50_000, p2tr(POOL)), // would-be change, but pool_script not provided
-        ]);
-        let parsed = ParsedTransaction::parse(&tx).unwrap();
-        assert!(!redemption_outputs_within_policy(
-            &parsed,
-            &p2tr(RECIPIENT),
-            &[]
-        ));
-    }
+/// A zero-value OP_RETURN marker alongside the recipient stays policy-compliant.
+#[test]
+fn allows_zero_value_op_return() {
+    let tx = tx_with_outputs(&[(100_000, p2tr(RECIPIENT)), (0, op_return())]);
+    let parsed = ParsedTransaction::parse(&tx).unwrap();
+    assert!(redemption_outputs_within_policy(
+        &parsed,
+        &p2tr(RECIPIENT),
+        &p2tr(POOL)
+    ));
+}
 
-    /// Non-zero-value OP_RETURN would destroy pool BTC outside burn accounting — must reject.
-    #[test]
-    fn rejects_nonzero_value_op_return() {
-        let tx = tx_with_outputs(&[
-            (100_000, p2tr(RECIPIENT)),
-            (25_000, op_return()), // burns real sats into an unspendable output
-        ]);
-        let parsed = ParsedTransaction::parse(&tx).unwrap();
-        assert!(!redemption_outputs_within_policy(
-            &parsed,
-            &p2tr(RECIPIENT),
-            &p2tr(POOL)
-        ));
-    }
+/// Only one pool change output is tracked downstream; splitting change must reject.
+#[test]
+fn rejects_multiple_pool_change_outputs() {
+    let tx = tx_with_outputs(&[
+        (100_000, p2tr(RECIPIENT)),
+        (30_000, p2tr(POOL)),
+        (20_000, p2tr(POOL)), // second change output — would be untracked
+    ]);
+    let parsed = ParsedTransaction::parse(&tx).unwrap();
+    assert!(!redemption_outputs_within_policy(
+        &parsed,
+        &p2tr(RECIPIENT),
+        &p2tr(POOL)
+    ));
+}
 
-    /// A zero-value OP_RETURN marker alongside the recipient stays policy-compliant.
-    #[test]
-    fn allows_zero_value_op_return() {
-        let tx = tx_with_outputs(&[
-            (100_000, p2tr(RECIPIENT)),
-            (0, op_return()),
-        ]);
-        let parsed = ParsedTransaction::parse(&tx).unwrap();
-        assert!(redemption_outputs_within_policy(
-            &parsed,
-            &p2tr(RECIPIENT),
-            &p2tr(POOL)
-        ));
-    }
+/// A single pool change output is still accepted.
+#[test]
+fn allows_single_pool_change_output() {
+    let tx = tx_with_outputs(&[(100_000, p2tr(RECIPIENT)), (50_000, p2tr(POOL))]);
+    let parsed = ParsedTransaction::parse(&tx).unwrap();
+    assert!(redemption_outputs_within_policy(
+        &parsed,
+        &p2tr(RECIPIENT),
+        &p2tr(POOL)
+    ));
+}
 
-    /// Only one pool change output is tracked downstream; splitting change must reject.
-    #[test]
-    fn rejects_multiple_pool_change_outputs() {
-        let tx = tx_with_outputs(&[
-            (100_000, p2tr(RECIPIENT)),
-            (30_000, p2tr(POOL)),
-            (20_000, p2tr(POOL)), // second change output — would be untracked
-        ]);
-        let parsed = ParsedTransaction::parse(&tx).unwrap();
-        assert!(!redemption_outputs_within_policy(
-            &parsed,
-            &p2tr(RECIPIENT),
-            &p2tr(POOL)
-        ));
-    }
-
-    /// A single pool change output is still accepted.
-    #[test]
-    fn allows_single_pool_change_output() {
-        let tx = tx_with_outputs(&[
-            (100_000, p2tr(RECIPIENT)),
-            (50_000, p2tr(POOL)),
-        ]);
-        let parsed = ParsedTransaction::parse(&tx).unwrap();
-        assert!(redemption_outputs_within_policy(
-            &parsed,
-            &p2tr(RECIPIENT),
-            &p2tr(POOL)
-        ));
-    }
-
-    /// Multiple recipient outputs are permitted by policy (the handler sums their value).
-    #[test]
-    fn allows_multiple_recipient_outputs() {
-        let tx = tx_with_outputs(&[
-            (60_000, p2tr(RECIPIENT)),
-            (40_000, p2tr(RECIPIENT)),
-        ]);
-        let parsed = ParsedTransaction::parse(&tx).unwrap();
-        assert!(redemption_outputs_within_policy(
-            &parsed,
-            &p2tr(RECIPIENT),
-            &p2tr(POOL)
-        ));
-    }
+/// Multiple recipient outputs are permitted by policy (the handler sums their value).
+#[test]
+fn allows_multiple_recipient_outputs() {
+    let tx = tx_with_outputs(&[(60_000, p2tr(RECIPIENT)), (40_000, p2tr(RECIPIENT))]);
+    let parsed = ParsedTransaction::parse(&tx).unwrap();
+    assert!(redemption_outputs_within_policy(
+        &parsed,
+        &p2tr(RECIPIENT),
+        &p2tr(POOL)
+    ));
+}

@@ -15,7 +15,8 @@ pub struct PoolState {
     /// Bump seed for PDA derivation
     pub bump: u8,
 
-    /// Flags: bit 0 = paused, bit 1 = permissioned, bit 2 = auditor_frozen
+    /// Flags: bit 0 = paused, bit 1 = permissioned, bit 2 = auditor_frozen,
+    /// bit 3 = all VK registry variants permanently frozen
     pub flags: u8,
 
     /// Padding for alignment
@@ -62,7 +63,7 @@ pub struct PoolState {
     service_fee_base: [u8; 8],
 
     /// Cumulative protocol revenue collected from withdrawal service fees (satoshis).
-    /// fee_pool = sum(service_fee - miner_fee) across all completed withdrawals.
+    /// This is a lifetime statistic; claimable revenue is tracked in zkBTC TokenConfig fees.
     fee_pool: [u8; 8],
 
     /// Pending timelock: proposed min_deposit (satoshis)
@@ -118,6 +119,7 @@ impl PoolState {
     const FLAG_PAUSED: u8 = 1 << 0;
     const FLAG_PERMISSIONED: u8 = 1 << 1;
     const FLAG_AUDITOR_FROZEN: u8 = 1 << 2;
+    const FLAG_VK_REGISTRIES_FROZEN: u8 = 1 << 3;
 
     /// Parse from account data
     pub fn from_bytes(data: &[u8]) -> Result<&Self, ProgramError> {
@@ -164,6 +166,10 @@ impl PoolState {
 
     pub fn auditor_is_frozen(&self) -> bool {
         self.flags & Self::FLAG_AUDITOR_FROZEN != 0
+    }
+
+    pub fn vk_registries_are_frozen(&self) -> bool {
+        self.flags & Self::FLAG_VK_REGISTRIES_FROZEN != 0
     }
 
     pub fn auditor(&self) -> &[u8; 32] {
@@ -298,6 +304,10 @@ impl PoolState {
         } else {
             self.flags &= !Self::FLAG_AUDITOR_FROZEN;
         }
+    }
+
+    pub fn freeze_vk_registries(&mut self) {
+        self.flags |= Self::FLAG_VK_REGISTRIES_FROZEN;
     }
 
     pub fn set_auditor(&mut self, pubkey: &[u8; 32]) {
@@ -484,7 +494,10 @@ impl PoolState {
                 .ok_or(ProgramError::ArithmeticOverflow)?,
         );
         let c = self.utxo_count();
-        self.set_utxo_count(c.checked_add(count).ok_or(ProgramError::ArithmeticOverflow)?);
+        self.set_utxo_count(
+            c.checked_add(count)
+                .ok_or(ProgramError::ArithmeticOverflow)?,
+        );
         Ok(())
     }
 

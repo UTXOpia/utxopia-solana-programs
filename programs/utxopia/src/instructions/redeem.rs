@@ -33,7 +33,7 @@
 //! 2. vk_registry          (read)
 //! 3. user                 (signer, payer)
 //! 4. system_program       (read)
-//! 5. token_config         (read) — for token_id + enabled check
+//! 5. token_config         (writable) — for token_id + enabled check + accounting
 //!    6..6+N                  nullifier_records (writable PDA)
 //!    6+N..6+N+P             redemption_request PDAs (writable)
 //!    [optional]              proof_buffer (read, only when proof_source=1, last account)
@@ -119,7 +119,8 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
     {
         let mut script_slices: [&[u8]; MAX_PUBLIC_OUTPUTS] = [&[]; MAX_PUBLIC_OUTPUTS];
         for k in 0..n_public_outputs {
-            script_slices[k] = &data[btc_script_starts[k]..btc_script_starts[k] + btc_script_lens[k]];
+            script_slices[k] =
+                &data[btc_script_starts[k]..btc_script_starts[k] + btc_script_lens[k]];
         }
 
         let stealth_data_hash = crate::utils::sha256(&data[stealth_data_start..stealth_data_end]);
@@ -151,6 +152,7 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
     validate_system_program(system_program)?;
     validate_account_writable(pool_state_info)?;
     validate_account_writable(commitment_tree_info)?;
+    validate_account_writable(token_config_info)?;
 
     if !user.is_signer() {
         return Err(ProgramError::MissingRequiredSignature);
@@ -392,6 +394,11 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
         pool.sub_shielded(total_redeem)?;
         pool.set_pending_redemptions(pending_redemptions.saturating_add(n_public_outputs as u64));
         pool.set_last_update(clock.unix_timestamp);
+    }
+    {
+        let mut tc_data = token_config_info.try_borrow_mut_data()?;
+        let tc = TokenConfig::from_bytes_mut(&mut tc_data)?;
+        tc.sub_shielded(total_redeem)?;
     }
 
     pinocchio::msg!("UTXOpia: redeem");

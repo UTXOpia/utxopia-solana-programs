@@ -14,7 +14,8 @@ use pinocchio::{
 };
 
 use crate::constants::{
-    BTC_DUST_THRESHOLD_SATS, BTC_INPUT_SEQUENCE, BTC_TX_LOCKTIME, BTC_TX_VERSION, MAX_BTC_SCRIPT_LEN,
+    BTC_DUST_THRESHOLD_SATS, BTC_INPUT_SEQUENCE, BTC_TX_LOCKTIME, BTC_TX_VERSION,
+    MAX_BTC_SCRIPT_LEN,
 };
 use crate::cpi::ika::{
     approve_message, ApproveMessageAccounts, CPI_AUTHORITY_SEED, SIG_SCHEME_TAPROOT_SHA256,
@@ -31,7 +32,8 @@ use crate::utils::sighash::{
     taproot_keyspend_sighash, ReservedInput, SighashInput, SighashOutput,
 };
 use crate::utils::{
-    policy::check_redemption_signing, validate_program_owner, validate_system_program,
+    policy::{check_redemption_signing, MAX_MINER_FEE_SATS},
+    validate_program_owner, validate_system_program,
 };
 
 /// Number of fixed accounts before the variable-length reserved UTXO accounts.
@@ -176,6 +178,13 @@ pub fn process_approve_redemption_signing(
     if (ix_data.input_index as usize) >= reserved_count {
         return Err(ProgramError::InvalidInstructionData);
     }
+    {
+        let redemption_data = redemption_info.try_borrow_data()?;
+        let redemption = RedemptionRequest::from_bytes(&redemption_data)?;
+        if redemption.is_input_signing_approved(ix_data.input_index) {
+            return Err(UTXOpiaError::InvalidRedemptionState.into());
+        }
+    }
 
     let (dwallet_xonly, cpi_authority_bump, pool_script, pool_script_len) = {
         let cfg_data = pool_config_info.try_borrow_data()?;
@@ -286,6 +295,19 @@ pub fn process_approve_redemption_signing(
         .checked_sub(send_amount)
         .and_then(|v| v.checked_sub(ix_data.miner_fee_sats))
         .ok_or(ProgramError::InvalidArgument)?;
+    // When change is dust it is intentionally omitted from the transaction and therefore becomes
+    // miner fee. Enforce policy against that effective fee, not only the backend's nominal value.
+    let effective_miner_fee = if change <= BTC_DUST_THRESHOLD_SATS {
+        ix_data
+            .miner_fee_sats
+            .checked_add(change)
+            .ok_or(ProgramError::ArithmeticOverflow)?
+    } else {
+        ix_data.miner_fee_sats
+    };
+    if effective_miner_fee > MAX_MINER_FEE_SATS {
+        return Err(UTXOpiaError::RedemptionFeeExceedsLimit.into());
+    }
 
     let pool_spk = &pool_script[..pool_script_len];
     let mut sig_outputs: std::vec::Vec<SighashOutput> = std::vec::Vec::with_capacity(2);
@@ -361,13 +383,13 @@ pub fn process_approve_redemption_signing(
         cpi_authority_bump,
     )?;
 
-    // Mark the redemption as signing-approved so it can no longer be cancelled/re-minted:
-    // a BTC payout may now be broadcastable, and cancelling would re-mint the note, enabling
-    // a cross-chain double-spend.
+    // Record this input approval. The global signing-approved flag is set only once every input
+    // is approved; a partially approved transaction is not broadcastable and may still be
+    // recovered through the normal timeout/cancellation path.
     {
         let mut redemption_data = redemption_info.try_borrow_mut_data()?;
         let redemption = RedemptionRequest::from_bytes_mut(&mut redemption_data)?;
-        redemption.set_signing_approved();
+        redemption.mark_input_signing_approved(ix_data.input_index)?;
     }
 
     pinocchio::msg!("UTXOpia: redemption signing approved");

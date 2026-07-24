@@ -199,13 +199,9 @@ pub fn process_instruction(
         }
         // Dev-only state reset (30) — devnet-regtest builds only
         #[cfg(feature = "devnet-regtest")]
-        instruction::DEVNET_RESET => {
-            instructions::process_devnet_reset(program_id, accounts, data)
-        }
+        instruction::DEVNET_RESET => instructions::process_devnet_reset(program_id, accounts, data),
         #[cfg(feature = "devnet-regtest")]
-        instruction::DEVNET_CLOSE => {
-            instructions::process_devnet_close(program_id, accounts, data)
-        }
+        instruction::DEVNET_CLOSE => instructions::process_devnet_close(program_id, accounts, data),
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }

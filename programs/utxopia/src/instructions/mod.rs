@@ -72,6 +72,8 @@ pub use cancel_redemption::*;
 pub use claim_fees::*;
 pub use complete_deposit::*;
 pub use complete_redemption::*;
+#[cfg(feature = "devnet-regtest")]
+pub use devnet_reset::*;
 pub use init_vk_registry::*;
 pub use initialize::*;
 pub use initialize_permissioned::*;
@@ -84,5 +86,3 @@ pub use shield::*;
 pub use transact::*;
 pub use unshield::*;
 pub use update_token_config::*;
-#[cfg(feature = "devnet-regtest")]
-pub use devnet_reset::*;

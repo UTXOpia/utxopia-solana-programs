@@ -147,7 +147,9 @@ pub fn process_transact(
         .checked_sub(1 + pb)
         .filter(|&i| i >= 5 + n_inputs)
         .map(|i| &accounts[i])
-        .filter(|a| a.key() != commitment_tree_info.key() && looks_like_commitment_tree(a, program_id));
+        .filter(|a| {
+            a.key() != commitment_tree_info.key() && looks_like_commitment_tree(a, program_id)
+        });
     let frozen = usize::from(source_tree_info.is_some());
 
     let extra_accounts_after_nullifiers = accounts.len() - (5 + n_inputs);

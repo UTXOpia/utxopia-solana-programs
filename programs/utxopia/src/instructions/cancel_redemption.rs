@@ -41,7 +41,11 @@ impl CancelRedemptionData {
         }
         let mut npk = [0u8; 32];
         npk.copy_from_slice(&data[0..32]);
-        let utxo_count = if data.len() > 32 { data[32] as usize } else { 0 };
+        let utxo_count = if data.len() > 32 {
+            data[32] as usize
+        } else {
+            0
+        };
         if utxo_count > MAX_UTXOS_PER_CANCEL {
             return Err(ProgramError::InvalidInstructionData);
         }
@@ -245,6 +249,11 @@ pub fn process_cancel_redemption(
         let pending = pool.pending_redemptions();
         pool.set_pending_redemptions(pending.saturating_sub(1));
         pool.set_last_update(clock.unix_timestamp);
+    }
+    {
+        let mut tc_data = token_config_info.try_borrow_mut_data()?;
+        let tc = TokenConfig::from_bytes_mut(&mut tc_data)?;
+        tc.add_shielded(amount_sats)?;
     }
 
     // Close RedemptionRequest PDA — return rent to user

@@ -263,9 +263,8 @@ pub fn compute_bound_params_hash_unshield(
 /// calling, so the stack buffer never overflows.
 fn length_prefixed_hash(items: &[&[u8]]) -> [u8; 32] {
     use super::sha256;
-    const CAP: usize = 4
-        + crate::instructions::joinsplit_common::MAX_PUBLIC_OUTPUTS
-            * (4 + crate::constants::MAX_BTC_SCRIPT_LEN);
+    const CAP: usize = 4 + crate::instructions::joinsplit_common::MAX_PUBLIC_OUTPUTS
+        * (4 + crate::constants::MAX_BTC_SCRIPT_LEN);
     let mut buf = [0u8; CAP];
     let mut off = 0usize;
     buf[off..off + 4].copy_from_slice(&(items.len() as u32).to_le_bytes());

@@ -19,7 +19,9 @@ use pinocchio::{
 
 use crate::error::UTXOpiaError;
 use crate::state::{PoolState, VkRegistry, MAX_IC_POINTS, VK_REGISTRY_DISCRIMINATOR};
-use crate::utils::{create_pda_account, validate_program_owner, validate_system_program};
+use crate::utils::{
+    create_pda_account, validate_account_writable, validate_program_owner, validate_system_program,
+};
 
 /// Initialize VK Registry instruction data
 ///
@@ -137,6 +139,9 @@ pub fn process_init_vk_registry(
         if authority.key().as_ref() != pool.authority {
             return Err(UTXOpiaError::Unauthorized.into());
         }
+        if pool.vk_registries_are_frozen() {
+            return Err(UTXOpiaError::VkRegistryFrozen.into());
+        }
     }
 
     // Derive expected VK registry PDA: ["vk_registry", &[n_inputs], &[n_outputs]]
@@ -197,19 +202,21 @@ pub fn process_init_vk_registry(
 /// Update an existing VK registry (for circuit upgrades)
 ///
 /// Accounts:
-/// 0. vk_registry - VK registry PDA (writable)
-/// 1. authority - Current authority (signer)
+/// 0. pool_state - Pool state PDA
+/// 1. vk_registry - VK registry PDA (writable)
+/// 2. authority - Current authority (signer)
 pub fn process_update_vk_registry(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     data: &[u8],
 ) -> ProgramResult {
-    if accounts.len() < 2 {
+    if accounts.len() < 3 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
-    let vk_registry = &accounts[0];
-    let authority = &accounts[1];
+    let pool_state = &accounts[0];
+    let vk_registry = &accounts[1];
+    let authority = &accounts[2];
 
     let ix_data = InitVkRegistryData::from_bytes(data)?;
 
@@ -217,8 +224,19 @@ pub fn process_update_vk_registry(
         return Err(ProgramError::MissingRequiredSignature);
     }
 
+    validate_program_owner(pool_state, program_id)?;
     validate_program_owner(vk_registry, program_id)?;
 
+    {
+        let pool_data = pool_state.try_borrow_data()?;
+        let pool = PoolState::from_bytes(&pool_data)?;
+        if authority.key().as_ref() != pool.authority {
+            return Err(UTXOpiaError::Unauthorized.into());
+        }
+        if pool.vk_registries_are_frozen() {
+            return Err(UTXOpiaError::VkRegistryFrozen.into());
+        }
+    }
     {
         let mut vk_data = vk_registry.try_borrow_mut_data()?;
         let registry = VkRegistry::from_bytes_mut(&mut vk_data)?;
@@ -253,26 +271,40 @@ pub fn process_update_vk_registry(
 /// compromise cannot install a malicious verification key and forge proofs.
 ///
 /// Accounts:
-/// 0. vk_registry - VK registry PDA (writable)
-/// 1. authority - Current registry authority (signer)
+/// 0. pool_state - Pool state PDA (writable; stores the permanent global freeze)
+/// 1. vk_registry - VK registry PDA (writable)
+/// 2. authority - Current registry authority (signer)
 pub fn process_freeze_vk_registry(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     _data: &[u8],
 ) -> ProgramResult {
-    if accounts.len() < 2 {
+    if accounts.len() < 3 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
-    let vk_registry = &accounts[0];
-    let authority = &accounts[1];
+    let pool_state = &accounts[0];
+    let vk_registry = &accounts[1];
+    let authority = &accounts[2];
 
     if !authority.is_signer() {
         return Err(ProgramError::MissingRequiredSignature);
     }
 
+    validate_program_owner(pool_state, program_id)?;
     validate_program_owner(vk_registry, program_id)?;
+    validate_account_writable(pool_state)?;
 
+    {
+        let pool_data = pool_state.try_borrow_data()?;
+        let pool = PoolState::from_bytes(&pool_data)?;
+        if authority.key().as_ref() != pool.authority {
+            return Err(UTXOpiaError::Unauthorized.into());
+        }
+        if pool.vk_registries_are_frozen() {
+            return Err(UTXOpiaError::VkRegistryFrozen.into());
+        }
+    }
     {
         let mut vk_data = vk_registry.try_borrow_mut_data()?;
         let registry = VkRegistry::from_bytes_mut(&mut vk_data)?;
@@ -282,6 +314,11 @@ pub fn process_freeze_vk_registry(
         }
 
         registry.freeze();
+    }
+    {
+        let mut pool_data = pool_state.try_borrow_mut_data()?;
+        let pool = PoolState::from_bytes_mut(&mut pool_data)?;
+        pool.freeze_vk_registries();
     }
 
     pinocchio::msg!("UTXOpia: VK registry frozen");

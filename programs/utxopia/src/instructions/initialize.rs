@@ -8,7 +8,9 @@ use pinocchio::{
     ProgramResult,
 };
 
-use crate::utils::{create_pda_account, validate_system_program, validate_token_owner};
+use crate::utils::{
+    create_pda_account, validate_pool_controlled_zkbtc_mint, validate_system_program,
+};
 
 use crate::constants::{MAX_DEPOSIT_SATS, MAX_FEE_BPS, MIN_DEPOSIT_SATS};
 use crate::error::UTXOpiaError;
@@ -88,8 +90,6 @@ pub fn process_initialize(
     let accounts = InitializeAccounts::from_accounts(accounts)?;
     let ix_data = InitializeData::from_bytes(data)?;
 
-    // Validate zkbtc_mint is owned by Token-2022
-    validate_token_owner(accounts.zkbtc_mint)?;
     validate_system_program(accounts.system_program)?;
 
     // Verify pool_state PDA
@@ -98,6 +98,7 @@ pub fn process_initialize(
     if accounts.pool_state.key() != &expected_pool_pda {
         return Err(ProgramError::InvalidSeeds);
     }
+    validate_pool_controlled_zkbtc_mint(accounts.zkbtc_mint, accounts.pool_state.key())?;
 
     // Verify commitment_tree PDA
     let tree_index_bytes = 0u32.to_le_bytes();
