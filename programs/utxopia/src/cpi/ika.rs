@@ -1,9 +1,9 @@
 //! Ika dWallet `approve_message` CPI helper.
 //!
-//! Constructs the CPI instruction by hand against `pinocchio = 0.9` rather
-//! than depending on `ika-dwallet-pinocchio` (which pins `pinocchio ^0.10`
-//! and would conflict with our workspace). Source of truth for the byte
-//! layout, account ordering, and PDA seed: `docs/recon/2026-05-09-ika-sdk-brief.md`
+//! Constructs the CPI instruction by hand using the local Pinocchio
+//! compatibility layer rather than depending on `ika-dwallet-pinocchio`.
+//! Source of truth for the byte layout, account ordering, and PDA seed:
+//! `docs/recon/2026-05-09-ika-sdk-brief.md`
 //! (recon against `dwallet-labs/ika-pre-alpha` @ commit `3bd7945e012950e54fb4d0057b72a7d466556fc1`).
 //!
 //! Effect: this CPI causes the Ika program to create a `MessageApproval`
@@ -11,12 +11,10 @@
 //! pre-alpha) then asynchronously fills a `Sign` account with the resulting
 //! Schnorr/ECDSA signature.
 
+use crate::pinocchio_compat::{AccountInfo, ProgramError, Pubkey};
 use pinocchio::{
-    account_info::AccountInfo,
-    cpi::invoke_signed,
-    instruction::{AccountMeta, Instruction, Seed, Signer},
-    program_error::ProgramError,
-    pubkey::Pubkey,
+    cpi::{invoke_signed, Seed, Signer},
+    instruction::{InstructionAccount as AccountMeta, InstructionView as Instruction},
     ProgramResult,
 };
 
@@ -74,7 +72,7 @@ pub fn build_approve_message_ix_data(
 ///
 /// Order is fixed by the Ika program. The caller must pass `caller_program`
 /// and `cpi_authority` matching this UTXOpia program; the Ika program
-/// verifies the dWallet's `authority` field equals `cpi_authority.key()`.
+/// verifies the dWallet's `authority` field equals `cpi_authority.address()`.
 pub struct ApproveMessageAccounts<'a> {
     /// The DWalletCoordinator PDA on the Ika program (readonly).
     pub coordinator: &'a AccountInfo,
@@ -128,7 +126,7 @@ pub fn find_message_approval_pda_bump(
         payload[..2].copy_from_slice(&CURVE_SECP256K1_LE);
         payload[2] = parity;
         payload[3..].copy_from_slice(dwallet_xonly_pubkey);
-        let (pda, bump) = pinocchio::pubkey::find_program_address(
+        let (pda, bump) = crate::pinocchio_compat::find_program_address(
             &[
                 b"dwallet",
                 &payload[..32],
@@ -157,7 +155,7 @@ pub fn approve_message(
     message_approval_bump: u8,
     cpi_authority_bump: u8,
 ) -> ProgramResult {
-    if accounts.cpi_authority.key() == &Pubkey::default() {
+    if accounts.cpi_authority.address() == &Pubkey::default() {
         return Err(ProgramError::InvalidArgument);
     }
 
@@ -170,17 +168,17 @@ pub fn approve_message(
     );
 
     let metas = [
-        AccountMeta::readonly(accounts.coordinator.key()),
-        AccountMeta::writable(accounts.message_approval.key()),
-        AccountMeta::readonly(accounts.dwallet.key()),
-        AccountMeta::readonly(accounts.caller_program.key()),
-        AccountMeta::readonly_signer(accounts.cpi_authority.key()),
-        AccountMeta::writable_signer(accounts.payer.key()),
-        AccountMeta::readonly(accounts.system_program.key()),
+        AccountMeta::readonly(accounts.coordinator.address()),
+        AccountMeta::writable(accounts.message_approval.address()),
+        AccountMeta::readonly(accounts.dwallet.address()),
+        AccountMeta::readonly(accounts.caller_program.address()),
+        AccountMeta::readonly_signer(accounts.cpi_authority.address()),
+        AccountMeta::writable_signer(accounts.payer.address()),
+        AccountMeta::readonly(accounts.system_program.address()),
     ];
 
     let instruction = Instruction {
-        program_id: accounts.dwallet_program.key(),
+        program_id: accounts.dwallet_program.address(),
         accounts: &metas,
         data: &ix_data,
     };

@@ -43,3 +43,16 @@ fn rejects_when_paused() {
     let err = check_redemption_signing(pool, 0, 0).unwrap_err();
     assert_eq!(err, UTXOpiaError::PoolPaused.into());
 }
+
+#[test]
+fn bps_fee_has_one_unit_minimum_when_configured() {
+    assert_eq!(compute_bps_fee(1, 1), 1);
+    assert_eq!(compute_bps_fee(9_999, 1), 1);
+    assert_eq!(compute_bps_fee(10_000, 1), 1);
+}
+
+#[test]
+fn bps_fee_stays_zero_when_amount_or_rate_is_zero() {
+    assert_eq!(compute_bps_fee(0, 100), 0);
+    assert_eq!(compute_bps_fee(100, 0), 0);
+}

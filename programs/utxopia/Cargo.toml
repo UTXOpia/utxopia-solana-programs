@@ -28,10 +28,13 @@ devnet-regtest = ["devnet"]
 mainnet = []
 
 [dependencies]
-pinocchio = "0.9"
-pinocchio-system = "0.3"
-solana-bn254 = "~2.1"
-solana-poseidon = "~2.1"
+pinocchio = { version = "0.10", features = ["cpi"] }
+pinocchio-system = "0.5"
+solana-address = { version = "2.7", features = ["curve25519"] }
+solana-program-log = "1.2"
+ephemeral-rollups-pinocchio = { version = "0.16.2", features = ["delegation-actions"] }
+solana-bn254 = "~2.2"
+solana-poseidon = "~2.2"
 thiserror = "2.0"
 hex-literal = "0.4"
 # Real Poseidon for off-chain (cargo test/check) — SBF builds use the syscall instead

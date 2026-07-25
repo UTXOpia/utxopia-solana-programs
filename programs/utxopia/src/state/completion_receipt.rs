@@ -3,7 +3,7 @@
 //! Prevents duplicate redemption completion. PDA seeds = ["completion_receipt", btc_txid],
 //! so the account's existence proves this BTC txid was already used for a completion.
 
-use pinocchio::program_error::ProgramError;
+use crate::pinocchio_compat::ProgramError;
 
 /// Discriminator for CompletionReceipt account
 pub const COMPLETION_RECEIPT_DISCRIMINATOR: u8 = 0x08;

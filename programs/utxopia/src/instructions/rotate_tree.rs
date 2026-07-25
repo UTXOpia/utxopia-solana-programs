@@ -14,10 +14,8 @@
 //! 3. [signer]   Payer
 //! 4. []         System program
 
+use crate::pinocchio_compat::{find_program_address, AccountInfo, ProgramError, Pubkey};
 use pinocchio::{
-    account_info::AccountInfo,
-    program_error::ProgramError,
-    pubkey::{find_program_address, Pubkey},
     sysvars::{rent::Rent, Sysvar},
     ProgramResult,
 };
@@ -54,7 +52,7 @@ pub fn process_rotate_tree(
 
     // Read pool state
     let current_index = {
-        let pool_data = pool_state_info.try_borrow_data()?;
+        let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
 
         pool.active_tree_index()
@@ -64,16 +62,16 @@ pub fn process_rotate_tree(
     let current_index_bytes = current_index.to_le_bytes();
     let current_tree_seeds: &[&[u8]] = &[CommitmentTree::SEED_PREFIX, &current_index_bytes];
     let (expected_current_pda, _) = find_program_address(current_tree_seeds, program_id);
-    if current_tree_info.key() != &expected_current_pda {
+    if current_tree_info.address() != &expected_current_pda {
         return Err(ProgramError::InvalidSeeds);
     }
 
     // Verify current tree is full
     {
-        let tree_data = current_tree_info.try_borrow_data()?;
+        let tree_data = current_tree_info.try_borrow()?;
         let tree = CommitmentTree::from_bytes(&tree_data)?;
         if tree.next_index() < CommitmentTree::MAX_LEAVES {
-            pinocchio::msg!("UTXOpia: tree not full yet");
+            solana_program_log::log!("UTXOpia: tree not full yet");
             return Err(ProgramError::InvalidInstructionData);
         }
     }
@@ -83,7 +81,7 @@ pub fn process_rotate_tree(
     let new_index_bytes = new_index.to_le_bytes();
     let new_tree_seeds: &[&[u8]] = &[CommitmentTree::SEED_PREFIX, &new_index_bytes];
     let (expected_new_pda, new_bump) = find_program_address(new_tree_seeds, program_id);
-    if new_tree_info.key() != &expected_new_pda {
+    if new_tree_info.address() != &expected_new_pda {
         return Err(ProgramError::InvalidSeeds);
     }
 
@@ -108,7 +106,7 @@ pub fn process_rotate_tree(
 
     // Initialize new tree
     {
-        let mut tree_data = new_tree_info.try_borrow_mut_data()?;
+        let mut tree_data = new_tree_info.try_borrow_mut()?;
         let tree = CommitmentTree::init(&mut tree_data)?;
         tree.bump = new_bump;
         tree.set_tree_index(new_index); // bind for O(1) frozen-tree validation (f23)
@@ -116,11 +114,11 @@ pub fn process_rotate_tree(
 
     // Update pool state
     {
-        let mut pool_data = pool_state_info.try_borrow_mut_data()?;
+        let mut pool_data = pool_state_info.try_borrow_mut()?;
         let pool = PoolState::from_bytes_mut(&mut pool_data)?;
         pool.set_active_tree_index(new_index);
     }
 
-    pinocchio::msg!("UTXOpia: tree rotated permissionlessly");
+    solana_program_log::log!("UTXOpia: tree rotated permissionlessly");
     Ok(())
 }

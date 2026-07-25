@@ -3,11 +3,9 @@
 //! CRITICAL: These functions must be called BEFORE deserializing any account data.
 //! Without owner validation, attackers can pass fake accounts with crafted data.
 
+use crate::pinocchio_compat::{account_owner, AccountInfo, ProgramError, Pubkey};
 use pinocchio::{
-    account_info::AccountInfo,
-    instruction::{Seed, Signer},
-    program_error::ProgramError,
-    pubkey::Pubkey,
+    cpi::{Seed, Signer},
     ProgramResult,
 };
 
@@ -108,7 +106,7 @@ pub fn create_pda_account<'a>(
             }
             .invoke_signed(&signers)?;
         }
-        if pda_account.owner() != program_id {
+        if !pda_account.owned_by(program_id) {
             pinocchio_system::instructions::Assign {
                 account: pda_account,
                 owner: program_id,
@@ -170,7 +168,7 @@ pub fn validate_program_owner(
     account: &AccountInfo,
     program_id: &Pubkey,
 ) -> Result<(), ProgramError> {
-    let owner = account.owner();
+    let owner = account_owner(account);
     if owner != program_id {
         return Err(UTXOpiaError::InvalidAccountOwner.into());
     }
@@ -180,7 +178,7 @@ pub fn validate_program_owner(
 /// Validate that an account is owned by Token-2022 program
 #[inline(always)]
 pub fn validate_token_2022_owner(account: &AccountInfo) -> Result<(), ProgramError> {
-    if account.owner().as_ref() != TOKEN_2022_PROGRAM_ID {
+    if !account.owned_by(&Pubkey::new_from_array(TOKEN_2022_PROGRAM_ID)) {
         return Err(ProgramError::InvalidAccountOwner);
     }
     Ok(())
@@ -189,7 +187,7 @@ pub fn validate_token_2022_owner(account: &AccountInfo) -> Result<(), ProgramErr
 /// Validate that an account is owned by either Token or Token-2022 program
 #[inline(always)]
 pub fn validate_token_owner(account: &AccountInfo) -> Result<(), ProgramError> {
-    let owner = account.owner().as_ref();
+    let owner = account_owner(account).as_ref();
     if owner != TOKEN_2022_PROGRAM_ID && owner != TOKEN_PROGRAM_ID {
         return Err(ProgramError::InvalidAccountOwner);
     }
@@ -199,7 +197,7 @@ pub fn validate_token_owner(account: &AccountInfo) -> Result<(), ProgramError> {
 /// Validate that an account key matches the Token-2022 program ID
 #[inline(always)]
 pub fn validate_token_program_key(account: &AccountInfo) -> Result<(), ProgramError> {
-    if account.key().as_ref() != TOKEN_2022_PROGRAM_ID {
+    if account.address().as_ref() != TOKEN_2022_PROGRAM_ID {
         return Err(ProgramError::IncorrectProgramId);
     }
     Ok(())
@@ -208,7 +206,7 @@ pub fn validate_token_program_key(account: &AccountInfo) -> Result<(), ProgramEr
 /// Validate that an account key matches either Token or Token-2022 program ID
 #[inline(always)]
 pub fn validate_any_token_program_key(account: &AccountInfo) -> Result<(), ProgramError> {
-    let key = account.key().as_ref();
+    let key = account.address().as_ref();
     if key != TOKEN_2022_PROGRAM_ID && key != TOKEN_PROGRAM_ID {
         return Err(ProgramError::IncorrectProgramId);
     }
@@ -219,7 +217,7 @@ pub fn validate_any_token_program_key(account: &AccountInfo) -> Result<(), Progr
 #[inline(always)]
 pub fn validate_system_program(account: &AccountInfo) -> Result<(), ProgramError> {
     const SYSTEM_PROGRAM_ID: [u8; 32] = [0; 32];
-    if account.key().as_ref() != SYSTEM_PROGRAM_ID {
+    if account.address().as_ref() != SYSTEM_PROGRAM_ID {
         return Err(ProgramError::IncorrectProgramId);
     }
     Ok(())
@@ -244,7 +242,7 @@ pub fn validate_program_owners(
 /// Validate that an account is writable
 ///
 /// # Security
-/// This MUST be called before any `try_borrow_mut_data()` operation.
+/// This MUST be called before any `try_borrow_mut()` operation.
 /// Without this check, silent state corruption can occur if a read-only
 /// account is passed where a writable one is expected.
 #[inline(always)]
@@ -270,7 +268,7 @@ pub fn validate_token_mint(
     token_account: &AccountInfo,
     expected_mint: &Pubkey,
 ) -> Result<(), ProgramError> {
-    let data = token_account.try_borrow_data()?;
+    let data = token_account.try_borrow()?;
     if data.len() < 32 {
         return Err(UTXOpiaError::InvalidAccountData.into());
     }
@@ -295,7 +293,7 @@ pub fn validate_accounts_different(
     account1: &AccountInfo,
     account2: &AccountInfo,
 ) -> Result<(), ProgramError> {
-    if account1.key() == account2.key() {
+    if account1.address() == account2.address() {
         return Err(ProgramError::InvalidArgument);
     }
     Ok(())
@@ -310,7 +308,7 @@ pub fn validate_initialized(
     account: &AccountInfo,
     expected_discriminator: u8,
 ) -> Result<(), ProgramError> {
-    let data = account.try_borrow_data()?;
+    let data = account.try_borrow()?;
     if data.is_empty() || data[0] != expected_discriminator {
         return Err(UTXOpiaError::NotInitialized.into());
     }
@@ -326,7 +324,7 @@ pub fn validate_not_initialized(
     account: &AccountInfo,
     discriminator: u8,
 ) -> Result<(), ProgramError> {
-    let data = account.try_borrow_data()?;
+    let data = account.try_borrow()?;
     if !data.is_empty() && data[0] == discriminator {
         return Err(UTXOpiaError::AlreadyInitialized.into());
     }
@@ -348,7 +346,7 @@ pub fn close_account_securely(
 ) -> Result<(), ProgramError> {
     // Mark as closed with special discriminator
     {
-        let mut data = account.try_borrow_mut_data()?;
+        let mut data = account.try_borrow_mut()?;
         if !data.is_empty() {
             data[0] = 0xFF; // Closed account marker
                             // Zero remaining data for security
@@ -362,16 +360,14 @@ pub fn close_account_securely(
     let account_lamports = account.lamports();
     if account_lamports > 0 {
         // Subtract from source
-        unsafe {
-            *account.borrow_mut_lamports_unchecked() = 0;
-        }
+        account.set_lamports(0);
         // Add to destination
-        unsafe {
-            *destination.borrow_mut_lamports_unchecked() = destination
+        destination.set_lamports(
+            destination
                 .lamports()
                 .checked_add(account_lamports)
-                .ok_or(ProgramError::ArithmeticOverflow)?;
-        }
+                .ok_or(ProgramError::ArithmeticOverflow)?,
+        );
     }
 
     Ok(())
@@ -383,14 +379,14 @@ pub fn validate_active_tree_pda(
     program_id: &Pubkey,
     active_index: u32,
 ) -> Result<(), ProgramError> {
+    use crate::pinocchio_compat::find_program_address;
     use crate::state::CommitmentTree;
-    use pinocchio::pubkey::find_program_address;
 
     let index_bytes = active_index.to_le_bytes();
     let indexed_seeds: &[&[u8]] = &[CommitmentTree::SEED_PREFIX, &index_bytes];
     let (expected_pda, _) = find_program_address(indexed_seeds, program_id);
 
-    if tree_account.key() != &expected_pda {
+    if tree_account.address() != &expected_pda {
         return Err(ProgramError::InvalidSeeds);
     }
 
@@ -407,12 +403,12 @@ pub fn validate_frozen_tree(
     active_index: u32,
     expected_root: &[u8; 32],
 ) -> Result<bool, ProgramError> {
+    use crate::pinocchio_compat::find_program_address;
     use crate::state::{CommitmentTree, COMMITMENT_TREE_DISCRIMINATOR};
-    use pinocchio::pubkey::find_program_address;
 
     validate_program_owner(tree_account, program_id)?;
 
-    let tree_data = tree_account.try_borrow_data()?;
+    let tree_data = tree_account.try_borrow()?;
     if tree_data.is_empty() || tree_data[0] != COMMITMENT_TREE_DISCRIMINATOR {
         return Err(ProgramError::InvalidAccountData);
     }
@@ -432,7 +428,7 @@ pub fn validate_frozen_tree(
     let idx_bytes = idx.to_le_bytes();
     let seeds: &[&[u8]] = &[CommitmentTree::SEED_PREFIX, &idx_bytes];
     let (pda, _) = find_program_address(seeds, program_id);
-    if tree_account.key() != &pda {
+    if tree_account.address() != &pda {
         return Err(ProgramError::InvalidSeeds);
     }
     Ok(tree.is_valid_root(expected_root))

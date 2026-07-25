@@ -9,7 +9,7 @@
 //! 3. Closed by complete_redemption after BTC tx is confirmed (reclaim rent)
 //! 4. Change output in withdrawal tx creates a new UTXO PDA (Unspent)
 
-use pinocchio::program_error::ProgramError;
+use crate::pinocchio_compat::ProgramError;
 
 /// Discriminator for UtxoRecord account
 pub const UTXO_RECORD_DISCRIMINATOR: u8 = 0x09;

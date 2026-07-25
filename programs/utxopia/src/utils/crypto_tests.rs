@@ -87,3 +87,45 @@ fn reduce_to_field_exact_is_true_modular_reduction() {
     canonical[31] = 0xAB;
     assert_eq!(reduce_to_field_exact(&canonical), canonical);
 }
+
+#[test]
+fn domain_bound_params_separate_public_and_institution_pools() {
+    let program_id = crate::pinocchio_compat::Pubkey::new_from_array([0x11; 32]);
+    let pool_state = crate::pinocchio_compat::Pubkey::new_from_array([0x22; 32]);
+    let operation_hash = compute_bound_params_hash_private_transfer(103, &[0u8; 32]);
+
+    let public_separator = compute_domain_separator(103, &program_id, &pool_state, false);
+    let institution_separator = compute_domain_separator(103, &program_id, &pool_state, true);
+    assert_ne!(public_separator, institution_separator);
+
+    let public =
+        bind_bound_params_to_domain(&operation_hash, 103, &program_id, &pool_state, false).unwrap();
+    let institution =
+        bind_bound_params_to_domain(&operation_hash, 103, &program_id, &pool_state, true).unwrap();
+    assert_ne!(public, institution);
+    let other_program = crate::pinocchio_compat::Pubkey::new_from_array([0x33; 32]);
+    let other_pool = crate::pinocchio_compat::Pubkey::new_from_array([0x44; 32]);
+    assert_ne!(
+        public,
+        bind_bound_params_to_domain(&operation_hash, 103, &other_program, &pool_state, false)
+            .unwrap()
+    );
+    assert_ne!(
+        public,
+        bind_bound_params_to_domain(&operation_hash, 103, &program_id, &other_pool, false).unwrap()
+    );
+
+    let separator_hex: String = public_separator
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    let bound_hex: String = public.iter().map(|b| format!("{:02x}", b)).collect();
+    assert_eq!(
+        separator_hex,
+        "2b76ed47e643d671f5c01988008f8d4012b8abcb14fc937562a56bc957467696"
+    );
+    assert_eq!(
+        bound_hex,
+        "1f8e124663a84237000a031cbc25f4721756dab3f43d10e78a4ebac49d0c7fdb"
+    );
+}

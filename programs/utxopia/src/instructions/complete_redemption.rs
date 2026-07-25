@@ -11,10 +11,8 @@
 //! - Change output creates a new UTXO PDA if pool_script matches
 //! - Consumed UTXO PDAs (Reserved at mark_processing) are closed to reclaim rent
 
+use crate::pinocchio_compat::{find_program_address, AccountInfo, ProgramError, Pubkey};
 use pinocchio::{
-    account_info::AccountInfo,
-    program_error::ProgramError,
-    pubkey::{find_program_address, Pubkey},
     sysvars::{clock::Clock, rent::Rent, Sysvar},
     ProgramResult,
 };
@@ -130,8 +128,17 @@ pub(crate) fn redemption_outputs_within_policy(
 ) -> bool {
     let mut change_outputs = 0u32;
     for output in parsed_tx.outputs() {
+        // Apply OP_RETURN policy before recipient matching. Otherwise a request
+        // that stored an OP_RETURN script could treat a value-burning output as
+        // a valid payout.
+        if output.is_op_return() {
+            if output.value != 0 {
+                return false;
+            }
+            continue;
+        }
         if output.script_pubkey == recipient_script {
-            continue; // recipient payout
+            continue;
         }
         if !pool_script.is_empty() && output.script_pubkey == pool_script {
             // Change back to the pool. Only ONE change output is tracked downstream
@@ -140,15 +147,6 @@ pub(crate) fn redemption_outputs_within_policy(
             // would be silently untracked and stranded.
             change_outputs += 1;
             if change_outputs > 1 {
-                return false;
-            }
-            continue;
-        }
-        if output.is_op_return() {
-            // Unspendable marker. Bitcoin permits non-zero-value OP_RETURN outputs, which
-            // would destroy real pool BTC without being captured in burn accounting, leaving
-            // the pool undercollateralized. Only a zero-value marker is policy-compliant.
-            if output.value != 0 {
                 return false;
             }
             continue;
@@ -270,9 +268,9 @@ pub fn process_complete_redemption(
     validate_program_owner(pool_state_info, program_id)?;
     validate_program_owner(redemption_info, program_id)?;
     validate_account_writable(completion_receipt_info)?;
-    let btc_lc_id: &Pubkey = &crate::constants::BTC_LIGHT_CLIENT_PROGRAM_ID;
-    validate_program_owner(verified_tx_info, btc_lc_id)?;
-    validate_program_owner(light_client_info, btc_lc_id)?;
+    let btc_lc_id = Pubkey::new_from_array(crate::constants::BTC_LIGHT_CLIENT_PROGRAM_ID);
+    validate_program_owner(verified_tx_info, &btc_lc_id)?;
+    validate_program_owner(light_client_info, &btc_lc_id)?;
     validate_token_owner(zkbtc_mint)?;
     validate_token_owner(pool_vault)?;
     validate_any_token_program_key(token_program)?;
@@ -285,10 +283,10 @@ pub fn process_complete_redemption(
 
     // Validate authority and get pool state
     let (pool_bump, pending_redemptions) = {
-        let pool_data = pool_state_info.try_borrow_data()?;
+        let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
 
-        if authority.key().as_ref() != pool.authority {
+        if authority.address().as_ref() != pool.authority {
             return Err(UTXOpiaError::Unauthorized.into());
         }
 
@@ -301,7 +299,7 @@ pub fn process_complete_redemption(
     if ix_data.pool_script_len > 0 {
         validate_program_owner(pool_config_info, program_id)?;
 
-        let config_data = pool_config_info.try_borrow_data()?;
+        let config_data = pool_config_info.try_borrow()?;
         // Reject any program-owned account that is not a valid PoolConfig — otherwise the
         // caller-supplied pool_script would be trusted unvalidated (change-skim vector).
         if config_data.len() < PoolConfig::LEN || config_data[0] != POOL_CONFIG_DISCRIMINATOR {
@@ -315,7 +313,7 @@ pub fn process_complete_redemption(
         }
         let ix_script = &ix_data.pool_script[..ix_data.pool_script_len as usize];
         if ix_script != on_chain_script {
-            pinocchio::msg!("UTXOpia: pool_script mismatch (ix data vs on-chain)");
+            solana_program_log::log!("UTXOpia: pool_script mismatch (ix data vs on-chain)");
             return Err(UTXOpiaError::PoolScriptMismatch.into());
         }
     }
@@ -324,15 +322,15 @@ pub fn process_complete_redemption(
     {
         let receipt_seeds: &[&[u8]] = &[CompletionReceipt::SEED, &ix_data.btc_txid];
         let (expected_receipt_pda, receipt_bump) = find_program_address(receipt_seeds, program_id);
-        if completion_receipt_info.key() != &expected_receipt_pda {
+        if completion_receipt_info.address() != &expected_receipt_pda {
             return Err(ProgramError::InvalidSeeds);
         }
 
         // Check if this BTC txid was already used for a completion
         {
-            let receipt_data = completion_receipt_info.try_borrow_data()?;
+            let receipt_data = completion_receipt_info.try_borrow()?;
             if !receipt_data.is_empty() && receipt_data[0] == COMPLETION_RECEIPT_DISCRIMINATOR {
-                pinocchio::msg!("UTXOpia: BTC txid already used for completion");
+                solana_program_log::log!("UTXOpia: BTC txid already used for completion");
                 return Err(UTXOpiaError::DuplicateDeposit.into());
             }
         }
@@ -351,7 +349,7 @@ pub fn process_complete_redemption(
             signer_seeds,
         )?;
 
-        let mut receipt_data = completion_receipt_info.try_borrow_mut_data()?;
+        let mut receipt_data = completion_receipt_info.try_borrow_mut()?;
         CompletionReceipt::init(&mut receipt_data)?;
     }
 
@@ -365,8 +363,9 @@ pub fn process_complete_redemption(
         request_id,
         total_input_sats,
         reserved_count,
+        expected_token_id,
     ) = {
-        let redemption_data = redemption_info.try_borrow_data()?;
+        let redemption_data = redemption_info.try_borrow()?;
         let redemption = RedemptionRequest::from_bytes(&redemption_data)?;
 
         // Must be Processing: mark_processing reserves the UTXOs and sets total_input_sats.
@@ -384,6 +383,8 @@ pub fn process_complete_redemption(
 
         let mut req_key = [0u8; 32];
         req_key.copy_from_slice(&redemption.requester);
+        let mut token_id = [0u8; 32];
+        token_id.copy_from_slice(redemption.token_id());
 
         (
             redemption.amount_sats(),
@@ -394,12 +395,13 @@ pub fn process_complete_redemption(
             redemption.request_id(),
             redemption.total_input_sats(),
             redemption.reserved_count() as usize,
+            token_id,
         )
     };
 
     // --- VerifiedTransaction PDA check ---
     let (block_height, vt_epoch) = {
-        let vt_data = verified_tx_info.try_borrow_data()?;
+        let vt_data = verified_tx_info.try_borrow()?;
         let vt = VerifiedTransactionView::from_bytes(&vt_data)?;
 
         // Verify txid matches
@@ -410,19 +412,19 @@ pub fn process_complete_redemption(
         // Pin both light-client accounts to their canonical PDAs (owner+disc alone would
         // accept any btc-light-client-owned account with a forged payout confirmation).
         crate::state::assert_canonical_verified_tx(
-            verified_tx_info.key(),
+            verified_tx_info.address(),
             vt.block_hash(),
             vt.txid(),
-            btc_lc_id,
+            &btc_lc_id,
         )?;
 
         (vt.block_height() as u64, vt.reinit_epoch())
     };
-    crate::state::assert_canonical_light_client(light_client_info.key(), btc_lc_id)?;
+    crate::state::assert_canonical_light_client(light_client_info.address(), &btc_lc_id)?;
 
     // Verify sufficient confirmations
     {
-        let lc_data = light_client_info.try_borrow_data()?;
+        let lc_data = light_client_info.try_borrow()?;
         // Reject proofs from a prior chain instance: after a light-client reinitialization the
         // singleton PDA still passes the canonical check, but stale proofs carry an older epoch.
         if vt_epoch != crate::state::light_client_reinit_epoch(&lc_data)? {
@@ -442,7 +444,7 @@ pub fn process_complete_redemption(
     // Read raw transaction from ChadBuffer
     crate::utils::chadbuffer::validate_chadbuffer_owner(tx_buffer_info)?;
     let buffer_data = tx_buffer_info
-        .try_borrow_data()
+        .try_borrow()
         .map_err(|_| UTXOpiaError::RedemptionSpvFailed)?;
     let raw_tx = read_transaction_from_buffer(&buffer_data, ix_data.tx_size as usize)?;
 
@@ -540,7 +542,7 @@ pub fn process_complete_redemption(
     // we still gate so a compromised backend cannot drain funds via forged
     // sighashes before the Ika signing approval.
     {
-        let pool_data = pool_state_info.try_borrow_data()?;
+        let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
         check_redemption_signing(pool, amount_sats, miner_fee)?;
     }
@@ -577,7 +579,7 @@ pub fn process_complete_redemption(
             let utxo_seeds: &[&[u8]] = &[UtxoRecord::SEED, &ix_data.btc_txid, &vout_le];
             let (expected_utxo_pda, utxo_bump) = find_program_address(utxo_seeds, program_id);
 
-            if change_utxo_info.key() != &expected_utxo_pda {
+            if change_utxo_info.address() != &expected_utxo_pda {
                 return Err(ProgramError::InvalidSeeds);
             }
 
@@ -602,7 +604,7 @@ pub fn process_complete_redemption(
             )?;
 
             {
-                let mut utxo_data = change_utxo_info.try_borrow_mut_data()?;
+                let mut utxo_data = change_utxo_info.try_borrow_mut()?;
                 let utxo = UtxoRecord::init(&mut utxo_data)?;
                 utxo.set_txid(&ix_data.btc_txid);
                 utxo.set_vout(change_vout);
@@ -651,13 +653,16 @@ pub fn process_complete_redemption(
     validate_program_owner(token_config_info, program_id)?;
     validate_account_writable(token_config_info)?;
     {
-        let tc_data = token_config_info.try_borrow_data()?;
+        let tc_data = token_config_info.try_borrow()?;
         let tc = TokenConfig::from_bytes(&tc_data)?;
-        let (expected_tc, _) =
-            find_program_address(&[TokenConfig::SEED, zkbtc_mint.key().as_ref()], program_id);
-        if token_config_info.key() != &expected_tc
-            || tc.mint != *zkbtc_mint.key()
-            || tc.vault != *pool_vault.key()
+        let (expected_tc, _) = find_program_address(
+            &[TokenConfig::SEED, zkbtc_mint.address().as_ref()],
+            program_id,
+        );
+        if token_config_info.address() != &expected_tc
+            || tc.mint.as_ref() != zkbtc_mint.address().as_ref()
+            || tc.vault.as_ref() != pool_vault.address().as_ref()
+            || tc.token_id != expected_token_id
         {
             return Err(UTXOpiaError::InvalidTokenConfig.into());
         }
@@ -666,7 +671,7 @@ pub fn process_complete_redemption(
     // Reservation key for THIS redemption's unique PDA (audit f26): bind consumed UTXOs to the
     // PDA, not the caller-chosen nonce two users can collide on.
     let reservation_key =
-        crate::utils::validation::redemption_reservation_key(redemption_info.key());
+        crate::utils::validation::redemption_reservation_key(redemption_info.address());
 
     if consumed_count > 0 {
         for i in 0..consumed_count {
@@ -676,7 +681,7 @@ pub fn process_complete_redemption(
 
             // Validate it's a UTXO record in Reserved status
             {
-                let utxo_data = consumed_utxo_info.try_borrow_data()?;
+                let utxo_data = consumed_utxo_info.try_borrow()?;
                 if utxo_data.is_empty() || utxo_data[0] != UTXO_RECORD_DISCRIMINATOR {
                     return Err(UTXOpiaError::InvalidUtxo.into());
                 }
@@ -719,7 +724,7 @@ pub fn process_complete_redemption(
     // --- Update pool state with exact accounting ---
     let clock = Clock::get()?;
     {
-        let mut pool_data = pool_state_info.try_borrow_mut_data()?;
+        let mut pool_data = pool_state_info.try_borrow_mut()?;
         let pool = PoolState::from_bytes_mut(&mut pool_data)?;
 
         // total_burned = actual_received + miner_fee (BTC that left the pool)
@@ -739,7 +744,7 @@ pub fn process_complete_redemption(
         pool.set_last_update(clock.unix_timestamp);
     }
     if protocol_revenue > 0 {
-        let mut tc_data = token_config_info.try_borrow_mut_data()?;
+        let mut tc_data = token_config_info.try_borrow_mut()?;
         let tc = TokenConfig::from_bytes_mut(&mut tc_data)?;
         // The retained BTC backs zkBTC already left in the pool vault. Credit the existing
         // claim_fees path so redemption revenue is realizable instead of trapped forever.
@@ -762,6 +767,6 @@ pub fn process_complete_redemption(
     // --- Close RedemptionRequest PDA ---
     close_account_securely(redemption_info, rent_recipient)?;
 
-    pinocchio::msg!("UTXOpia: redemption completed");
+    solana_program_log::log!("UTXOpia: redemption completed");
     Ok(())
 }

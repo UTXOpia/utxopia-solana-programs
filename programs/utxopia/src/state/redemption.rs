@@ -1,6 +1,6 @@
 //! Redemption request account (zero-copy)
 
-use pinocchio::program_error::ProgramError;
+use crate::pinocchio_compat::ProgramError;
 
 use crate::constants::MAX_BTC_SCRIPT_LEN;
 

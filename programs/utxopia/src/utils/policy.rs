@@ -17,7 +17,7 @@
 //!   the SPV-verified broadcast tx.
 //! - mempool already-paid check: requires Esplora HTTP.
 
-use pinocchio::program_error::ProgramError;
+use crate::pinocchio_compat::ProgramError;
 
 use crate::error::UTXOpiaError;
 use crate::state::PoolState;
@@ -28,6 +28,17 @@ pub const MAX_REDEMPTION_AMOUNT_SATS: u64 = 100_000_000;
 
 /// Maximum allowed miner fee per signing operation, in satoshis.
 pub const MAX_MINER_FEE_SATS: u64 = 50_000;
+
+/// Compute a basis-point fee, charging at least one base unit whenever both
+/// the amount and configured rate are non-zero.
+pub fn compute_bps_fee(amount: u64, fee_bps: u16) -> u64 {
+    let fee = (amount as u128 * fee_bps as u128 / 10_000) as u64;
+    if fee == 0 && amount > 0 && fee_bps > 0 {
+        1
+    } else {
+        fee
+    }
+}
 
 /// Run all pre-CPI signing policy checks.
 ///

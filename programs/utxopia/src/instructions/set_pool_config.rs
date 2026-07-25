@@ -20,10 +20,8 @@
 //! 2. authority        (signer)
 //! 3. system_program   (read)
 
+use crate::pinocchio_compat::{find_program_address, AccountInfo, ProgramError, Pubkey};
 use pinocchio::{
-    account_info::AccountInfo,
-    program_error::ProgramError,
-    pubkey::{find_program_address, Pubkey},
     sysvars::{rent::Rent, Sysvar},
     ProgramResult,
 };
@@ -59,9 +57,9 @@ pub fn process_set_pool_config(
 
     // Validate authority matches pool
     {
-        let pool_data = pool_state_info.try_borrow_data()?;
+        let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
-        if authority.key().as_ref() != pool.authority {
+        if authority.address().as_ref() != pool.authority {
             return Err(UTXOpiaError::Unauthorized.into());
         }
     }
@@ -99,11 +97,12 @@ pub fn process_set_pool_config(
     if ika_dwallet == [0u8; 32] || ika_dwallet_xonly == [0u8; 32] {
         return Err(ProgramError::InvalidInstructionData);
     }
+    validate_pool_script_matches_ika_xonly(pool_script, &ika_dwallet_xonly)?;
 
     // Verify PoolConfig PDA
     let config_seeds: &[&[u8]] = &[PoolConfig::SEED];
     let (expected_pda, config_bump) = find_program_address(config_seeds, program_id);
-    if pool_config_info.key() != &expected_pda {
+    if pool_config_info.address() != &expected_pda {
         return Err(ProgramError::InvalidSeeds);
     }
 
@@ -123,7 +122,7 @@ pub fn process_set_pool_config(
             signer_seeds,
         )?;
 
-        let mut config_data = pool_config_info.try_borrow_mut_data()?;
+        let mut config_data = pool_config_info.try_borrow_mut()?;
         let config = PoolConfig::init(&mut config_data)?;
         apply_fields(
             config,
@@ -138,7 +137,7 @@ pub fn process_set_pool_config(
         validate_program_owner(pool_config_info, program_id)?;
 
         if config_data_len >= 1 {
-            let config_data = pool_config_info.try_borrow_data()?;
+            let config_data = pool_config_info.try_borrow()?;
             if config_data[0] == POOL_CONFIG_DISCRIMINATOR {
                 return Err(UTXOpiaError::AlreadyInitialized.into());
             }
@@ -160,7 +159,7 @@ pub fn process_set_pool_config(
             pool_config_info.resize(PoolConfig::LEN)?;
         }
 
-        let mut config_data = pool_config_info.try_borrow_mut_data()?;
+        let mut config_data = pool_config_info.try_borrow_mut()?;
         let config = PoolConfig::init(&mut config_data)?;
         apply_fields(
             config,
@@ -171,7 +170,7 @@ pub fn process_set_pool_config(
         )?;
     }
 
-    pinocchio::msg!("UTXOpia: pool config initialized");
+    solana_program_log::log!("UTXOpia: pool config initialized");
     Ok(())
 }
 
@@ -188,4 +187,47 @@ fn apply_fields(
     config.set_ika_dwallet_xonly_pubkey(ika_dwallet_xonly);
     config.set_cpi_authority_bump(cpi_authority_bump);
     Ok(())
+}
+
+#[inline]
+fn validate_pool_script_matches_ika_xonly(
+    pool_script: &[u8],
+    ika_dwallet_xonly: &[u8; 32],
+) -> ProgramResult {
+    if pool_script.len() != PoolConfig::MAX_SCRIPT_LEN
+        || pool_script[0] != 0x51
+        || pool_script[1] != 0x20
+        || &pool_script[2..34] != ika_dwallet_xonly
+    {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_canonical_p2tr_script_for_ika_xonly_key() {
+        let key = [7u8; 32];
+        let mut script = [0u8; 34];
+        script[0] = 0x51;
+        script[1] = 0x20;
+        script[2..34].copy_from_slice(&key);
+
+        assert!(validate_pool_script_matches_ika_xonly(&script, &key).is_ok());
+    }
+
+    #[test]
+    fn rejects_pool_script_not_bound_to_ika_xonly_key() {
+        let key = [7u8; 32];
+        let mut script = [0u8; 34];
+        script[0] = 0x51;
+        script[1] = 0x20;
+        script[2..34].copy_from_slice(&[8u8; 32]);
+
+        assert!(validate_pool_script_matches_ika_xonly(&script, &key).is_err());
+        assert!(validate_pool_script_matches_ika_xonly(&script[..33], &key).is_err());
+    }
 }

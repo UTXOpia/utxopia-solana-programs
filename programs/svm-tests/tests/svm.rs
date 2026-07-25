@@ -248,8 +248,7 @@ fn verify_tx_call(
     let (block_header, _) = Pubkey::find_program_address(&[b"block", &block_hash], pid);
     let (height_index, _) =
         Pubkey::find_program_address(&[b"height_index", &block_height.to_le_bytes()], pid);
-    let (verified_tx, _) =
-        Pubkey::find_program_address(&[b"verified_tx", &block_hash, &txid], pid);
+    let (verified_tx, _) = Pubkey::find_program_address(&[b"verified_tx", &block_hash, &txid], pid);
     let light_client = Pubkey::new_unique();
     let tx_buffer = Pubkey::new_unique();
     let payer = Pubkey::new_unique();
@@ -282,9 +281,18 @@ fn verify_tx_call(
 
     let accounts = vec![
         (verified_tx, acct(0, vec![], SYSTEM_ID)),
-        (light_client, acct(1, light_client_blob(finalized_height), *pid)),
-        (block_header, acct(1, block_header_blob(&block_hash, &txid, block_height), *pid)),
-        (height_index, acct(1, height_index_blob(&block_hash, block_height), *pid)),
+        (
+            light_client,
+            acct(1, light_client_blob(finalized_height), *pid),
+        ),
+        (
+            block_header,
+            acct(1, block_header_blob(&block_hash, &txid, block_height), *pid),
+        ),
+        (
+            height_index,
+            acct(1, height_index_blob(&block_hash, block_height), *pid),
+        ),
         (tx_buffer, acct(1, buffer, SYSTEM_ID)),
         (payer, acct(10_000_000_000, vec![], SYSTEM_ID)),
         (system_key, system_acct),
@@ -381,6 +389,7 @@ const POOL_DISC: u8 = 0x01;
 const POOL_LEN: usize = 332;
 
 const POOL_OFF_FLAGS: usize = 2;
+const POOL_OFF_AUTHORITY: usize = 4;
 const POOL_OFF_AUDITOR: usize = 264;
 const POOL_OFF_AUDITOR_VPK: usize = 296;
 
@@ -432,10 +441,7 @@ fn set_auditor_frozen_call(
                 *pid,
             ),
         ),
-        (
-            *auditor_key,
-            acct(1_000_000, vec![], SYSTEM_ID),
-        ),
+        (*auditor_key, acct(1_000_000, vec![], SYSTEM_ID)),
     ];
 
     (ix, accounts)
@@ -482,13 +488,8 @@ fn set_auditor_frozen_fails_with_wrong_auditor() {
     let real_auditor: [u8; 32] = [0xAAu8; 32];
     let impersonator = Pubkey::new_unique(); // key does NOT match real_auditor
 
-    let (ix, accounts) = set_auditor_frozen_call(
-        &pid,
-        &impersonator,
-        FLAG_PERMISSIONED,
-        &real_auditor,
-        1u8,
-    );
+    let (ix, accounts) =
+        set_auditor_frozen_call(&pid, &impersonator, FLAG_PERMISSIONED, &real_auditor, 1u8);
     let res = mollusk.process_instruction(&ix, &accounts);
     assert!(
         is_custom(&res.program_result, UNAUTHORIZED),
@@ -614,6 +615,87 @@ fn set_auditor_viewing_pubkey_fails_with_wrong_auditor() {
     );
 }
 
+// ---- rotate_auditor (disc 35) ----------------------------------------------
+
+fn rotate_auditor_call(
+    pid: &Pubkey,
+    authority: &Pubkey,
+    pool_authority: &[u8; 32],
+    new_auditor: &[u8; 32],
+    new_vpk: &[u8; 32],
+) -> (Instruction, Vec<(Pubkey, Account)>) {
+    let pool_state = Pubkey::new_unique();
+    let mut pool_data = pool_state_blob(
+        FLAG_PERMISSIONED | FLAG_AUDITOR_FROZEN,
+        &[0x11; 32],
+        &[0x22; 32],
+    );
+    pool_data[POOL_OFF_AUTHORITY..POOL_OFF_AUTHORITY + 32].copy_from_slice(pool_authority);
+
+    let mut data = vec![35u8];
+    data.extend_from_slice(new_auditor);
+    data.extend_from_slice(new_vpk);
+    let ix = Instruction::new_with_bytes(
+        *pid,
+        &data,
+        vec![
+            AccountMeta::new(pool_state, false),
+            AccountMeta::new_readonly(*authority, true),
+        ],
+    );
+    let accounts = vec![
+        (pool_state, acct(1_000_000, pool_data, *pid)),
+        (*authority, acct(1_000_000, vec![], SYSTEM_ID)),
+    ];
+    (ix, accounts)
+}
+
+#[test]
+fn rotate_auditor_atomically_recovers_permissioned_pool() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "utxopia");
+    let authority = Pubkey::new_unique();
+    let new_auditor = [0x33; 32];
+    let new_vpk = [0x44; 32];
+    let (ix, accounts) = rotate_auditor_call(
+        &pid,
+        &authority,
+        &authority.to_bytes(),
+        &new_auditor,
+        &new_vpk,
+    );
+
+    let res = mollusk.process_instruction(&ix, &accounts);
+    assert!(
+        res.program_result.is_ok(),
+        "rotation failed: {:?}",
+        res.program_result
+    );
+    let pool = res.get_account(&accounts[0].0).unwrap();
+    assert_eq!(
+        &pool.data[POOL_OFF_AUDITOR..POOL_OFF_AUDITOR + 32],
+        &new_auditor
+    );
+    assert_eq!(
+        &pool.data[POOL_OFF_AUDITOR_VPK..POOL_OFF_AUDITOR_VPK + 32],
+        &new_vpk
+    );
+    assert_eq!(pool.data[POOL_OFF_FLAGS] & FLAG_AUDITOR_FROZEN, 0);
+}
+
+#[test]
+fn rotate_auditor_rejects_wrong_authority() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "utxopia");
+    let authority = Pubkey::new_unique();
+    let (ix, accounts) =
+        rotate_auditor_call(&pid, &authority, &[0x55; 32], &[0x33; 32], &[0x44; 32]);
+    let res = mollusk.process_instruction(&ix, &accounts);
+    assert!(is_custom(&res.program_result, UNAUTHORIZED));
+}
+
 // ---- shield on permissioned pool (disc 12) — must return NotPermissioned ----
 
 /// Build a minimal public shield (disc 12) call against a permissioned pool.
@@ -635,12 +717,12 @@ fn shield_on_permissioned_pool_call(
     let commitment_tree = Pubkey::new_unique();
 
     let metas = vec![
-        AccountMeta::new_readonly(user, true),      // 0 user signer
-        AccountMeta::new(user_token_account, false), // 1
+        AccountMeta::new_readonly(user, true),        // 0 user signer
+        AccountMeta::new(user_token_account, false),  // 1
         AccountMeta::new_readonly(pool_state, false), // 2 pool state
-        AccountMeta::new(token_config, false),       // 3
-        AccountMeta::new(vault, false),              // 4
-        AccountMeta::new(commitment_tree, false),    // 5
+        AccountMeta::new(token_config, false),        // 3
+        AccountMeta::new(vault, false),               // 4
+        AccountMeta::new(commitment_tree, false),     // 5
         AccountMeta::new_readonly(token_2022, false), // 6
     ];
 
@@ -651,13 +733,23 @@ fn shield_on_permissioned_pool_call(
 
     let accounts = vec![
         (user, acct(1_000_000, vec![], SYSTEM_ID)),
-        (user_token_account, acct(1, vec![0u8; 165], Pubkey::new_from_array(TOKEN_2022))),
+        (
+            user_token_account,
+            acct(1, vec![0u8; 165], Pubkey::new_from_array(TOKEN_2022)),
+        ),
         (
             pool_state,
-            acct(1_000_000, pool_state_blob(FLAG_PERMISSIONED, auditor_bytes, &[0u8; 32]), *pid),
+            acct(
+                1_000_000,
+                pool_state_blob(FLAG_PERMISSIONED, auditor_bytes, &[0u8; 32]),
+                *pid,
+            ),
         ),
         (token_config, acct(1, vec![], *pid)),
-        (vault, acct(1, vec![0u8; 165], Pubkey::new_from_array(TOKEN_2022))),
+        (
+            vault,
+            acct(1, vec![0u8; 165], Pubkey::new_from_array(TOKEN_2022)),
+        ),
         (commitment_tree, acct(1, vec![], *pid)),
         (token_2022, acct(1, vec![], SYSTEM_ID)),
     ];
@@ -703,13 +795,13 @@ fn shield_permissioned_call(
     let commitment_tree = Pubkey::new_unique();
 
     let metas = vec![
-        AccountMeta::new_readonly(*user, true),        // 0 user signer
-        AccountMeta::new(user_token_account, false),    // 1
-        AccountMeta::new_readonly(pool_state, false),   // 2 pool state
-        AccountMeta::new(token_config, false),          // 3
-        AccountMeta::new(vault, false),                 // 4
-        AccountMeta::new(commitment_tree, false),       // 5
-        AccountMeta::new_readonly(token_2022, false),   // 6
+        AccountMeta::new_readonly(*user, true),       // 0 user signer
+        AccountMeta::new(user_token_account, false),  // 1
+        AccountMeta::new_readonly(pool_state, false), // 2 pool state
+        AccountMeta::new(token_config, false),        // 3
+        AccountMeta::new(vault, false),               // 4
+        AccountMeta::new(commitment_tree, false),     // 5
+        AccountMeta::new_readonly(token_2022, false), // 6
         AccountMeta::new_readonly(*auditor_signer, true), // 7 auditor signer
     ];
 
@@ -720,13 +812,23 @@ fn shield_permissioned_call(
 
     let accounts = vec![
         (*user, acct(1_000_000, vec![], SYSTEM_ID)),
-        (user_token_account, acct(1, vec![0u8; 165], Pubkey::new_from_array(TOKEN_2022))),
+        (
+            user_token_account,
+            acct(1, vec![0u8; 165], Pubkey::new_from_array(TOKEN_2022)),
+        ),
         (
             pool_state,
-            acct(1_000_000, pool_state_blob(pool_flags, pool_auditor, &[0u8; 32]), *pid),
+            acct(
+                1_000_000,
+                pool_state_blob(pool_flags, pool_auditor, &[0u8; 32]),
+                *pid,
+            ),
         ),
         (token_config, acct(1, vec![], *pid)),
-        (vault, acct(1, vec![0u8; 165], Pubkey::new_from_array(TOKEN_2022))),
+        (
+            vault,
+            acct(1, vec![0u8; 165], Pubkey::new_from_array(TOKEN_2022)),
+        ),
         (commitment_tree, acct(1, vec![], *pid)),
         (token_2022, acct(1, vec![], SYSTEM_ID)),
         (*auditor_signer, acct(1_000_000, vec![], SYSTEM_ID)),
@@ -769,13 +871,8 @@ fn shield_permissioned_gate_passes_with_correct_auditor() {
     let auditor = Pubkey::new_unique();
     let auditor_bytes: [u8; 32] = auditor.to_bytes();
 
-    let (ix, accounts) = shield_permissioned_call(
-        &pid,
-        &user,
-        &auditor,
-        &auditor_bytes,
-        FLAG_PERMISSIONED,
-    );
+    let (ix, accounts) =
+        shield_permissioned_call(&pid, &user, &auditor, &auditor_bytes, FLAG_PERMISSIONED);
     let res = mollusk.process_instruction(&ix, &accounts);
 
     // Gate errors must not appear — the permissioned gate has been cleared.
@@ -802,15 +899,10 @@ fn shield_permissioned_fails_with_wrong_auditor_key() {
 
     let user = Pubkey::new_unique();
     let real_auditor: [u8; 32] = [0xAAu8; 32]; // baked into pool state
-    let impersonator = Pubkey::new_unique();    // wrong key presented as signer
+    let impersonator = Pubkey::new_unique(); // wrong key presented as signer
 
-    let (ix, accounts) = shield_permissioned_call(
-        &pid,
-        &user,
-        &impersonator,
-        &real_auditor,
-        FLAG_PERMISSIONED,
-    );
+    let (ix, accounts) =
+        shield_permissioned_call(&pid, &user, &impersonator, &real_auditor, FLAG_PERMISSIONED);
     let res = mollusk.process_instruction(&ix, &accounts);
     assert!(
         is_custom(&res.program_result, UNAUTHORIZED),
@@ -862,7 +954,7 @@ fn shield_permissioned_fails_when_auditor_frozen() {
 /// Discriminator / layout constants (mirror the program's repr(C) structs).
 const LC_NETWORK_OFFSET: usize = 3; // BitcoinLightClient.network
 const LC_TIP_HEIGHT_OFFSET: usize = 136; // BitcoinLightClient.tip_height  [u8;8]
-// LC_FINALIZED_HEIGHT_OFFSET = 144 (already declared as the literal in light_client_blob)
+                                         // LC_FINALIZED_HEIGHT_OFFSET = 144 (already declared as the literal in light_client_blob)
 
 const BH_BLOCK_HASH_OFFSET: usize = 84; // BlockHeader.block_hash  [u8;32]
 const BH_HEIGHT_OFFSET: usize = 148; // BlockHeader.height      [u8;8]
@@ -877,8 +969,7 @@ fn lc_blob_for_extend(tip_height: u64, finalized_height: u64) -> Vec<u8> {
     d[0] = LC_DISC;
     d[LC_NETWORK_OFFSET] = NETWORK_REGTEST;
     // total_chainwork stays all-zero → any positive work beats it
-    d[LC_TIP_HEIGHT_OFFSET..LC_TIP_HEIGHT_OFFSET + 8]
-        .copy_from_slice(&tip_height.to_le_bytes());
+    d[LC_TIP_HEIGHT_OFFSET..LC_TIP_HEIGHT_OFFSET + 8].copy_from_slice(&tip_height.to_le_bytes());
     d[144..152].copy_from_slice(&finalized_height.to_le_bytes());
     // reinit_epoch = 0 (default); parent header must also carry 0
     d
@@ -936,10 +1027,8 @@ fn extend_blockchain_call(
     let (raw_header, new_block_hash) = make_raw_header(&parent_hash);
 
     // Derive PDAs using the same program_id the runtime will use
-    let (parent_pda, _) =
-        Pubkey::find_program_address(&[b"block", &parent_hash], pid);
-    let (block_pda, _) =
-        Pubkey::find_program_address(&[b"block", &new_block_hash], pid);
+    let (parent_pda, _) = Pubkey::find_program_address(&[b"block", &parent_hash], pid);
+    let (block_pda, _) = Pubkey::find_program_address(&[b"block", &new_block_hash], pid);
     let new_height = parent_height + 1;
     let (hi_pda, _) =
         Pubkey::find_program_address(&[b"height_index", &new_height.to_le_bytes()], pid);
@@ -970,12 +1059,12 @@ fn extend_blockchain_call(
 
     let accounts = vec![
         (light_client, acct(10_000_000_000, lc_data, *pid)),
-        (submitter,    acct(10_000_000_000, vec![], SYSTEM_ID)),
-        (system_key,   system_acct),
-        (parent_pda,   acct(1_000_000, parent_bh_data, *pid)),
+        (submitter, acct(10_000_000_000, vec![], SYSTEM_ID)),
+        (system_key, system_acct),
+        (parent_pda, acct(1_000_000, parent_bh_data, *pid)),
         // New block header and height_index start empty (will be created by the program)
-        (block_pda,    acct(0, vec![], SYSTEM_ID)),
-        (hi_pda,       acct(0, vec![], SYSTEM_ID)),
+        (block_pda, acct(0, vec![], SYSTEM_ID)),
+        (hi_pda, acct(0, vec![], SYSTEM_ID)),
     ];
 
     (ix, accounts)

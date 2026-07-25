@@ -2,7 +2,7 @@
 //!
 //! Stores Groth16 verification key material on-chain for JoinSplit(N,M) variants.
 
-use pinocchio::program_error::ProgramError;
+use crate::pinocchio_compat::ProgramError;
 
 /// Discriminator for VK Registry account
 pub const VK_REGISTRY_DISCRIMINATOR: u8 = 0x14;

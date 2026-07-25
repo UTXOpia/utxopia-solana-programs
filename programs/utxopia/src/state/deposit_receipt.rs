@@ -3,7 +3,7 @@
 //! Prevents duplicate deposit verification. PDA seeds = ["deposit_receipt", deposit_txid],
 //! so the account's existence proves the deposit was already processed.
 
-use pinocchio::program_error::ProgramError;
+use crate::pinocchio_compat::ProgramError;
 
 /// Discriminator for DepositReceipt account
 pub const DEPOSIT_RECEIPT_DISCRIMINATOR: u8 = 0x06;

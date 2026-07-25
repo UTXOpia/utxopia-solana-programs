@@ -1,10 +1,5 @@
-use pinocchio::{
-    account_info::AccountInfo,
-    program_error::ProgramError,
-    pubkey::{find_program_address, Pubkey},
-    sysvars::rent::Rent,
-    ProgramResult,
-};
+use crate::pinocchio_compat::{find_program_address, AccountInfo, ProgramError, Pubkey};
+use pinocchio::{sysvars::rent::Rent, ProgramResult};
 
 use crate::error::UTXOpiaError;
 use crate::state::{
@@ -148,7 +143,7 @@ pub fn parse_prefix<'a>(
     } else {
         let buf_info = &accounts[accounts.len() - 1];
         crate::utils::chadbuffer::validate_chadbuffer_owner(buf_info)?;
-        let buf_data = buf_info.try_borrow_data()?;
+        let buf_data = buf_info.try_borrow()?;
         if buf_data.len() < CHADBUFFER_AUTHORITY_SIZE + GROTH16_PROOF_SIZE {
             return Err(ProgramError::InvalidAccountData);
         }
@@ -209,11 +204,11 @@ pub fn parse_prefix<'a>(
 /// Used to detect an optional frozen source-tree account positionally without ambiguity
 /// (relayer accounts are signers, proof buffers are ChadBuffer-owned — neither matches).
 pub fn looks_like_commitment_tree(account: &AccountInfo, program_id: &Pubkey) -> bool {
-    if account.owner() != program_id {
+    if !account.owned_by(program_id) {
         return false;
     }
     account
-        .try_borrow_data()
+        .try_borrow()
         .map(|d| d.first().copied() == Some(COMMITMENT_TREE_DISCRIMINATOR))
         .unwrap_or(false)
 }
@@ -233,7 +228,7 @@ pub fn verify_vk_merkle_and_proof(
         // match, accept a caller-supplied frozen source tree whose (current or historical) root
         // matches. New output commitments are still inserted into the active tree by the caller.
         let active_root_ok = {
-            let tree_data = commitment_tree_info.try_borrow_data()?;
+            let tree_data = commitment_tree_info.try_borrow()?;
             let tree = CommitmentTree::from_bytes(&tree_data)?;
             tree.is_valid_root(prefix.merkle_root)
         };
@@ -278,11 +273,11 @@ pub fn verify_vk_merkle_and_proof(
         ],
         program_id,
     );
-    if vk_registry_info.key() != &expected_vk {
+    if vk_registry_info.address() != &expected_vk {
         return Err(UTXOpiaError::InvalidVkRegistry.into());
     }
 
-    let vk_data = vk_registry_info.try_borrow_data()?;
+    let vk_data = vk_registry_info.try_borrow()?;
     let vk = VkRegistry::from_bytes(&vk_data)?;
     if vk.n_inputs != header.n_inputs as u8 || vk.n_outputs != header.n_outputs as u8 {
         return Err(UTXOpiaError::InvalidVkRegistry.into());
@@ -316,12 +311,12 @@ pub fn create_nullifier_records(
 
         let nullifier_seeds: &[&[u8]] = &[NullifierRecord::SEED, nullifier.as_ref()];
         let (expected_pda, bump) = find_program_address(nullifier_seeds, program_id);
-        if nullifier_info.key() != &expected_pda {
+        if nullifier_info.address() != &expected_pda {
             return Err(ProgramError::InvalidSeeds);
         }
 
         {
-            let nullifier_data = nullifier_info.try_borrow_data()?;
+            let nullifier_data = nullifier_info.try_borrow()?;
             if !nullifier_data.is_empty() && nullifier_data[0] == NULLIFIER_RECORD_DISCRIMINATOR {
                 return Err(UTXOpiaError::NullifierAlreadyUsed.into());
             }
@@ -339,7 +334,7 @@ pub fn create_nullifier_records(
         )?;
 
         {
-            let mut nullifier_data = nullifier_info.try_borrow_mut_data()?;
+            let mut nullifier_data = nullifier_info.try_borrow_mut()?;
             NullifierRecord::init(&mut nullifier_data)?;
         }
 

@@ -1,11 +1,9 @@
 //! Token-2022 helper functions for Pinocchio
 
+use crate::pinocchio_compat::{account_owner, AccountInfo, ProgramError, Pubkey};
 use pinocchio::{
-    account_info::AccountInfo,
-    cpi::{invoke, invoke_signed},
-    instruction::{AccountMeta, Instruction, Seed, Signer},
-    program_error::ProgramError,
-    pubkey::Pubkey,
+    cpi::{invoke, invoke_signed, Seed, Signer},
+    instruction::{InstructionAccount as AccountMeta, InstructionView as Instruction},
     ProgramResult,
 };
 
@@ -64,10 +62,10 @@ pub fn validate_pool_controlled_zkbtc_mint(
     mint: &AccountInfo,
     pool_state: &Pubkey,
 ) -> Result<(), ProgramError> {
-    if mint.owner().as_ref() != TOKEN_2022_PROGRAM_ID {
+    if !mint.owned_by(&Pubkey::new_from_array(TOKEN_2022_PROGRAM_ID)) {
         return Err(UTXOpiaError::InvalidMint.into());
     }
-    let data = mint.try_borrow_data()?;
+    let data = mint.try_borrow()?;
     validate_pool_controlled_zkbtc_mint_data(&data, pool_state)
 }
 
@@ -138,17 +136,17 @@ pub fn is_native_sol_account(
     account: &AccountInfo,
     token_program: &AccountInfo,
 ) -> Result<bool, ProgramError> {
-    if account.owner() != token_program.key() {
+    if !account.owned_by(token_program.address()) {
         return Err(ProgramError::InvalidAccountOwner);
     }
-    let data = account.try_borrow_data()?;
+    let data = account.try_borrow()?;
     if data.len() < 32 {
         return Err(ProgramError::InvalidAccountData);
     }
     let mint: &[u8; 32] = data[0..32]
         .try_into()
         .map_err(|_| ProgramError::InvalidAccountData)?;
-    Ok(is_native_sol_mint(mint, token_program.key()))
+    Ok(is_native_sol_mint(mint, token_program.address()))
 }
 
 /// Partially unwrap native SOL from a PDA-controlled wSOL account without
@@ -168,12 +166,12 @@ pub fn unwrap_lamports_signed(
     data[2..10].copy_from_slice(&amount.to_le_bytes());
 
     let accounts = [
-        AccountMeta::writable(source.key()),
-        AccountMeta::writable(destination.key()),
-        AccountMeta::readonly_signer(authority.key()),
+        AccountMeta::writable(source.address()),
+        AccountMeta::writable(destination.address()),
+        AccountMeta::readonly_signer(authority.address()),
     ];
     let instruction = Instruction {
-        program_id: token_program.key(),
+        program_id: token_program.address(),
         accounts: &accounts,
         data: &data,
     };
@@ -205,13 +203,13 @@ pub fn mint_zkbtc(
     data[1..9].copy_from_slice(&amount.to_le_bytes());
 
     let accounts = [
-        AccountMeta::writable(mint.key()),
-        AccountMeta::writable(destination.key()),
-        AccountMeta::readonly_signer(authority.key()),
+        AccountMeta::writable(mint.address()),
+        AccountMeta::writable(destination.address()),
+        AccountMeta::readonly_signer(authority.address()),
     ];
 
     let instruction = Instruction {
-        program_id: token_program.key(),
+        program_id: token_program.address(),
         accounts: &accounts,
         data: &data,
     };
@@ -242,13 +240,13 @@ pub fn burn_zkbtc(
     data[1..9].copy_from_slice(&amount.to_le_bytes());
 
     let accounts = [
-        AccountMeta::writable(source.key()),
-        AccountMeta::writable(mint.key()),
-        AccountMeta::readonly_signer(authority.key()),
+        AccountMeta::writable(source.address()),
+        AccountMeta::writable(mint.address()),
+        AccountMeta::readonly_signer(authority.address()),
     ];
 
     let instruction = Instruction {
-        program_id: token_program.key(),
+        program_id: token_program.address(),
         accounts: &accounts,
         data: &data,
     };
@@ -277,13 +275,13 @@ pub fn burn_zkbtc_signed(
     data[1..9].copy_from_slice(&amount.to_le_bytes());
 
     let accounts = [
-        AccountMeta::writable(source.key()),
-        AccountMeta::writable(mint.key()),
-        AccountMeta::readonly_signer(authority.key()),
+        AccountMeta::writable(source.address()),
+        AccountMeta::writable(mint.address()),
+        AccountMeta::readonly_signer(authority.address()),
     ];
 
     let instruction = Instruction {
-        program_id: token_program.key(),
+        program_id: token_program.address(),
         accounts: &accounts,
         data: &data,
     };
@@ -311,13 +309,13 @@ pub fn transfer_zkbtc(
     data[1..9].copy_from_slice(&amount.to_le_bytes());
 
     let accounts = [
-        AccountMeta::writable(source.key()),
-        AccountMeta::writable(destination.key()),
-        AccountMeta::readonly_signer(authority.key()),
+        AccountMeta::writable(source.address()),
+        AccountMeta::writable(destination.address()),
+        AccountMeta::readonly_signer(authority.address()),
     ];
 
     let instruction = Instruction {
-        program_id: token_program.key(),
+        program_id: token_program.address(),
         accounts: &accounts,
         data: &data,
     };
@@ -347,13 +345,13 @@ pub fn transfer_token_user(
     data[1..9].copy_from_slice(&amount.to_le_bytes());
 
     let accounts = [
-        AccountMeta::writable(source.key()),
-        AccountMeta::writable(destination.key()),
-        AccountMeta::readonly_signer(authority.key()),
+        AccountMeta::writable(source.address()),
+        AccountMeta::writable(destination.address()),
+        AccountMeta::readonly_signer(authority.address()),
     ];
 
     let instruction = Instruction {
-        program_id: token_program.key(),
+        program_id: token_program.address(),
         accounts: &accounts,
         data: &data,
     };
@@ -385,13 +383,13 @@ mod mint_validation_tests {
 
     #[test]
     fn accepts_pool_controlled_initialized_eight_decimal_mint() {
-        let pool = [7u8; 32];
+        let pool = Pubkey::new_from_array([7u8; 32]);
         assert!(validate_pool_controlled_zkbtc_mint_data(&valid_mint(&pool), &pool).is_ok());
     }
 
     #[test]
     fn rejects_external_mint_authority() {
-        let pool = [7u8; 32];
+        let pool = Pubkey::new_from_array([7u8; 32]);
         let mut data = valid_mint(&pool);
         data[4..36].copy_from_slice(&[8u8; 32]);
         assert!(validate_pool_controlled_zkbtc_mint_data(&data, &pool).is_err());
@@ -399,7 +397,7 @@ mod mint_validation_tests {
 
     #[test]
     fn rejects_permanent_delegate_and_transfer_hook() {
-        let pool = [7u8; 32];
+        let pool = Pubkey::new_from_array([7u8; 32]);
         for extension_type in [EXT_PERMANENT_DELEGATE, EXT_TRANSFER_HOOK] {
             let data = with_extension(valid_mint(&pool), extension_type);
             assert!(validate_pool_controlled_zkbtc_mint_data(&data, &pool).is_err());
@@ -411,7 +409,7 @@ mod mint_validation_tests {
 #[inline(always)]
 pub fn is_token_account(account: &AccountInfo) -> bool {
     use crate::constants::{TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID};
-    let owner = account.owner().as_ref();
+    let owner = account_owner(account).as_ref();
     owner == TOKEN_2022_PROGRAM_ID || owner == TOKEN_PROGRAM_ID
 }
 
@@ -430,7 +428,7 @@ pub fn validate_token_account(
     // [32..64] owner
     // [64..72] amount
     // ...
-    let data = account.try_borrow_data()?;
+    let data = account.try_borrow()?;
     if data.len() < 72 {
         return Err(ProgramError::InvalidAccountData);
     }
@@ -456,7 +454,7 @@ mod tests {
     use crate::constants::{
         NATIVE_SOL_2022_MINT, NATIVE_SOL_MINT, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID,
     };
-    use pinocchio::pubkey::Pubkey;
+    use crate::pinocchio_compat::Pubkey;
 
     #[test]
     fn detects_native_mint_for_matching_token_program() {
@@ -477,7 +475,7 @@ mod tests {
 
 /// Get token account balance
 pub fn get_token_balance(account: &AccountInfo) -> Result<u64, ProgramError> {
-    let data = account.try_borrow_data()?;
+    let data = account.try_borrow()?;
     if data.len() < 72 {
         return Err(ProgramError::InvalidAccountData);
     }

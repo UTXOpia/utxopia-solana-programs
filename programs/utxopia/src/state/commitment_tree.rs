@@ -8,8 +8,8 @@
 //! - Frontier array to track rightmost filled nodes
 //! - Standard Merkle path proofs compatible with ZK circuits
 
+use crate::pinocchio_compat::ProgramError;
 use crate::utils::crypto::poseidon2_hash;
-use pinocchio::program_error::ProgramError;
 
 /// Discriminator for CommitmentTree account
 pub const COMMITMENT_TREE_DISCRIMINATOR: u8 = 0x05;

@@ -222,6 +222,10 @@ NOTE: Solana UTXOpia is single-pool per program deployment. Initializing as
     console.error(`Error: Invalid auditor pubkey: ${auditorPubkeyStr}`);
     process.exit(1);
   }
+  if (!PublicKey.isOnCurve(auditorPubkey.toBytes())) {
+    console.error("Error: auditor pubkey must be an on-curve signing key.");
+    process.exit(1);
+  }
 
   let viewingPubkeyStr: string | undefined;
   let depositFeeBps = DEFAULT_DEPOSIT_FEE_BPS;

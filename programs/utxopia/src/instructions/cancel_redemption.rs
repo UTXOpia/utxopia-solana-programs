@@ -3,10 +3,8 @@
 //! Returns locked funds by re-minting a commitment into the Merkle tree.
 //! Allowed when status is Pending, or when Processing has exceeded the timeout.
 
+use crate::pinocchio_compat::{find_program_address, AccountInfo, ProgramError, Pubkey};
 use pinocchio::{
-    account_info::AccountInfo,
-    program_error::ProgramError,
-    pubkey::{find_program_address, Pubkey},
     sysvars::{clock::Clock, Sysvar},
     ProgramResult,
 };
@@ -99,11 +97,11 @@ pub fn process_cancel_redemption(
     // Validate requester and status; capture amount, token_id, request_id, and whether the
     // request was Processing (only Processing redemptions reserved UTXOs that must be released).
     let (amount_sats, token_id, was_processing, reserved_count) = {
-        let redemption_data = redemption_info.try_borrow_data()?;
+        let redemption_data = redemption_info.try_borrow()?;
         let redemption = RedemptionRequest::from_bytes(&redemption_data)?;
 
         // Must be the original requester
-        if user.key().as_ref() != redemption.requester {
+        if user.address().as_ref() != redemption.requester {
             return Err(UTXOpiaError::Unauthorized.into());
         }
 
@@ -120,10 +118,8 @@ pub fn process_cancel_redemption(
             RedemptionStatus::Processing => {
                 // Allow cancel only if timed out
                 let clock = Clock::get()?;
-                let processing_slot = redemption.processing_slot() as u64;
-                if clock.slot
-                    < processing_slot.saturating_add(crate::constants::REDEMPTION_TIMEOUT_SLOTS)
-                {
+                let elapsed = (clock.slot as u32).wrapping_sub(redemption.processing_slot());
+                if u64::from(elapsed) < crate::constants::REDEMPTION_TIMEOUT_SLOTS {
                     return Err(UTXOpiaError::RedemptionCancelNotAllowed.into());
                 }
                 // Timed out — allow cancellation
@@ -148,10 +144,10 @@ pub fn process_cancel_redemption(
     validate_program_owner(token_config_info, program_id)?;
     validate_account_writable(token_config_info)?;
     {
-        let tc_data = token_config_info.try_borrow_data()?;
+        let tc_data = token_config_info.try_borrow()?;
         let tc = TokenConfig::from_bytes(&tc_data)?;
         let (expected_tc_pda, _) = find_program_address(&[TokenConfig::SEED, &tc.mint], program_id);
-        if token_config_info.key() != &expected_tc_pda {
+        if token_config_info.address() != &expected_tc_pda {
             return Err(ProgramError::InvalidSeeds);
         }
         if tc.token_id != token_id {
@@ -176,7 +172,7 @@ pub fn process_cancel_redemption(
     }
     // Reservation key for THIS redemption's unique PDA (audit f26).
     let reservation_key =
-        crate::utils::validation::redemption_reservation_key(redemption_info.key());
+        crate::utils::validation::redemption_reservation_key(redemption_info.address());
     let restored_total: u64 = if was_processing {
         let mut total: u64 = 0;
         for i in 0..ix_data.utxo_count {
@@ -184,7 +180,7 @@ pub fn process_cancel_redemption(
             validate_program_owner(utxo_info, program_id)?;
             validate_account_writable(utxo_info)?;
 
-            let mut utxo_data = utxo_info.try_borrow_mut_data()?;
+            let mut utxo_data = utxo_info.try_borrow_mut()?;
             if utxo_data.is_empty() || utxo_data[0] != UTXO_RECORD_DISCRIMINATOR {
                 return Err(UTXOpiaError::InvalidUtxo.into());
             }
@@ -213,7 +209,7 @@ pub fn process_cancel_redemption(
     // Compute new commitment and insert into Merkle tree
     let commitment = compute_commitment(&ix_data.npk, &token_id, amount_sats)?;
     let leaf_index = {
-        let mut tree_data = commitment_tree_info.try_borrow_mut_data()?;
+        let mut tree_data = commitment_tree_info.try_borrow_mut()?;
         let tree = CommitmentTree::from_bytes_mut(&mut tree_data)?;
         tree.insert_leaf(&commitment)?
     };
@@ -234,12 +230,19 @@ pub fn process_cancel_redemption(
         );
     }
 
-    // Unlock funds in pool state
+    let token_total_shielded = {
+        let mut tc_data = token_config_info.try_borrow_mut()?;
+        let tc = TokenConfig::from_bytes_mut(&mut tc_data)?;
+        tc.add_shielded(amount_sats)?;
+        tc.total_shielded()
+    };
+
+    // Unlock funds and reconcile legacy SPL shields from the token ledger.
     {
-        let mut pool_data = pool_state_info.try_borrow_mut_data()?;
+        let mut pool_data = pool_state_info.try_borrow_mut()?;
         let pool = PoolState::from_bytes_mut(&mut pool_data)?;
 
-        pool.add_shielded(amount_sats)?;
+        pool.set_total_shielded(token_total_shielded);
         // Reverse mark_processing's per-UTXO remove_utxo: restore the SAME count of UTXOs that
         // were reserved (ix_data.utxo_count == reserved_count, enforced above), not just one, so
         // the pool's utxo_count stays consistent (audit f13).
@@ -250,15 +253,10 @@ pub fn process_cancel_redemption(
         pool.set_pending_redemptions(pending.saturating_sub(1));
         pool.set_last_update(clock.unix_timestamp);
     }
-    {
-        let mut tc_data = token_config_info.try_borrow_mut_data()?;
-        let tc = TokenConfig::from_bytes_mut(&mut tc_data)?;
-        tc.add_shielded(amount_sats)?;
-    }
 
     // Close RedemptionRequest PDA — return rent to user
     close_account_securely(redemption_info, user)?;
 
-    pinocchio::msg!("UTXOpia: redemption cancelled");
+    solana_program_log::log!("UTXOpia: redemption cancelled");
     Ok(())
 }

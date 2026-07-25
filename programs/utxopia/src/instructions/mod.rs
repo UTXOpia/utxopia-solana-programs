@@ -29,6 +29,9 @@
 //! | 27 | `approve_redemption_signing` | Redemption |
 //! | 28 | `set_auditor_frozen` | Auditor admin |
 //! | 29 | `set_auditor_viewing_pubkey` | Auditor admin |
+//! | 32 | `magicblock_delegate` | MagicBlock |
+//! | 33 | `magicblock_commit` | MagicBlock |
+//! | 34 | `magicblock_per_permission` | MagicBlock |
 
 // Core operations
 pub mod approve_redemption_signing;
@@ -37,6 +40,7 @@ pub mod complete_deposit;
 pub mod complete_redemption;
 pub mod initialize;
 pub mod initialize_permissioned;
+pub mod magicblock;
 pub mod mark_processing;
 pub mod redeem;
 pub mod transact;
@@ -77,6 +81,7 @@ pub use devnet_reset::*;
 pub use init_vk_registry::*;
 pub use initialize::*;
 pub use initialize_permissioned::*;
+pub use magicblock::*;
 pub use mark_processing::*;
 pub use redeem::*;
 pub use register_token::*;

@@ -13,7 +13,7 @@
 //! └──────────────────────────┘    └──────────────────────────┘
 //! ```
 
-use pinocchio::program_error::ProgramError;
+use crate::pinocchio_compat::ProgramError;
 use solana_bn254::prelude::{
     alt_bn128_addition, alt_bn128_multiplication, alt_bn128_pairing, ALT_BN128_PAIRING_ELEMENT_LEN,
 };
@@ -69,17 +69,17 @@ fn verify_groth16_proof(
     ic: &[[u8; 64]],
 ) -> Result<(), ProgramError> {
     if proof_bytes.len() != GROTH16_PROOF_SIZE {
-        pinocchio::msg!("UTXOpia: groth16 bad proof size");
+        solana_program_log::log!("UTXOpia: groth16 bad proof size");
         return Err(ProgramError::InvalidInstructionData);
     }
 
     let num_inputs = public_inputs.len();
     if ic.len() != num_inputs + 1 {
-        pinocchio::msg!("UTXOpia: groth16 IC len mismatch");
+        solana_program_log::log!("UTXOpia: groth16 IC len mismatch");
         return Err(ProgramError::InvalidInstructionData);
     }
 
-    pinocchio::msg!("UTXOpia: groth16 verifying");
+    solana_program_log::log!("UTXOpia: groth16 verifying");
 
     // Parse proof components
     let pi_a: &[u8] = &proof_bytes[0..64]; // G1 (64 bytes)
@@ -104,7 +104,7 @@ fn verify_groth16_proof(
         mul_input[64..96].copy_from_slice(public_inputs[i]);
 
         let term = alt_bn128_multiplication(&mul_input).map_err(|_| {
-            pinocchio::msg!("UTXOpia: groth16 mul failed");
+            solana_program_log::log!("UTXOpia: groth16 mul failed");
             ProgramError::InvalidInstructionData
         })?;
 
@@ -113,14 +113,14 @@ fn verify_groth16_proof(
         add_input[64..128].copy_from_slice(&term);
 
         let sum = alt_bn128_addition(&add_input).map_err(|_| {
-            pinocchio::msg!("UTXOpia: groth16 add failed");
+            solana_program_log::log!("UTXOpia: groth16 add failed");
             ProgramError::InvalidInstructionData
         })?;
 
         vk_x.copy_from_slice(&sum);
     }
 
-    pinocchio::msg!("UTXOpia: groth16 pairing check");
+    solana_program_log::log!("UTXOpia: groth16 pairing check");
 
     // Step 3: Build pairing input (4 pairs × 192 bytes = 768 bytes)
     // Pairing check: e(-A, B) * e(alpha, beta) * e(vk_x, gamma) * e(C, delta) == 1
@@ -144,7 +144,7 @@ fn verify_groth16_proof(
 
     // Step 4: Verify pairing
     let pairing_result = alt_bn128_pairing(&pairing_input).map_err(|_| {
-        pinocchio::msg!("UTXOpia: groth16 pairing syscall failed");
+        solana_program_log::log!("UTXOpia: groth16 pairing syscall failed");
         ProgramError::InvalidInstructionData
     })?;
 
@@ -155,11 +155,11 @@ fn verify_groth16_proof(
         v
     };
     if pairing_result.len() != 32 || pairing_result[..] != VALID_PAIRING {
-        pinocchio::msg!("UTXOpia: groth16 proof invalid");
+        solana_program_log::log!("UTXOpia: groth16 proof invalid");
         return Err(ProgramError::InvalidInstructionData);
     }
 
-    pinocchio::msg!("UTXOpia: groth16 proof verified");
+    solana_program_log::log!("UTXOpia: groth16 proof verified");
     Ok(())
 }
 

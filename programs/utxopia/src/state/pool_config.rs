@@ -5,7 +5,7 @@
 //!
 //! PDA seeds: ["pool_config"]
 
-use pinocchio::program_error::ProgramError;
+use crate::pinocchio_compat::ProgramError;
 
 /// Discriminator for PoolConfig account
 pub const POOL_CONFIG_DISCRIMINATOR: u8 = 0x0A;

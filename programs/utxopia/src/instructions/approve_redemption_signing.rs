@@ -9,9 +9,8 @@
 //!   broadcasts the BTC transaction.
 //! - `complete_redemption` later SPV-verifies the broadcast tx and finalizes.
 
-use pinocchio::{
-    account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, ProgramResult,
-};
+use crate::pinocchio_compat::{AccountInfo, ProgramError, Pubkey};
+use pinocchio::ProgramResult;
 
 use crate::constants::{
     BTC_DUST_THRESHOLD_SATS, BTC_INPUT_SEQUENCE, BTC_TX_LOCKTIME, BTC_TX_VERSION,
@@ -140,13 +139,13 @@ pub fn process_approve_redemption_signing(
         recipient_script,
         recipient_script_len,
     ) = {
-        let pool_data = pool_state_info.try_borrow_data()?;
+        let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
-        if authority.key().as_ref() != pool.authority {
+        if authority.address().as_ref() != pool.authority {
             return Err(UTXOpiaError::Unauthorized.into());
         }
 
-        let redemption_data = redemption_info.try_borrow_data()?;
+        let redemption_data = redemption_info.try_borrow()?;
         let redemption = RedemptionRequest::from_bytes(&redemption_data)?;
         if redemption.get_status() != RedemptionStatus::Processing {
             return Err(UTXOpiaError::InvalidRedemptionState.into());
@@ -179,7 +178,7 @@ pub fn process_approve_redemption_signing(
         return Err(ProgramError::InvalidInstructionData);
     }
     {
-        let redemption_data = redemption_info.try_borrow_data()?;
+        let redemption_data = redemption_info.try_borrow()?;
         let redemption = RedemptionRequest::from_bytes(&redemption_data)?;
         if redemption.is_input_signing_approved(ix_data.input_index) {
             return Err(UTXOpiaError::InvalidRedemptionState.into());
@@ -187,7 +186,7 @@ pub fn process_approve_redemption_signing(
     }
 
     let (dwallet_xonly, cpi_authority_bump, pool_script, pool_script_len) = {
-        let cfg_data = pool_config_info.try_borrow_data()?;
+        let cfg_data = pool_config_info.try_borrow()?;
         if cfg_data.len() < PoolConfig::LEN || cfg_data[0] != POOL_CONFIG_DISCRIMINATOR {
             return Err(UTXOpiaError::IkaCpiAccountsMissing.into());
         }
@@ -195,7 +194,7 @@ pub fn process_approve_redemption_signing(
         if !cfg.has_ika_dwallet() {
             return Err(UTXOpiaError::IkaCpiAccountsMissing.into());
         }
-        if ika_dwallet.key().as_ref() != cfg.get_ika_dwallet() {
+        if ika_dwallet.address().as_ref() != cfg.get_ika_dwallet() {
             return Err(UTXOpiaError::IkaCpiAccountsMissing.into());
         }
         // Pool taproot scriptPubKey (0x5120 || xonly): spent by every input AND the change output.
@@ -213,22 +212,25 @@ pub fn process_approve_redemption_signing(
         )
     };
 
-    if caller_program.key() != program_id || !caller_program.executable() {
+    if caller_program.address() != program_id || !caller_program.executable() {
         return Err(ProgramError::IncorrectProgramId);
     }
     if !ika_program.executable() {
         return Err(ProgramError::IncorrectProgramId);
     }
-    if ika_dwallet.owner() != ika_program.key() || ika_coordinator.owner() != ika_program.key() {
+    if !ika_dwallet.owned_by(ika_program.address())
+        || !ika_coordinator.owned_by(ika_program.address())
+    {
         return Err(ProgramError::IllegalOwner);
     }
-    if ika_message_approval.data_len() != 0 && ika_message_approval.owner() != ika_program.key() {
+    if ika_message_approval.data_len() != 0 && !ika_message_approval.owned_by(ika_program.address())
+    {
         return Err(ProgramError::IllegalOwner);
     }
 
     let (expected_cpi_authority, expected_cpi_authority_bump) =
-        pinocchio::pubkey::find_program_address(&[CPI_AUTHORITY_SEED], program_id);
-    if cpi_authority.key() != &expected_cpi_authority
+        crate::pinocchio_compat::find_program_address(&[CPI_AUTHORITY_SEED], program_id);
+    if cpi_authority.address() != &expected_cpi_authority
         || cpi_authority_bump != expected_cpi_authority_bump
     {
         return Err(ProgramError::InvalidSeeds);
@@ -251,13 +253,13 @@ pub fn process_approve_redemption_signing(
 
     // Reservation key for THIS redemption's unique PDA (audit f26).
     let reservation_key =
-        crate::utils::validation::redemption_reservation_key(redemption_info.key());
+        crate::utils::validation::redemption_reservation_key(redemption_info.address());
     let mut reserved: std::vec::Vec<ReservedInput> = std::vec::Vec::with_capacity(reserved_count);
     let mut sum_inputs: u64 = 0;
     for j in 0..reserved_count {
         let utxo_info = &accounts[FIXED_ACCOUNTS + j];
         validate_program_owner(utxo_info, program_id)?;
-        let utxo_data = utxo_info.try_borrow_data()?;
+        let utxo_data = utxo_info.try_borrow()?;
         if utxo_data.is_empty() || utxo_data[0] != UTXO_RECORD_DISCRIMINATOR {
             return Err(UTXOpiaError::InvalidUtxo.into());
         }
@@ -362,10 +364,10 @@ pub fn process_approve_redemption_signing(
     let signature_scheme = SIG_SCHEME_TAPROOT_SHA256;
 
     let ma_bump = crate::cpi::ika::find_message_approval_pda_bump(
-        ika_program.key(),
+        ika_program.address(),
         &dwallet_xonly,
         &ika_message_digest,
-        ika_message_approval.key(),
+        ika_message_approval.address(),
         signature_scheme,
     )?;
 
@@ -394,11 +396,11 @@ pub fn process_approve_redemption_signing(
     // is approved; a partially approved transaction is not broadcastable and may still be
     // recovered through the normal timeout/cancellation path.
     {
-        let mut redemption_data = redemption_info.try_borrow_mut_data()?;
+        let mut redemption_data = redemption_info.try_borrow_mut()?;
         let redemption = RedemptionRequest::from_bytes_mut(&mut redemption_data)?;
         redemption.mark_input_signing_approved(ix_data.input_index)?;
     }
 
-    pinocchio::msg!("UTXOpia: redemption signing approved");
+    solana_program_log::log!("UTXOpia: redemption signing approved");
     Ok(())
 }

@@ -25,24 +25,24 @@
 //!                              Withdraw → ZK Proof → Burn from Pool → BTC
 //! ```
 
+use crate::pinocchio_compat::{AccountInfo, ProgramError, Pubkey};
 #[cfg(not(feature = "no-entrypoint"))]
 use pinocchio::entrypoint;
-use pinocchio::{
-    account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, ProgramResult,
-};
+use pinocchio::ProgramResult;
 
 pub mod constants;
 pub mod cpi;
 pub mod error;
 pub mod instructions;
+pub mod pinocchio_compat;
 pub mod state;
 pub mod utils;
 
 /// Program ID (update after deployment)
-pub const ID: Pubkey = [
+pub const ID: Pubkey = Pubkey::new_from_array([
     0x0a, 0x6a, 0x3c, 0x1e, 0x87, 0x32, 0x1a, 0x5c, 0x7f, 0x4b, 0x2d, 0x9e, 0x8a, 0x6c, 0x3f, 0x1b,
     0x5d, 0x2a, 0x8e, 0x4c, 0x7b, 0x3a, 0x1f, 0x6d, 0x9c, 0x5e, 0x2b, 0x8f, 0x4a, 0x7d, 0x3c, 0x1e,
-];
+]);
 
 /// Instruction discriminators grouped by category.
 pub mod instruction {
@@ -103,6 +103,14 @@ pub mod instruction {
     pub const DEVNET_RESET: u8 = 30;
     // Dev-only force-close of stale program-owned accounts (31) — devnet-regtest only
     pub const DEVNET_CLOSE: u8 = 31;
+
+    // MagicBlock ER/PER lifecycle helpers (32-33)
+    pub const MAGICBLOCK_DELEGATE: u8 = 32;
+    pub const MAGICBLOCK_COMMIT: u8 = 33;
+    pub const MAGICBLOCK_PER_PERMISSION: u8 = 34;
+
+    // Authority recovery for a permissioned pool's auditor identity (35)
+    pub const ROTATE_AUDITOR: u8 = 35;
 }
 
 #[cfg(not(feature = "no-entrypoint"))]
@@ -114,6 +122,18 @@ pub fn process_instruction(
     accounts: &[AccountInfo],
     instruction_data: &[u8],
 ) -> ProgramResult {
+    if instruction_data.len()
+        >= ephemeral_rollups_pinocchio::consts::EXTERNAL_UNDELEGATE_DISCRIMINATOR.len()
+        && instruction_data[..8]
+            == ephemeral_rollups_pinocchio::consts::EXTERNAL_UNDELEGATE_DISCRIMINATOR
+    {
+        return instructions::process_magicblock_undelegate_callback(
+            program_id,
+            accounts,
+            instruction_data,
+        );
+    }
+
     let (discriminator, data) = instruction_data
         .split_first()
         .ok_or(ProgramError::InvalidInstructionData)?;
@@ -202,6 +222,19 @@ pub fn process_instruction(
         instruction::DEVNET_RESET => instructions::process_devnet_reset(program_id, accounts, data),
         #[cfg(feature = "devnet-regtest")]
         instruction::DEVNET_CLOSE => instructions::process_devnet_close(program_id, accounts, data),
+        // MagicBlock ER/PER lifecycle helpers (32-33)
+        instruction::MAGICBLOCK_DELEGATE => {
+            instructions::process_magicblock_delegate(program_id, accounts, data)
+        }
+        instruction::MAGICBLOCK_COMMIT => {
+            instructions::process_magicblock_commit(program_id, accounts, data)
+        }
+        instruction::MAGICBLOCK_PER_PERMISSION => {
+            instructions::process_magicblock_per_permission(program_id, accounts, data)
+        }
+        instruction::ROTATE_AUDITOR => {
+            instructions::process_rotate_auditor(program_id, accounts, data)
+        }
         _ => Err(ProgramError::InvalidInstructionData),
     }
 }
@@ -232,10 +265,10 @@ fn process_set_paused(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
     let paused = data[0] != 0;
 
     {
-        let mut pool_data = pool_state.try_borrow_mut_data()?;
+        let mut pool_data = pool_state.try_borrow_mut()?;
         let pool = PoolState::from_bytes_mut(&mut pool_data)?;
 
-        if authority.key().as_ref() != pool.authority {
+        if authority.address().as_ref() != pool.authority {
             return Err(UTXOpiaError::Unauthorized.into());
         }
 
