@@ -411,18 +411,20 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
         );
     }
 
-    // Update pool state: decrement total_shielded by sum, increment pending_redemptions
-    {
-        let mut pool_data = pool_state_info.try_borrow_mut()?;
-        let pool = PoolState::from_bytes_mut(&mut pool_data)?;
-        pool.sub_shielded(total_redeem)?;
-        pool.set_pending_redemptions(pending_redemptions.saturating_add(n_public_outputs as u64));
-        pool.set_last_update(clock.unix_timestamp);
-    }
-    {
+    let token_total_shielded = {
         let mut tc_data = token_config_info.try_borrow_mut()?;
         let tc = TokenConfig::from_bytes_mut(&mut tc_data)?;
         tc.sub_shielded(total_redeem)?;
+        tc.total_shielded()
+    };
+
+    // Update pool state and reconcile legacy SPL shields from the token ledger.
+    {
+        let mut pool_data = pool_state_info.try_borrow_mut()?;
+        let pool = PoolState::from_bytes_mut(&mut pool_data)?;
+        pool.set_total_shielded(token_total_shielded);
+        pool.set_pending_redemptions(pending_redemptions.saturating_add(n_public_outputs as u64));
+        pool.set_last_update(clock.unix_timestamp);
     }
 
     solana_program_log::log!("UTXOpia: redeem");

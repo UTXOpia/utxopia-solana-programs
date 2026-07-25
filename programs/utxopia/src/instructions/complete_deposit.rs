@@ -731,22 +731,8 @@ fn complete_deposit_inner(
         pool_signer_seeds,
     )?;
 
-    // Update pool statistics
-    {
-        let mut pool_data = pool_state_info.try_borrow_mut()?;
-        let pool = PoolState::from_bytes_mut(&mut pool_data)?;
-
-        pool.increment_deposit_count()?;
-        // Gross amount actually minted into the vault (shielded note + claimable fee).
-        pool.add_minted(amount_sats)?;
-        pool.add_shielded(shielded_amount)?;
-        // NOTE: pool.add_utxo() for the spendable BTC is done once per pool output in the
-        // idempotent UtxoRecord block above, using the full pool_output_value.
-        pool.set_last_update(clock.unix_timestamp);
-    }
-
     // Update token config: total_shielded and accumulated_fees
-    {
+    let token_total_shielded = {
         let mut tc_data = token_config_info.try_borrow_mut()?;
         let tc = TokenConfig::from_bytes_mut(&mut tc_data)?;
         // Enforce the per-token deposit cap on every minting path, not just SPL shield (audit
@@ -761,6 +747,21 @@ fn complete_deposit_inner(
         }
         tc.add_shielded(shielded_amount)?;
         tc.add_fees(total_fee)?;
+        tc.total_shielded()
+    };
+
+    // Update pool statistics and reconcile legacy SPL shields from the token ledger.
+    {
+        let mut pool_data = pool_state_info.try_borrow_mut()?;
+        let pool = PoolState::from_bytes_mut(&mut pool_data)?;
+
+        pool.increment_deposit_count()?;
+        // Gross amount actually minted into the vault (shielded note + claimable fee).
+        pool.add_minted(amount_sats)?;
+        pool.set_total_shielded(token_total_shielded);
+        // NOTE: pool.add_utxo() for the spendable BTC is done once per pool output in the
+        // idempotent UtxoRecord block above, using the full pool_output_value.
+        pool.set_last_update(clock.unix_timestamp);
     }
 
     solana_program_log::log!("UTXOpia: deposit verified (SPV)");

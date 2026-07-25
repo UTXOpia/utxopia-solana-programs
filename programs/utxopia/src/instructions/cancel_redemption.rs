@@ -230,12 +230,19 @@ pub fn process_cancel_redemption(
         );
     }
 
-    // Unlock funds in pool state
+    let token_total_shielded = {
+        let mut tc_data = token_config_info.try_borrow_mut()?;
+        let tc = TokenConfig::from_bytes_mut(&mut tc_data)?;
+        tc.add_shielded(amount_sats)?;
+        tc.total_shielded()
+    };
+
+    // Unlock funds and reconcile legacy SPL shields from the token ledger.
     {
         let mut pool_data = pool_state_info.try_borrow_mut()?;
         let pool = PoolState::from_bytes_mut(&mut pool_data)?;
 
-        pool.add_shielded(amount_sats)?;
+        pool.set_total_shielded(token_total_shielded);
         // Reverse mark_processing's per-UTXO remove_utxo: restore the SAME count of UTXOs that
         // were reserved (ix_data.utxo_count == reserved_count, enforced above), not just one, so
         // the pool's utxo_count stays consistent (audit f13).
@@ -245,11 +252,6 @@ pub fn process_cancel_redemption(
         let pending = pool.pending_redemptions();
         pool.set_pending_redemptions(pending.saturating_sub(1));
         pool.set_last_update(clock.unix_timestamp);
-    }
-    {
-        let mut tc_data = token_config_info.try_borrow_mut()?;
-        let tc = TokenConfig::from_bytes_mut(&mut tc_data)?;
-        tc.add_shielded(amount_sats)?;
     }
 
     // Close RedemptionRequest PDA — return rent to user
