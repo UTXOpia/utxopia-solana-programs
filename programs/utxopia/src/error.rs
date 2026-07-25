@@ -1,6 +1,6 @@
 //! Error definitions for UTXOPIA program
 
-use pinocchio::program_error::ProgramError;
+use crate::pinocchio_compat::ProgramError;
 use thiserror::Error;
 
 /// Custom error codes for UTXOPIA

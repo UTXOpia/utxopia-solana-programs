@@ -6,7 +6,7 @@
 //! # Accounts (public path, disc 12)
 //! 0. `[signer]`   User
 //! 1. `[writable]` User's token account (source)
-//! 2. `[]`         Pool state PDA (read deposit_fee_bps, check paused)
+//! 2. `[writable]` Pool state PDA (read policy; sync zkBTC total_shielded)
 //! 3. `[writable]` TokenConfig PDA (check enabled, limits, update total_shielded)
 //! 4. `[writable]` Vault token account (destination)
 //! 5. `[writable]` Commitment tree
@@ -16,7 +16,11 @@
 //! 0-6. Same as above
 //! 7. `[signer]`   Auditor — must match `pool.auditor()` and must not be frozen
 
-use pinocchio::{account_info::AccountInfo, program_error::ProgramError, ProgramResult};
+use crate::pinocchio_compat::{AccountInfo, ProgramError};
+use pinocchio::{
+    sysvars::{clock::Clock, Sysvar},
+    ProgramResult,
+};
 
 use crate::error::UTXOpiaError;
 use crate::state::{CommitmentTree, PoolState, TokenConfig};
@@ -37,7 +41,7 @@ const DATA_LEN: usize = SHIELD_DATA_HEADER;
 ///
 /// Rejects permissioned pools — use disc 23 (`shield_permissioned`) for those.
 pub fn process_shield(
-    program_id: &pinocchio::pubkey::Pubkey,
+    program_id: &crate::pinocchio_compat::Pubkey,
     accounts: &[AccountInfo],
     data: &[u8],
 ) -> ProgramResult {
@@ -59,7 +63,7 @@ pub fn process_shield(
     // Public entry point must not be used for permissioned pools
     validate_program_owner(pool_state_info, program_id)?;
     {
-        let pool_data = pool_state_info.try_borrow_data()?;
+        let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
         if pool.permissioned() {
             return Err(UTXOpiaError::NotPermissioned.into());
@@ -85,7 +89,7 @@ pub fn process_shield(
 /// - Auditor account key must equal pool.auditor() (Unauthorized)
 /// - Pool auditor must not be frozen (AuditorFrozen)
 pub fn process_shield_permissioned(
-    program_id: &pinocchio::pubkey::Pubkey,
+    program_id: &crate::pinocchio_compat::Pubkey,
     accounts: &[AccountInfo],
     data: &[u8],
 ) -> ProgramResult {
@@ -111,7 +115,7 @@ pub fn process_shield_permissioned(
     // Validate pool state and enforce permissioned gate
     validate_program_owner(pool_state_info, program_id)?;
     {
-        let pool_data = pool_state_info.try_borrow_data()?;
+        let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
 
         // This entry point is for permissioned pools only
@@ -126,7 +130,7 @@ pub fn process_shield_permissioned(
             return Err(ProgramError::MissingRequiredSignature);
         }
 
-        if auditor_info.key().as_ref() != pool.auditor() {
+        if auditor_info.address().as_ref() != pool.auditor() {
             return Err(UTXOpiaError::Unauthorized.into());
         }
 
@@ -146,7 +150,7 @@ pub fn process_shield_permissioned(
 ///
 /// Callers are responsible for the signer/permissioned gate before calling this function.
 fn shield_inner(
-    program_id: &pinocchio::pubkey::Pubkey,
+    program_id: &crate::pinocchio_compat::Pubkey,
     accounts: &[AccountInfo],
     data: &[u8],
     auditor_ciphertext: &[u8],
@@ -172,19 +176,20 @@ fn shield_inner(
     validate_token_owner(vault)?;
     validate_any_token_program_key(token_program)?;
     validate_account_writable(user_token_account)?;
+    validate_account_writable(pool_state_info)?;
     validate_account_writable(token_config_info)?;
     validate_account_writable(vault)?;
     validate_account_writable(commitment_tree_info)?;
 
     // Read pool state — check paused, validate active tree, read deposit_fee_bps
-    let deposit_fee_bps = {
-        let pool_data = pool_state_info.try_borrow_data()?;
+    let (deposit_fee_bps, zkbtc_mint) = {
+        let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
         if pool.is_paused() {
             return Err(UTXOpiaError::PoolPaused.into());
         }
         validate_active_tree_pda(commitment_tree_info, program_id, pool.active_tree_index())?;
-        pool.deposit_fee_bps()
+        (pool.deposit_fee_bps(), pool.zkbtc_mint)
     };
 
     // Read token config — validate enabled, limits, vault, mint.
@@ -192,8 +197,8 @@ fn shield_inner(
     // or deflationary mint can deliver less than `amount` to the vault, which would overcredit
     // the shielded note and leave the pool insolvent. We instead credit the measured vault
     // balance delta after the transfer (see below).
-    let (token_id, deposit_cap) = {
-        let tc_data = token_config_info.try_borrow_data()?;
+    let (token_id, deposit_cap, is_pool_zkbtc) = {
+        let tc_data = token_config_info.try_borrow()?;
         let tc = TokenConfig::from_bytes(&tc_data)?;
 
         if !tc.is_enabled() {
@@ -201,13 +206,13 @@ fn shield_inner(
         }
 
         // Validate vault matches
-        if vault.key().as_ref() != tc.vault {
+        if vault.address().as_ref() != tc.vault {
             return Err(UTXOpiaError::InvalidVault.into());
         }
 
         // Validate user token account mint matches token_config mint
         {
-            let uta_data = user_token_account.try_borrow_data()?;
+            let uta_data = user_token_account.try_borrow()?;
             if uta_data.len() < 32 {
                 return Err(ProgramError::InvalidAccountData);
             }
@@ -223,7 +228,7 @@ fn shield_inner(
 
         let mut tid = [0u8; 32];
         tid.copy_from_slice(&tc.token_id);
-        (tid, tc.deposit_cap())
+        (tid, tc.deposit_cap(), tc.mint == zkbtc_mint)
     };
 
     // Measure the vault balance delta across the transfer so the credited amount reflects
@@ -239,7 +244,7 @@ fn shield_inner(
         .ok_or(ProgramError::ArithmeticOverflow)?;
 
     // Derive fee and shielded amount from what the vault actually received.
-    let protocol_fee = (received as u128 * deposit_fee_bps as u128 / 10_000) as u64;
+    let protocol_fee = crate::utils::policy::compute_bps_fee(received, deposit_fee_bps);
     let shielded_amount = received
         .checked_sub(protocol_fee)
         .ok_or(ProgramError::ArithmeticOverflow)?;
@@ -249,7 +254,7 @@ fn shield_inner(
 
     // Check deposit cap against the actual shielded value being added.
     {
-        let tc_data = token_config_info.try_borrow_data()?;
+        let tc_data = token_config_info.try_borrow()?;
         let tc = TokenConfig::from_bytes(&tc_data)?;
         if tc
             .total_shielded()
@@ -266,7 +271,7 @@ fn shield_inner(
 
     // Insert into Merkle tree
     let leaf_index = {
-        let mut tree_data = commitment_tree_info.try_borrow_mut_data()?;
+        let mut tree_data = commitment_tree_info.try_borrow_mut()?;
         let tree = CommitmentTree::from_bytes_mut(&mut tree_data)?;
         tree.insert_leaf(&commitment)?;
         tree.next_index() - 1
@@ -292,14 +297,24 @@ fn shield_inner(
     }
 
     // Update token config: total_shielded and accumulated_fees
-    {
-        let mut tc_data = token_config_info.try_borrow_mut_data()?;
+    let token_total_shielded = {
+        let mut tc_data = token_config_info.try_borrow_mut()?;
         let tc = TokenConfig::from_bytes_mut(&mut tc_data)?;
         tc.add_shielded(shielded_amount)?;
         tc.add_fees(protocol_fee)?;
+        tc.total_shielded()
+    };
+    if is_pool_zkbtc {
+        let clock = Clock::get()?;
+        let mut pool_data = pool_state_info.try_borrow_mut()?;
+        let pool = PoolState::from_bytes_mut(&mut pool_data)?;
+        // TokenConfig was the only ledger updated by legacy SPL shields. Treat it as
+        // authoritative so the first post-upgrade operation also reconciles old state.
+        pool.set_total_shielded(token_total_shielded);
+        pool.set_last_update(clock.unix_timestamp);
     }
 
-    pinocchio::msg!("UTXOpia: shielded tokens");
+    solana_program_log::log!("UTXOpia: shielded tokens");
     Ok(())
 }
 

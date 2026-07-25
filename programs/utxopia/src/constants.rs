@@ -47,6 +47,18 @@ pub const BTC_LIGHT_CLIENT_PROGRAM_ID: [u8; 32] = [
 /// Audited JoinSplit scope (N + M). VK registry accounts support variants up to 10.
 pub const MAX_SAFE_JOINSPLIT_SIZE: usize = 10;
 
+/// Maximum PER members funded by permissioned-pool initialization. Permission
+/// creation and updates enforce the same cap.
+pub const MAGICBLOCK_MAX_PER_MEMBERS: usize = 8;
+
+/// ER-local rent reserved in each permissioned pool/tree PDA for one
+/// `EphemeralPermission` at the configured member cap.
+pub const MAGICBLOCK_PER_PERMISSION_RENT: u64 =
+    ephemeral_rollups_pinocchio::ephemeral_accounts::rent(
+        ephemeral_rollups_pinocchio::acl::EphemeralPermission::size_of(MAGICBLOCK_MAX_PER_MEMBERS)
+            as u32,
+    );
+
 /// Guard against a contradictory build: `mainnet` must never be combined with a
 /// dev/test network feature, or `CHAIN_ID` (baked into every bound_params_hash) would be
 /// ambiguous and could silently weaken cross-chain replay protection.

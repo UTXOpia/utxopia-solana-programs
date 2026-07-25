@@ -8,10 +8,8 @@
 //! The program reads and validates each UTXO, sums their amounts trustlessly,
 //! marks them as Reserved, and writes total_input_sats to the RedemptionRequest.
 
+use crate::pinocchio_compat::{AccountInfo, ProgramError, Pubkey};
 use pinocchio::{
-    account_info::AccountInfo,
-    program_error::ProgramError,
-    pubkey::Pubkey,
     sysvars::{clock::Clock, Sysvar},
     ProgramResult,
 };
@@ -61,10 +59,10 @@ pub fn process_mark_processing(
 
     // Validate authority matches pool
     {
-        let pool_data = pool_state_info.try_borrow_data()?;
+        let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
 
-        if authority.key().as_ref() != pool.authority {
+        if authority.address().as_ref() != pool.authority {
             return Err(UTXOpiaError::Unauthorized.into());
         }
     }
@@ -91,10 +89,10 @@ pub fn process_mark_processing(
     // Reservation key binds each reserved UTXO to THIS redemption's unique PDA (not the
     // caller-chosen nonce, which two users can collide on — audit f26).
     let reservation_key =
-        crate::utils::validation::redemption_reservation_key(redemption_info.key());
+        crate::utils::validation::redemption_reservation_key(redemption_info.address());
     // Re-validate Pending status here; Phase 3 transitions it to Processing.
     {
-        let redemption_data = redemption_info.try_borrow_data()?;
+        let redemption_data = redemption_info.try_borrow()?;
         let redemption = RedemptionRequest::from_bytes(&redemption_data)?;
         if redemption.get_status() != RedemptionStatus::Pending {
             return Err(UTXOpiaError::InvalidRedemptionState.into());
@@ -120,7 +118,7 @@ pub fn process_mark_processing(
         validate_program_owner(utxo_info, program_id)?;
         validate_account_writable(utxo_info)?;
 
-        let mut utxo_data = utxo_info.try_borrow_mut_data()?;
+        let mut utxo_data = utxo_info.try_borrow_mut()?;
 
         // Validate discriminator
         if utxo_data.is_empty() || utxo_data[0] != UTXO_RECORD_DISCRIMINATOR {
@@ -160,7 +158,7 @@ pub fn process_mark_processing(
 
     // --- Phase 2: Update PoolState counters ---
     {
-        let mut pool_data = pool_state_info.try_borrow_mut_data()?;
+        let mut pool_data = pool_state_info.try_borrow_mut()?;
         let pool = PoolState::from_bytes_mut(&mut pool_data)?;
 
         for amount in utxo_amounts.iter().take(utxo_count) {
@@ -170,7 +168,7 @@ pub fn process_mark_processing(
 
     // Validate status is Pending and transition to Processing
     {
-        let mut redemption_data = redemption_info.try_borrow_mut_data()?;
+        let mut redemption_data = redemption_info.try_borrow_mut()?;
         let redemption = RedemptionRequest::from_bytes_mut(&mut redemption_data)?;
 
         if redemption.get_status() != RedemptionStatus::Pending {
@@ -201,6 +199,6 @@ pub fn process_mark_processing(
         );
     }
 
-    pinocchio::msg!("UTXOpia: redemption processing");
+    solana_program_log::log!("UTXOpia: redemption processing");
     Ok(())
 }

@@ -10,10 +10,8 @@
 //!
 //! Instruction data: amount(8) — allows partial claims
 
-use pinocchio::{
-    account_info::AccountInfo, program_error::ProgramError, pubkey::find_program_address,
-    ProgramResult,
-};
+use crate::pinocchio_compat::{find_program_address, AccountInfo, ProgramError};
+use pinocchio::ProgramResult;
 
 use crate::error::UTXOpiaError;
 use crate::state::{PoolState, TokenConfig};
@@ -24,7 +22,7 @@ use crate::utils::{
 };
 
 pub fn process_claim_fees(
-    program_id: &pinocchio::pubkey::Pubkey,
+    program_id: &crate::pinocchio_compat::Pubkey,
     accounts: &[AccountInfo],
     data: &[u8],
 ) -> ProgramResult {
@@ -59,15 +57,15 @@ pub fn process_claim_fees(
 
     // Reject vault == destination: a self-transfer moves no tokens, but accumulated_fees would
     // still be decremented below, permanently stranding that fee value in the vault.
-    if vault.key() == admin_token_account.key() {
+    if vault.address() == admin_token_account.address() {
         return Err(ProgramError::InvalidArgument);
     }
 
     // Validate authority
     let pool_bump = {
-        let pool_data = pool_state_info.try_borrow_data()?;
+        let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
-        if authority.key().as_ref() != pool.authority {
+        if authority.address().as_ref() != pool.authority {
             return Err(UTXOpiaError::Unauthorized.into());
         }
         pool.bump
@@ -76,17 +74,17 @@ pub fn process_claim_fees(
     // Verify pool PDA
     let pool_seeds: &[&[u8]] = &[PoolState::SEED];
     let (expected_pda, _) = find_program_address(pool_seeds, program_id);
-    if pool_state_info.key() != &expected_pda {
+    if pool_state_info.address() != &expected_pda {
         return Err(ProgramError::InvalidSeeds);
     }
 
     // Validate amount against accumulated_fees; capture token_id for the event.
     let token_id = {
-        let tc_data = token_config_info.try_borrow_data()?;
+        let tc_data = token_config_info.try_borrow()?;
         let tc = TokenConfig::from_bytes(&tc_data)?;
 
         // Validate vault matches
-        if vault.key().as_ref() != tc.vault {
+        if vault.address().as_ref() != tc.vault {
             return Err(UTXOpiaError::InvalidVault.into());
         }
 
@@ -111,7 +109,7 @@ pub fn process_claim_fees(
 
     // Update accumulated_fees
     {
-        let mut tc_data = token_config_info.try_borrow_mut_data()?;
+        let mut tc_data = token_config_info.try_borrow_mut()?;
         let tc = TokenConfig::from_bytes_mut(&mut tc_data)?;
         tc.sub_fees(amount)?;
     }
@@ -119,9 +117,9 @@ pub fn process_claim_fees(
     crate::utils::events::emit_fees_claimed(
         &token_id,
         amount,
-        admin_token_account.key().as_ref().try_into().unwrap(),
+        admin_token_account.address().as_ref().try_into().unwrap(),
     );
 
-    pinocchio::msg!("UTXOpia: claimed fees");
+    solana_program_log::log!("UTXOpia: claimed fees");
     Ok(())
 }

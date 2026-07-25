@@ -14,10 +14,8 @@
 //!   0. [writable] Pool state
 //!   1. [signer]   Authority (propose/cancel only; execute is permissionless but still needs payer)
 
+use crate::pinocchio_compat::{AccountInfo, ProgramError, Pubkey};
 use pinocchio::{
-    account_info::AccountInfo,
-    program_error::ProgramError,
-    pubkey::Pubkey,
     sysvars::{clock::Clock, Sysvar},
     ProgramResult,
 };
@@ -68,10 +66,10 @@ pub fn process_propose_pool_update(
         .checked_add(TIMELOCK_DELAY_SECS)
         .ok_or(ProgramError::ArithmeticOverflow)?;
 
-    let mut pool_data = pool_state_info.try_borrow_mut_data()?;
+    let mut pool_data = pool_state_info.try_borrow_mut()?;
     let pool = PoolState::from_bytes_mut(&mut pool_data)?;
 
-    if authority.key().as_ref() != pool.authority {
+    if authority.address().as_ref() != pool.authority {
         return Err(UTXOpiaError::Unauthorized.into());
     }
 
@@ -109,10 +107,10 @@ pub fn process_execute_pool_update(
 
     let clock = Clock::get()?;
 
-    let mut pool_data = pool_state_info.try_borrow_mut_data()?;
+    let mut pool_data = pool_state_info.try_borrow_mut()?;
     let pool = PoolState::from_bytes_mut(&mut pool_data)?;
 
-    if authority.key().as_ref() != pool.authority {
+    if authority.address().as_ref() != pool.authority {
         return Err(UTXOpiaError::Unauthorized.into());
     }
 
@@ -156,10 +154,10 @@ pub fn process_cancel_pool_update(
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    let mut pool_data = pool_state_info.try_borrow_mut_data()?;
+    let mut pool_data = pool_state_info.try_borrow_mut()?;
     let pool = PoolState::from_bytes_mut(&mut pool_data)?;
 
-    if authority.key().as_ref() != pool.authority {
+    if authority.address().as_ref() != pool.authority {
         return Err(UTXOpiaError::Unauthorized.into());
     }
 

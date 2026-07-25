@@ -11,7 +11,7 @@
 //! Setting R = P (internal key), r = s = P.x, hash = -(tweak * P.x) mod n:
 //!   pubkey = tweak*G + P = expected output key
 
-use pinocchio::program_error::ProgramError;
+use crate::pinocchio_compat::ProgramError;
 
 use crate::error::UTXOpiaError;
 

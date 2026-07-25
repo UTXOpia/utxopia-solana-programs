@@ -18,7 +18,7 @@
 //! - 0x10 UtxoConsumed: disc(1) + txid(32) + vout(4) + amount_sats(8) = 45 bytes
 //! - 0x11 ShieldMeta: disc(1) + gross_amount(8) + fee(8) + token_id(32) = 49 bytes
 
-use pinocchio::log::sol_log_data;
+use solana_program_log::log_data;
 
 /// Event discriminator: nullifier spent
 const EVENT_NULLIFIER_SPENT: u8 = 0x02;
@@ -117,7 +117,7 @@ pub fn emit_nullifier_spent(nullifier_hash: &[u8; 32], operation_type: u8, instr
     let disc = [EVENT_NULLIFIER_SPENT];
     let op = [operation_type];
     let ix = [instruction_disc];
-    sol_log_data(&[&disc, nullifier_hash.as_ref(), &op, &ix]);
+    log_data(&[&disc, nullifier_hash.as_ref(), &op, &ix]);
 }
 
 /// Emit a stealth announcement with token_id.
@@ -135,7 +135,7 @@ pub fn emit_stealth_announcement(
     let disc = [EVENT_STEALTH_ANNOUNCEMENT];
     let atype = [announcement_type];
     let li = leaf_index.to_le_bytes();
-    sol_log_data(&[
+    log_data(&[
         &disc,
         &atype,
         ephemeral_pub,
@@ -177,7 +177,7 @@ pub fn emit_redemption_completed(
     let burn_bytes = burn_amount.to_le_bytes();
     let proto_bytes = protocol_revenue.to_le_bytes();
     let script_len = [btc_script.len() as u8];
-    sol_log_data(&[
+    log_data(&[
         &disc,
         requester,
         &amt,
@@ -211,7 +211,7 @@ pub fn emit_redemption_requested(
     let sfb = service_fee_base.to_le_bytes();
     let sbps = service_fee_bps.to_le_bytes();
     let script_len = [btc_script.len() as u8];
-    sol_log_data(&[
+    log_data(&[
         &disc,
         requester,
         &amt,
@@ -236,7 +236,7 @@ pub fn emit_redemption_processing(
     let amt = amount_sats.to_le_bytes();
     let rid = request_id.to_le_bytes();
     let slot = processing_slot.to_le_bytes();
-    sol_log_data(&[&disc, requester, &amt, &rid, &slot]);
+    log_data(&[&disc, requester, &amt, &rid, &slot]);
 }
 
 /// Emit a batch of nullifier spent events in a single sol_log_data call.
@@ -265,7 +265,7 @@ pub fn emit_nullifiers_batch(nullifiers: &[&[u8; 32]], operation_type: u8, instr
     for i in 0..n {
         slices[4 + i] = nullifiers[i].as_ref();
     }
-    sol_log_data(&slices[..4 + n]);
+    log_data(&slices[..4 + n]);
 }
 
 /// Emit when a BTC deposit is SPV-verified on-chain.
@@ -282,7 +282,7 @@ pub fn emit_deposit_verified(
     let amt = amount_sats.to_le_bytes();
     let li = leaf_index.to_le_bytes();
     let orig = original_amount.to_le_bytes();
-    sol_log_data(&[&disc, sweep_txid, deposit_txid, &amt, &li, &orig]);
+    log_data(&[&disc, sweep_txid, deposit_txid, &amt, &li, &orig]);
 }
 
 /// Emit a BTC origin attestation for every SPV-verified deposit.
@@ -304,7 +304,7 @@ pub fn emit_btc_origin_attestation(
     let bh = block_height.to_le_bytes();
     let vout = sweep_vout.to_le_bytes();
     let amt = amount_sats.to_le_bytes();
-    sol_log_data(&[&disc, &bh, deposit_txid, &vout, commitment, &amt]);
+    log_data(&[&disc, &bh, deposit_txid, &vout, commitment, &amt]);
 }
 
 /// Emit unshield/redeem metadata so indexer doesn't need to parse instruction data.
@@ -321,14 +321,14 @@ pub fn emit_unshield_meta(
     let gross = gross_amount.to_le_bytes();
     let f = fee.to_le_bytes();
     let p = payout.to_le_bytes();
-    sol_log_data(&[&disc, &gross, &f, &p, recipient, token_id]);
+    log_data(&[&disc, &gross, &f, &p, recipient, token_id]);
 }
 
 /// Emit when protocol fees are claimed for a token.
 pub fn emit_fees_claimed(token_id: &[u8; 32], amount: u64, recipient: &[u8; 32]) {
     let disc = [EVENT_FEES_CLAIMED];
     let amt = amount.to_le_bytes();
-    sol_log_data(&[&disc, token_id, &amt, recipient]);
+    log_data(&[&disc, token_id, &amt, recipient]);
 }
 
 /// Emit when a UTXO is created (deposit or change output).
@@ -338,7 +338,7 @@ pub fn emit_utxo_created(txid: &[u8; 32], vout: u32, amount_sats: u64) {
     let disc = [EVENT_UTXO_CREATED];
     let v = vout.to_le_bytes();
     let amt = amount_sats.to_le_bytes();
-    sol_log_data(&[&disc, txid, &v, &amt]);
+    log_data(&[&disc, txid, &v, &amt]);
 }
 
 /// Emit when a UTXO is consumed (spent in a withdrawal tx).
@@ -348,7 +348,7 @@ pub fn emit_utxo_consumed(txid: &[u8; 32], vout: u32, amount_sats: u64) {
     let disc = [EVENT_UTXO_CONSUMED];
     let v = vout.to_le_bytes();
     let amt = amount_sats.to_le_bytes();
-    sol_log_data(&[&disc, txid, &v, &amt]);
+    log_data(&[&disc, txid, &v, &amt]);
 }
 
 /// Emit shield metadata so indexer can record gross amount and fee.
@@ -358,7 +358,7 @@ pub fn emit_shield_meta(gross_amount: u64, fee: u64, token_id: &[u8; 32]) {
     let disc = [EVENT_SHIELD_META];
     let gross = gross_amount.to_le_bytes();
     let f = fee.to_le_bytes();
-    sol_log_data(&[&disc, &gross, &f, token_id]);
+    log_data(&[&disc, &gross, &f, token_id]);
 }
 
 /// Emit a sender memo (Phase 2 — outgoing visibility for the sender's own viewing key).
@@ -378,7 +378,7 @@ pub fn emit_sender_memo(
 ) {
     let disc = [EVENT_SENDER_MEMO];
     let li = leaf_index.to_le_bytes();
-    sol_log_data(&[&disc, nonce, ciphertext_and_tag, commitment, &li]);
+    log_data(&[&disc, nonce, ciphertext_and_tag, commitment, &li]);
 }
 
 /// Emit auditor ciphertext for a permissioned-pool deposit.
@@ -390,7 +390,7 @@ pub fn emit_sender_memo(
 /// Layout: disc(1) + commitment(32) + ciphertext(var)
 pub fn emit_auditor_ciphertext(commitment: &[u8; 32], ciphertext: &[u8]) {
     let disc = [EVENT_AUDITOR_CIPHERTEXT];
-    sol_log_data(&[&disc, commitment.as_ref(), ciphertext]);
+    log_data(&[&disc, commitment.as_ref(), ciphertext]);
 }
 
 /// Data for a single announcement in a batch (with token_id)
@@ -443,5 +443,5 @@ pub fn emit_announcements_batch(items: &[AnnouncementItem]) {
         offset += 32;
     }
 
-    sol_log_data(&[&buf[..offset]]);
+    log_data(&[&buf[..offset]]);
 }

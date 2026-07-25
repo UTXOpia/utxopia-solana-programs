@@ -3,7 +3,7 @@
 //! Per-token settings for multi-token shielded pool.
 //! PDA seeds: ["token_config", mint_pubkey]
 
-use pinocchio::program_error::ProgramError;
+use crate::pinocchio_compat::ProgramError;
 
 /// Discriminator for TokenConfig account
 pub const TOKEN_CONFIG_DISCRIMINATOR: u8 = 0x0B;

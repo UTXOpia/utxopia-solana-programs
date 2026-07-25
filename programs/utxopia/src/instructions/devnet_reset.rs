@@ -8,7 +8,8 @@
 //!   [1] commitment_tree  (writable, program-owned)
 //!   [2] authority        (signer; lamport recipient; must equal pool_state.authority)
 
-use pinocchio::{account_info::AccountInfo, pubkey::Pubkey, ProgramResult};
+use crate::pinocchio_compat::{AccountInfo, Pubkey};
+use pinocchio::ProgramResult;
 
 use crate::error::UTXOpiaError;
 use crate::utils::{close_account_securely, validate_account_writable, validate_program_owner};

@@ -3,10 +3,7 @@
 //! Lightweight module to read btc-light-client accounts from utxopia.
 //! No Borsh, just zero-copy byte reading.
 
-use pinocchio::{
-    program_error::ProgramError,
-    pubkey::{find_program_address, Pubkey},
-};
+use crate::pinocchio_compat::{find_program_address, ProgramError, Pubkey};
 
 /// Discriminator for VerifiedTransaction account (must match btc-light-client)
 pub const VERIFIED_TX_DISCRIMINATOR: u8 = 0x08;

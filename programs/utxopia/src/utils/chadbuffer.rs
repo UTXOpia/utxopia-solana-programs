@@ -6,15 +6,15 @@
 //!
 //! Reference: https://github.com/deanmlittle/chadbuffer
 
-use pinocchio::account_info::AccountInfo;
-use pinocchio::program_error::ProgramError;
-use pinocchio::pubkey::Pubkey;
+use crate::pinocchio_compat::AccountInfo;
+use crate::pinocchio_compat::ProgramError;
+use crate::pinocchio_compat::Pubkey;
 
 /// Validate that an account is owned by the ChadBuffer program.
 /// Prevents attackers from passing crafted accounts with fake proof data.
 #[inline(always)]
 pub fn validate_chadbuffer_owner(account: &AccountInfo) -> Result<(), ProgramError> {
-    if account.owner() != &CHADBUFFER_PROGRAM_ID {
+    if !account.owned_by(&CHADBUFFER_PROGRAM_ID) {
         return Err(ProgramError::InvalidAccountOwner);
     }
     Ok(())
@@ -24,20 +24,20 @@ pub fn validate_chadbuffer_owner(account: &AccountInfo) -> Result<(), ProgramErr
 /// Localnet: GCqDhPcPa3ywzye9pgfC2YaFiRXQdTqX4XbzT79qVLu6 (regenerated; original keypair lost)
 /// Devnet/Mainnet: C5RpjtTMFXKVZCtXSzKXD4CDNTaWBg3dVeMfYvjZYHDF
 #[cfg(not(feature = "devnet"))]
-pub const CHADBUFFER_PROGRAM_ID: Pubkey = [
+pub const CHADBUFFER_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
     0xe1, 0xe7, 0x36, 0xce, 0x1d, 0xf6, 0x1d, 0x31, 0xdb, 0x0b, 0xf1, 0xa5, 0x3a, 0xad, 0xee, 0xca,
     0xc0, 0x99, 0x57, 0x22, 0x72, 0xf1, 0x75, 0x6b, 0x37, 0xc4, 0xc9, 0xe9, 0x6a, 0x46, 0xd5, 0x59,
-];
+]);
 
 // Devnet (and devnet-regtest, which enables `devnet`) ChadBuffer program:
 // C5RpjtTMFXKVZCtXSzKXD4CDNTaWBg3dVeMfYvjZYHDF — the actual deployed/configured ChadBuffer
 // (matches ops state `chadbufferId`). A prior LOCAL-ONLY keypair override here broke
 // complete_deposit's validate_chadbuffer_owner (Invalid account owner) after a devnet build.
 #[cfg(feature = "devnet")]
-pub const CHADBUFFER_PROGRAM_ID: Pubkey = [
+pub const CHADBUFFER_PROGRAM_ID: Pubkey = Pubkey::new_from_array([
     0xa4, 0x92, 0xf2, 0x6d, 0xc8, 0xe5, 0x36, 0x8b, 0xe6, 0xef, 0xa8, 0x84, 0x94, 0xdc, 0x7f, 0xbc,
     0xec, 0x8a, 0xc6, 0x58, 0xa0, 0x7e, 0xf4, 0x36, 0x76, 0x70, 0xde, 0xc6, 0x9b, 0xe5, 0xe0, 0xde,
-];
+]);
 
 /// Buffer header size (authority pubkey)
 pub const BUFFER_HEADER_SIZE: usize = 32;

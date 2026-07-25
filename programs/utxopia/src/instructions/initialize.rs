@@ -1,9 +1,7 @@
 //! Initialize instruction - sets up the UTXOpia pool
 
+use crate::pinocchio_compat::{find_program_address, AccountInfo, ProgramError, Pubkey};
 use pinocchio::{
-    account_info::AccountInfo,
-    program_error::ProgramError,
-    pubkey::{find_program_address, Pubkey},
     sysvars::{clock::Clock, rent::Rent, Sysvar},
     ProgramResult,
 };
@@ -95,16 +93,16 @@ pub fn process_initialize(
     // Verify pool_state PDA
     let pool_seeds: &[&[u8]] = &[PoolState::SEED];
     let (expected_pool_pda, pool_bump) = find_program_address(pool_seeds, program_id);
-    if accounts.pool_state.key() != &expected_pool_pda {
+    if accounts.pool_state.address() != &expected_pool_pda {
         return Err(ProgramError::InvalidSeeds);
     }
-    validate_pool_controlled_zkbtc_mint(accounts.zkbtc_mint, accounts.pool_state.key())?;
+    validate_pool_controlled_zkbtc_mint(accounts.zkbtc_mint, accounts.pool_state.address())?;
 
     // Verify commitment_tree PDA
     let tree_index_bytes = 0u32.to_le_bytes();
     let tree_seeds: &[&[u8]] = &[CommitmentTree::SEED_PREFIX, &tree_index_bytes];
     let (expected_tree_pda, tree_bump) = find_program_address(tree_seeds, program_id);
-    if accounts.commitment_tree.key() != &expected_tree_pda {
+    if accounts.commitment_tree.address() != &expected_tree_pda {
         return Err(ProgramError::InvalidSeeds);
     }
 
@@ -118,7 +116,7 @@ pub fn process_initialize(
 
     if pool_data_len > 0 {
         // Account exists, check if initialized
-        let pool_data = accounts.pool_state.try_borrow_data()?;
+        let pool_data = accounts.pool_state.try_borrow()?;
         if pool_data[0] == POOL_STATE_DISCRIMINATOR {
             return Err(UTXOpiaError::AlreadyInitialized.into());
         }
@@ -169,18 +167,18 @@ pub fn process_initialize(
 
     // Initialize pool state
     {
-        let mut pool_data = accounts.pool_state.try_borrow_mut_data()?;
+        let mut pool_data = accounts.pool_state.try_borrow_mut()?;
         let pool = PoolState::init(&mut pool_data)?;
 
         pool.bump = pool_bump;
         pool.authority
-            .copy_from_slice(accounts.authority.key().as_ref());
+            .copy_from_slice(accounts.authority.address().as_ref());
         pool.zkbtc_mint
-            .copy_from_slice(accounts.zkbtc_mint.key().as_ref());
+            .copy_from_slice(accounts.zkbtc_mint.address().as_ref());
         pool.pool_vault
-            .copy_from_slice(accounts.pool_vault.key().as_ref());
+            .copy_from_slice(accounts.pool_vault.address().as_ref());
         pool.deposit_vault
-            .copy_from_slice(accounts.deposit_vault.key().as_ref());
+            .copy_from_slice(accounts.deposit_vault.address().as_ref());
         pool.set_min_deposit(MIN_DEPOSIT_SATS);
         pool.set_max_deposit(MAX_DEPOSIT_SATS);
         pool.set_service_fee_base(2_000);
@@ -192,7 +190,7 @@ pub fn process_initialize(
 
     // Initialize commitment tree
     {
-        let mut tree_data = accounts.commitment_tree.try_borrow_mut_data()?;
+        let mut tree_data = accounts.commitment_tree.try_borrow_mut()?;
         let tree = CommitmentTree::init(&mut tree_data)?;
         tree.bump = tree_bump;
         tree.set_tree_index(0); // first tree; enables O(1) frozen-tree validation (f23)

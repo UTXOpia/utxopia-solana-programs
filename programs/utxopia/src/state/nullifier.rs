@@ -4,7 +4,7 @@
 //! so existence of the account = nullifier is spent. All metadata (operation_type,
 //! spent_at, spent_by) is emitted as sol_log_data events for indexer consumption.
 
-use pinocchio::program_error::ProgramError;
+use crate::pinocchio_compat::ProgramError;
 
 /// Discriminator for NullifierRecord account
 pub const NULLIFIER_RECORD_DISCRIMINATOR: u8 = 0x03;

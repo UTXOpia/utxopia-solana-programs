@@ -23,7 +23,6 @@
 //! - [..]     nullifiers:      [[u8; 32]; n_inputs]
 //! - [..]     commitments_out: [[u8; 32]; n_outputs]
 //! - [..]     stealth_data:    [ephemeral_pub(32) + encrypted_amount(8) + encrypted_token_id(32)] × n_outputs
-//! - [..]     sender_memos (OPTIONAL): [nonce(24) + ciphertext_and_tag(56)] × n_outputs
 //!
 //! Sender memos are detected by comparing `data.len()` to `expected_len` vs
 //! `expected_len + n_outputs * 80`. Older clients omit the memos; the contract
@@ -40,10 +39,8 @@
 //!    [optional]            relayer (signer, payer — if present after nullifiers)
 //!    [optional]            proof_buffer (read, only when proof_source=1, last account)
 
+use crate::pinocchio_compat::{AccountInfo, ProgramError, Pubkey};
 use pinocchio::{
-    account_info::AccountInfo,
-    program_error::ProgramError,
-    pubkey::Pubkey,
     sysvars::{rent::Rent, Sysvar},
     ProgramResult,
 };
@@ -59,11 +56,6 @@ use crate::utils::{
     validate_account_writable, validate_active_tree_pda, validate_program_owner,
     validate_system_program,
 };
-
-/// Sender-memo data per output (optional trailing section): nonce (24) + ciphertext_and_tag (56).
-/// The contract fills in `commitment` and `leaf_index` (from public inputs + tree insertion)
-/// when emitting the on-chain event, so the user can't lie about either.
-const SENDER_MEMO_DATA_PER_OUTPUT: usize = 80;
 
 pub fn process_transact(
     program_id: &Pubkey,
@@ -86,27 +78,11 @@ pub fn process_transact(
     let stealth_data_start = prefix.stealth_data_start;
     let stealth_data_end = prefix.stealth_data_end;
 
-    // Detect optional sender-memo section by exact data length match.
-    // Older clients send no memo bytes (data ends at stealth_data_end); newer
-    // clients append exactly n_outputs * SENDER_MEMO_DATA_PER_OUTPUT bytes.
-    // Anything else trailing is rejected; future extensions should be versioned.
-    let sender_memos_len = n_outputs * SENDER_MEMO_DATA_PER_OUTPUT;
-    if data.len() != stealth_data_end && data.len() != stealth_data_end + sender_memos_len {
+    // Sender memos are intentionally disabled until a circuit/protocol version
+    // commits their hash. Accepting unbound trailing memos lets a relay strip
+    // or replace the sender's outgoing-view data.
+    if data.len() != stealth_data_end {
         return Err(ProgramError::InvalidInstructionData);
-    }
-    let has_sender_memos = data.len() == stealth_data_end + sender_memos_len;
-    let sender_memos_start = stealth_data_end;
-
-    // Verify bound params hash — includes stealth data hash to prevent relayer tampering
-    {
-        let stealth_data_hash = crate::utils::sha256(&data[stealth_data_start..stealth_data_end]);
-        let expected = crate::utils::crypto::compute_bound_params_hash_private_transfer(
-            crate::constants::CHAIN_ID,
-            &stealth_data_hash,
-        );
-        if *prefix.bound_params_hash != expected {
-            return Err(UTXOpiaError::InvalidBoundParams.into());
-        }
     }
 
     let pool_state_info = &accounts[0];
@@ -125,12 +101,31 @@ pub fn process_transact(
 
     // Validate pool is not paused + tree PDA matches active index
     let active_index = {
-        let pool_data = pool_state_info.try_borrow_data()?;
+        let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
         if pool.is_paused() {
             return Err(UTXOpiaError::PoolPaused.into());
         }
         validate_active_tree_pda(commitment_tree_info, program_id, pool.active_tree_index())?;
+
+        // Bind the proof to the exact public/institution pool. A matching Merkle
+        // root in another tree is insufficient because its domain field differs.
+        let stealth_data_hash = crate::utils::sha256(&data[stealth_data_start..stealth_data_end]);
+        let operation_hash = crate::utils::crypto::compute_bound_params_hash_private_transfer(
+            crate::constants::CHAIN_ID,
+            &stealth_data_hash,
+        );
+        let expected = crate::utils::crypto::bind_bound_params_to_domain(
+            &operation_hash,
+            crate::constants::CHAIN_ID,
+            program_id,
+            pool_state_info.address(),
+            pool.permissioned(),
+        )?;
+        if *prefix.bound_params_hash != expected {
+            return Err(UTXOpiaError::InvalidBoundParams.into());
+        }
+
         pool.active_tree_index()
     };
 
@@ -148,7 +143,8 @@ pub fn process_transact(
         .filter(|&i| i >= 5 + n_inputs)
         .map(|i| &accounts[i])
         .filter(|a| {
-            a.key() != commitment_tree_info.key() && looks_like_commitment_tree(a, program_id)
+            a.address() != commitment_tree_info.address()
+                && looks_like_commitment_tree(a, program_id)
         });
     let frozen = usize::from(source_tree_info.is_some());
 
@@ -177,7 +173,7 @@ pub fn process_transact(
         &prefix,
     )?;
 
-    pinocchio::msg!("UTXOpia: transact");
+    solana_program_log::log!("UTXOpia: transact");
 
     // Get rent for PDA creation
     let rent = Rent::get()?;
@@ -194,7 +190,7 @@ pub fn process_transact(
 
     // Insert output commitments into Merkle tree and emit stealth announcements
     {
-        let mut tree_data = commitment_tree_info.try_borrow_mut_data()?;
+        let mut tree_data = commitment_tree_info.try_borrow_mut()?;
         let tree = CommitmentTree::from_bytes_mut(&mut tree_data)?;
 
         for (i, commitment) in prefix.commitments_out.iter().take(n_outputs).enumerate() {
@@ -221,22 +217,6 @@ pub fn process_transact(
                 leaf_index as u32,
                 encrypted_token_id,
             );
-
-            // Optionally emit sender memo (Phase 2): user's own outgoing-view
-            // copy of the output. AEAD-encrypted under `ovk`, bound to this
-            // leaf via commitment + leaf_index AAD.
-            if has_sender_memos {
-                let memo_offset = sender_memos_start + i * SENDER_MEMO_DATA_PER_OUTPUT;
-                let memo_nonce: &[u8; 24] = data[memo_offset..memo_offset + 24].try_into().unwrap();
-                let memo_ct_and_tag: &[u8; 56] =
-                    data[memo_offset + 24..memo_offset + 80].try_into().unwrap();
-                crate::utils::events::emit_sender_memo(
-                    memo_nonce,
-                    memo_ct_and_tag,
-                    prefix.commitments_out[i],
-                    leaf_index as u32,
-                );
-            }
         }
     }
 

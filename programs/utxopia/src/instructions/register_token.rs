@@ -10,9 +10,10 @@
 //! 4. `[]`         Vault token account (PDA-owned)
 //! 5. `[]`         System program
 
+use crate::pinocchio_compat::{find_program_address, AccountInfo, ProgramError};
 use pinocchio::{
-    account_info::AccountInfo, program_error::ProgramError, pubkey::find_program_address,
-    sysvars::rent::Rent, sysvars::Sysvar, ProgramResult,
+    sysvars::{rent::Rent, Sysvar},
+    ProgramResult,
 };
 
 use crate::error::UTXOpiaError;
@@ -28,7 +29,7 @@ use crate::utils::{
 const DATA_LEN: usize = 32;
 
 pub fn process_register_token(
-    program_id: &pinocchio::pubkey::Pubkey,
+    program_id: &crate::pinocchio_compat::Pubkey,
     accounts: &[AccountInfo],
     data: &[u8],
 ) -> ProgramResult {
@@ -56,9 +57,9 @@ pub fn process_register_token(
     validate_system_program(_system_program)?;
     validate_account_writable(token_config_info)?;
     {
-        let pool_data = pool_state_info.try_borrow_data()?;
+        let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
-        if authority.key().as_ref() != pool.authority {
+        if authority.address().as_ref() != pool.authority {
             return Err(UTXOpiaError::Unauthorized.into());
         }
     }
@@ -73,11 +74,11 @@ pub fn process_register_token(
     // [0..32] mint, [32..64] owner/authority.
     validate_token_owner(vault_info)?;
     {
-        let vault_data = vault_info.try_borrow_data()?;
+        let vault_data = vault_info.try_borrow()?;
         if vault_data.len() < 64 {
             return Err(UTXOpiaError::InvalidAccountData.into());
         }
-        if vault_data[32..64] != pool_state_info.key()[..] {
+        if vault_data[32..64] != pool_state_info.address().as_ref()[..] {
             return Err(UTXOpiaError::InvalidVault.into());
         }
     }
@@ -85,7 +86,7 @@ pub fn process_register_token(
     // Reject Token-2022 extensions that can bypass custody or invalidate amount accounting:
     // transfer fees, permanent delegates, and transfer hooks.
     let decimals = {
-        let mint_data = mint_info.try_borrow_data()?;
+        let mint_data = mint_info.try_borrow()?;
         if mint_data.len() < 82 {
             return Err(ProgramError::InvalidAccountData);
         }
@@ -98,21 +99,21 @@ pub fn process_register_token(
     };
 
     // Derive and validate TokenConfig PDA
-    let tc_seeds: &[&[u8]] = &[TokenConfig::SEED, mint_info.key().as_ref()];
+    let tc_seeds: &[&[u8]] = &[TokenConfig::SEED, mint_info.address().as_ref()];
     let (expected_pda, tc_bump) = find_program_address(tc_seeds, program_id);
-    if token_config_info.key() != &expected_pda {
+    if token_config_info.address() != &expected_pda {
         return Err(UTXOpiaError::InvalidPDA.into());
     }
 
     // Compute token_id = Poseidon(reduce_to_field(mint), 0)
-    let mint_bytes: &[u8; 32] = mint_info.key().as_ref().try_into().unwrap();
+    let mint_bytes: &[u8; 32] = mint_info.address().as_ref().try_into().unwrap();
     let token_id = compute_token_id(mint_bytes)?;
 
     // Reject re-registration of an already-initialized token: create_pda_account is a no-op on
     // an existing PDA, so without this guard the authority could re-run register_token and wipe
     // a live TokenConfig (accumulated_fees, total_shielded, etc.) back to zero (audit f37).
     {
-        let tc_data = token_config_info.try_borrow_data()?;
+        let tc_data = token_config_info.try_borrow()?;
         if !tc_data.is_empty()
             && tc_data[0] == crate::state::token_config::TOKEN_CONFIG_DISCRIMINATOR
         {
@@ -124,7 +125,7 @@ pub fn process_register_token(
     let rent = Rent::get()?;
     let lamports = rent.minimum_balance(TokenConfig::LEN);
     let bump_bytes = [tc_bump];
-    let create_seeds: &[&[u8]] = &[TokenConfig::SEED, mint_info.key().as_ref(), &bump_bytes];
+    let create_seeds: &[&[u8]] = &[TokenConfig::SEED, mint_info.address().as_ref(), &bump_bytes];
 
     create_pda_account(
         authority,
@@ -148,12 +149,12 @@ pub fn process_register_token(
 
     // Initialize TokenConfig
     {
-        let mut tc_data = token_config_info.try_borrow_mut_data()?;
+        let mut tc_data = token_config_info.try_borrow_mut()?;
         let tc = TokenConfig::init(&mut tc_data)?;
         tc.bump = tc_bump;
-        tc.mint.copy_from_slice(mint_info.key().as_ref());
+        tc.mint.copy_from_slice(mint_info.address().as_ref());
         tc.token_id = token_id;
-        tc.vault.copy_from_slice(vault_info.key().as_ref());
+        tc.vault.copy_from_slice(vault_info.address().as_ref());
         tc.decimals = decimals;
         tc.set_enabled(true);
         tc.set_service_fee(service_fee);
@@ -162,7 +163,7 @@ pub fn process_register_token(
         tc.set_deposit_cap(deposit_cap);
     }
 
-    pinocchio::msg!("UTXOpia: registered token");
+    solana_program_log::log!("UTXOpia: registered token");
     Ok(())
 }
 

@@ -27,10 +27,8 @@
 //! - [44-47]  deposit_tx_size   (4 bytes)  - Raw deposit tx size in ChadBuffer
 //! - [48-79]  deposit_txid      (32 bytes) - Deposit tx ID (internal byte order)
 
+use crate::pinocchio_compat::{find_program_address, AccountInfo, ProgramError, Pubkey};
 use pinocchio::{
-    account_info::AccountInfo,
-    program_error::ProgramError,
-    pubkey::{find_program_address, Pubkey},
     sysvars::{clock::Clock, rent::Rent, Sysvar},
     ProgramResult,
 };
@@ -150,7 +148,7 @@ pub fn process_complete_deposit(
     // Validate authority matches pool; reject permissioned pools on this path
     validate_program_owner(pool_state_info, program_id)?;
     {
-        let pool_data = pool_state_info.try_borrow_data()?;
+        let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
 
         // Public entry point must not be used for permissioned pools
@@ -162,7 +160,7 @@ pub fn process_complete_deposit(
             return Err(UTXOpiaError::PoolPaused.into());
         }
 
-        if authority.key().as_ref() != pool.authority {
+        if authority.address().as_ref() != pool.authority {
             return Err(UTXOpiaError::Unauthorized.into());
         }
     }
@@ -210,14 +208,14 @@ pub fn process_complete_deposit_permissioned(
     // Validate authority + pool state; enforce permissioned gate
     validate_program_owner(pool_state_info, program_id)?;
     {
-        let pool_data = pool_state_info.try_borrow_data()?;
+        let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
 
         if pool.is_paused() {
             return Err(UTXOpiaError::PoolPaused.into());
         }
 
-        if authority.key().as_ref() != pool.authority {
+        if authority.address().as_ref() != pool.authority {
             return Err(UTXOpiaError::Unauthorized.into());
         }
 
@@ -228,7 +226,7 @@ pub fn process_complete_deposit_permissioned(
             return Err(ProgramError::MissingRequiredSignature);
         }
 
-        if auditor_info.key().as_ref() != pool.auditor() {
+        if auditor_info.address().as_ref() != pool.auditor() {
             return Err(UTXOpiaError::Unauthorized.into());
         }
 
@@ -277,14 +275,16 @@ fn complete_deposit_inner(
 
     // Validate account owners
     // (pool_state_info owner already validated by caller before reaching here)
-    let btc_lc_id: &Pubkey = &crate::constants::BTC_LIGHT_CLIENT_PROGRAM_ID;
-    validate_program_owner(verified_tx_info, btc_lc_id)?;
-    validate_program_owner(light_client_info, btc_lc_id)?;
+    let btc_lc_id = Pubkey::new_from_array(crate::constants::BTC_LIGHT_CLIENT_PROGRAM_ID);
+    validate_program_owner(verified_tx_info, &btc_lc_id)?;
+    validate_program_owner(light_client_info, &btc_lc_id)?;
     validate_program_owner(commitment_tree_info, program_id)?;
     validate_token_owner(zkbtc_mint)?;
     validate_token_owner(pool_vault)?;
     validate_any_token_program_key(token_program)?;
-    if zkbtc_mint.owner() != token_program.key() || pool_vault.owner() != token_program.key() {
+    if !zkbtc_mint.owned_by(token_program.address())
+        || !pool_vault.owned_by(token_program.address())
+    {
         return Err(ProgramError::InvalidAccountOwner);
     }
     validate_system_program(system_program)?;
@@ -302,20 +302,20 @@ fn complete_deposit_inner(
     // Bind token_config to the mint actually being credited (prevents cross-token mint:
     // supplying another token's canonical config to mint a note under its token_id).
     {
-        let tc_seeds: &[&[u8]] = &[TokenConfig::SEED, zkbtc_mint.key().as_ref()];
+        let tc_seeds: &[&[u8]] = &[TokenConfig::SEED, zkbtc_mint.address().as_ref()];
         let (expected_tc_pda, _) = find_program_address(tc_seeds, program_id);
-        if token_config_info.key() != &expected_tc_pda {
+        if token_config_info.address() != &expected_tc_pda {
             return Err(UTXOpiaError::InvalidPDA.into());
         }
     }
 
     // Load bump + bounds + fee bps (pool already validated by caller)
     let (pool_bump, min_deposit, max_deposit, deposit_fee_bps) = {
-        let pool_data = pool_state_info.try_borrow_data()?;
+        let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
 
-        if zkbtc_mint.key().as_ref() != pool.zkbtc_mint
-            || pool_vault.key().as_ref() != pool.pool_vault
+        if zkbtc_mint.address().as_ref() != pool.zkbtc_mint
+            || pool_vault.address().as_ref() != pool.pool_vault
         {
             return Err(UTXOpiaError::InvalidVault.into());
         }
@@ -328,17 +328,24 @@ fn complete_deposit_inner(
         )
     };
 
-    // Read token config for token_id and service_fee
-    let (token_id, service_fee) = {
-        let tc_data = token_config_info.try_borrow_data()?;
+    // Read token config for token_id, limits, and service fee.
+    let (token_id, service_fee, token_min_deposit, token_max_deposit) = {
+        let tc_data = token_config_info.try_borrow()?;
         let tc = TokenConfig::from_bytes(&tc_data)?;
         if !tc.is_enabled() {
             return Err(UTXOpiaError::TokenDisabled.into());
         }
-        if tc.mint != *zkbtc_mint.key() || tc.vault != *pool_vault.key() {
+        if tc.mint.as_ref() != zkbtc_mint.address().as_ref()
+            || tc.vault.as_ref() != pool_vault.address().as_ref()
+        {
             return Err(UTXOpiaError::InvalidTokenConfig.into());
         }
-        (tc.token_id, tc.service_fee())
+        (
+            tc.token_id,
+            tc.service_fee(),
+            tc.min_deposit(),
+            tc.max_deposit(),
+        )
     };
 
     // --- Deposit receipt dedup check ---
@@ -346,13 +353,13 @@ fn complete_deposit_inner(
     {
         let receipt_seeds: &[&[u8]] = &[DepositReceipt::SEED, &ix_data.deposit_txid];
         let (expected_receipt_pda, receipt_bump) = find_program_address(receipt_seeds, program_id);
-        if deposit_receipt_info.key() != &expected_receipt_pda {
+        if deposit_receipt_info.address() != &expected_receipt_pda {
             return Err(ProgramError::InvalidSeeds);
         }
 
         // Check if deposit was already verified (account exists and initialized)
         {
-            let receipt_data = deposit_receipt_info.try_borrow_data()?;
+            let receipt_data = deposit_receipt_info.try_borrow()?;
             if !receipt_data.is_empty() && receipt_data[0] == DEPOSIT_RECEIPT_DISCRIMINATOR {
                 return Err(UTXOpiaError::DuplicateDeposit.into());
             }
@@ -372,14 +379,14 @@ fn complete_deposit_inner(
             signer_seeds,
         )?;
 
-        let mut receipt_data = deposit_receipt_info.try_borrow_mut_data()?;
+        let mut receipt_data = deposit_receipt_info.try_borrow_mut()?;
         DepositReceipt::init(&mut receipt_data)?;
     }
 
     // --- VerifiedTransaction PDA check ---
     // Parse the VerifiedTransaction PDA and verify the SPV-verified txid matches.
     let vt_epoch = {
-        let vt_data = verified_tx_info.try_borrow_data()?;
+        let vt_data = verified_tx_info.try_borrow()?;
         let vt = VerifiedTransactionView::from_bytes(&vt_data)?;
 
         // Verify txid matches (both in internal byte order)
@@ -395,19 +402,19 @@ fn complete_deposit_inner(
         // Pin both light-client accounts to their canonical PDAs (owner+disc alone would
         // accept any btc-light-client-owned account with a forged confirmation).
         crate::state::assert_canonical_verified_tx(
-            verified_tx_info.key(),
+            verified_tx_info.address(),
             vt.block_hash(),
             vt.txid(),
-            btc_lc_id,
+            &btc_lc_id,
         )?;
 
         vt.reinit_epoch()
     };
-    crate::state::assert_canonical_light_client(light_client_info.key(), btc_lc_id)?;
+    crate::state::assert_canonical_light_client(light_client_info.address(), &btc_lc_id)?;
 
     // Verify sufficient confirmations via light client tip height
     {
-        let lc_data = light_client_info.try_borrow_data()?;
+        let lc_data = light_client_info.try_borrow()?;
         // Reject proofs minted under a prior light-client chain instance (see reinitialize).
         if vt_epoch != crate::state::light_client_reinit_epoch(&lc_data)? {
             return Err(UTXOpiaError::InvalidSpvProof.into());
@@ -426,7 +433,7 @@ fn complete_deposit_inner(
     // --- Read and verify SPV-verified TX from ChadBuffer ---
     crate::utils::chadbuffer::validate_chadbuffer_owner(tx_buffer_info)?;
     let sweep_buffer_data = tx_buffer_info
-        .try_borrow_data()
+        .try_borrow()
         .map_err(|_| UTXOpiaError::InvalidBlockHeader)?;
 
     let sweep_raw_tx =
@@ -452,7 +459,7 @@ fn complete_deposit_inner(
         crate::utils::chadbuffer::validate_chadbuffer_owner(deposit_tx_buffer_info)?;
         Some(
             deposit_tx_buffer_info
-                .try_borrow_data()
+                .try_borrow()
                 .map_err(|_| UTXOpiaError::InvalidBlockHeader)?,
         )
     };
@@ -489,13 +496,13 @@ fn complete_deposit_inner(
     } = deposit_parsed
         .find_deposit_op_return()
         .ok_or(UTXOpiaError::InvalidStealthOpReturn)?;
-    if pool_tag != expected_pool_tag(program_id, pool_state_info.key(), zkbtc_mint.key()) {
+    if pool_tag != expected_pool_tag(program_id, pool_state_info.address(), zkbtc_mint.address()) {
         return Err(UTXOpiaError::InvalidStealthOpReturn.into());
     }
 
     let pool_config_info = &accounts[14];
     validate_program_owner(pool_config_info, program_id)?;
-    let config_data = pool_config_info.try_borrow_data()?;
+    let config_data = pool_config_info.try_borrow()?;
     if config_data.len() < PoolConfig::LEN || config_data[0] != POOL_CONFIG_DISCRIMINATOR {
         return Err(UTXOpiaError::IkaCpiAccountsMissing.into());
     }
@@ -552,6 +559,9 @@ fn complete_deposit_inner(
 
     // Extract pool output amount and vout. The credited output must match the
     // configured pool script so the recorded UTXO is controlled by Ika custody.
+    if sweep_parsed.positive_output_count_by_script(pool_script) != 1 {
+        return Err(UTXOpiaError::InvalidSpvProof.into());
+    }
     let (pool_output, sweep_vout) = sweep_parsed
         .find_output_by_script(pool_script)
         .ok_or(UTXOpiaError::InvalidSpvProof)?;
@@ -572,22 +582,15 @@ fn complete_deposit_inner(
     // above, so this also accounts for its miner fee without cross-deposit allocation ambiguity.
     let amount_sats = pool_output_value;
 
-    // Validate extracted amount is within bounds
-    if amount_sats < min_deposit {
-        return Err(UTXOpiaError::AmountTooSmall.into());
-    }
-    if amount_sats > max_deposit {
-        return Err(UTXOpiaError::AmountTooLarge.into());
-    }
-
-    // Apply deposit fees: deposit_fee_bps (pool-level) + service_fee (per-token, BTC only)
-    let protocol_fee = (amount_sats as u128 * deposit_fee_bps as u128 / 10_000) as u64;
-    let total_fee = protocol_fee
-        .checked_add(service_fee)
-        .ok_or(ProgramError::ArithmeticOverflow)?;
-    let shielded_amount = amount_sats
-        .checked_sub(total_fee)
-        .ok_or(ProgramError::ArithmeticOverflow)?;
+    let (total_fee, shielded_amount) = validate_btc_deposit_amount_and_fee(
+        amount_sats,
+        min_deposit,
+        max_deposit,
+        token_min_deposit,
+        token_max_deposit,
+        deposit_fee_bps,
+        service_fee,
+    )?;
 
     // Compute commitment ON-CHAIN: Poseidon(note_public_key, token_id, shielded_amount)
     // note_public_key is trustlessly extracted from the deposit TX's OP_RETURN
@@ -595,7 +598,7 @@ fn complete_deposit_inner(
 
     // Insert commitment into Merkle tree
     let leaf_index = {
-        let mut tree_data = commitment_tree_info.try_borrow_mut_data()?;
+        let mut tree_data = commitment_tree_info.try_borrow_mut()?;
         let tree = CommitmentTree::from_bytes_mut(&mut tree_data)?;
 
         if !tree.has_capacity() {
@@ -658,12 +661,12 @@ fn complete_deposit_inner(
         let vout_le = sweep_vout.to_le_bytes();
         let utxo_seeds: &[&[u8]] = &[UtxoRecord::SEED, &ix_data.sweep_txid, &vout_le];
         let (expected_utxo_pda, utxo_bump) = find_program_address(utxo_seeds, program_id);
-        if utxo_record_info.key() != &expected_utxo_pda {
+        if utxo_record_info.address() != &expected_utxo_pda {
             return Err(ProgramError::InvalidSeeds);
         }
 
         let already_recorded = {
-            let d = utxo_record_info.try_borrow_data()?;
+            let d = utxo_record_info.try_borrow()?;
             !d.is_empty() && d[0] == UTXO_RECORD_DISCRIMINATOR
         };
 
@@ -687,7 +690,7 @@ fn complete_deposit_inner(
             )?;
 
             {
-                let mut utxo_data = utxo_record_info.try_borrow_mut_data()?;
+                let mut utxo_data = utxo_record_info.try_borrow_mut()?;
                 let utxo = UtxoRecord::init(&mut utxo_data)?;
                 utxo.set_txid(&ix_data.sweep_txid);
                 utxo.set_vout(sweep_vout);
@@ -697,7 +700,7 @@ fn complete_deposit_inner(
 
             // Track the spendable BTC exactly once for this pool output.
             {
-                let mut pool_data = pool_state_info.try_borrow_mut_data()?;
+                let mut pool_data = pool_state_info.try_borrow_mut()?;
                 let pool = PoolState::from_bytes_mut(&mut pool_data)?;
                 pool.add_utxo(pool_output_value)?;
             }
@@ -730,7 +733,7 @@ fn complete_deposit_inner(
 
     // Update pool statistics
     {
-        let mut pool_data = pool_state_info.try_borrow_mut_data()?;
+        let mut pool_data = pool_state_info.try_borrow_mut()?;
         let pool = PoolState::from_bytes_mut(&mut pool_data)?;
 
         pool.increment_deposit_count()?;
@@ -744,7 +747,7 @@ fn complete_deposit_inner(
 
     // Update token config: total_shielded and accumulated_fees
     {
-        let mut tc_data = token_config_info.try_borrow_mut_data()?;
+        let mut tc_data = token_config_info.try_borrow_mut()?;
         let tc = TokenConfig::from_bytes_mut(&mut tc_data)?;
         // Enforce the per-token deposit cap on every minting path, not just SPL shield (audit
         // f36): the cap is a hard exposure invariant and the bridge must honour it too.
@@ -760,7 +763,7 @@ fn complete_deposit_inner(
         tc.add_fees(total_fee)?;
     }
 
-    pinocchio::msg!("UTXOpia: deposit verified (SPV)");
+    solana_program_log::log!("UTXOpia: deposit verified (SPV)");
 
     Ok(())
 }
@@ -776,6 +779,38 @@ fn expected_pool_tag(program_id: &Pubkey, pool_state: &Pubkey, zkbtc_mint: &Pubk
     let mut tag = [0u8; 8];
     tag.copy_from_slice(&hash[0..8]);
     tag
+}
+
+fn validate_btc_deposit_amount_and_fee(
+    amount_sats: u64,
+    pool_min_deposit: u64,
+    pool_max_deposit: u64,
+    token_min_deposit: u64,
+    token_max_deposit: u64,
+    deposit_fee_bps: u16,
+    service_fee: u64,
+) -> Result<(u64, u64), ProgramError> {
+    if amount_sats < pool_min_deposit {
+        return Err(UTXOpiaError::AmountTooSmall.into());
+    }
+    if amount_sats > pool_max_deposit {
+        return Err(UTXOpiaError::AmountTooLarge.into());
+    }
+    if amount_sats < token_min_deposit || amount_sats > token_max_deposit {
+        return Err(UTXOpiaError::AmountOutOfRange.into());
+    }
+
+    let protocol_fee = crate::utils::policy::compute_bps_fee(amount_sats, deposit_fee_bps);
+    let total_fee = protocol_fee
+        .checked_add(service_fee)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    let shielded_amount = amount_sats
+        .checked_sub(total_fee)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    if shielded_amount == 0 {
+        return Err(UTXOpiaError::ZeroAmount.into());
+    }
+    Ok((total_fee, shielded_amount))
 }
 
 #[cfg(test)]
@@ -830,5 +865,20 @@ mod tests {
             ciphertext.is_empty(),
             "public path must produce no ciphertext"
         );
+    }
+
+    #[test]
+    fn btc_deposit_amount_must_satisfy_token_limits() {
+        assert!(validate_btc_deposit_amount_and_fee(99, 1, 1_000, 100, 900, 0, 0).is_err());
+        assert!(validate_btc_deposit_amount_and_fee(901, 1, 1_000, 100, 900, 0, 0).is_err());
+        assert_eq!(
+            validate_btc_deposit_amount_and_fee(500, 1, 1_000, 100, 900, 100, 2).unwrap(),
+            (7, 493)
+        );
+    }
+
+    #[test]
+    fn btc_deposit_rejects_zero_value_notes_after_fees() {
+        assert!(validate_btc_deposit_amount_and_fee(10, 1, 1_000, 1, 1_000, 0, 10).is_err());
     }
 }

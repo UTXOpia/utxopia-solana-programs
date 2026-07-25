@@ -2,7 +2,7 @@
 //!
 //! Provides SHA256 hashing and Bitcoin transaction parsing.
 
-use pinocchio::program_error::ProgramError;
+use crate::pinocchio_compat::ProgramError;
 
 /// OP_RETURN opcode
 pub const OP_RETURN: u8 = 0x6a;
@@ -377,6 +377,13 @@ impl<'a> ParsedTransaction<'a> {
             .map(|(i, output)| (output, i as u32))
     }
 
+    /// Count positive-value outputs matching a given scriptPubKey.
+    pub fn positive_output_count_by_script(&self, script: &[u8]) -> usize {
+        self.outputs()
+            .filter(|output| output.value > 0 && output.script_pubkey == script)
+            .count()
+    }
+
     /// Find deposit OP_RETURN (73-byte v1 payload) from outputs.
     pub fn find_deposit_op_return(&self) -> Option<DepositOpReturn> {
         self.outputs()
@@ -574,5 +581,34 @@ mod txid_tests {
 
         // And it must NOT equal the wtxid (raw double-sha of the full segwit bytes).
         assert_ne!(segwit_txid, double_sha256(&segwit));
+    }
+
+    #[test]
+    fn counts_positive_outputs_matching_script() {
+        let script = vec![0x51u8, 0x20, 0xAA];
+        let other = vec![0x51u8, 0x20, 0xBB];
+        let mut tx = Vec::new();
+        tx.extend_from_slice(&2u32.to_le_bytes());
+        tx.push(1);
+        tx.extend_from_slice(&[0x11u8; 32]);
+        tx.extend_from_slice(&0u32.to_le_bytes());
+        tx.push(0);
+        tx.extend_from_slice(&0xffff_ffffu32.to_le_bytes());
+        tx.push(4);
+        for (value, spk) in [
+            (50_000u64, script.as_slice()),
+            (0u64, script.as_slice()),
+            (25_000u64, other.as_slice()),
+            (10_000u64, script.as_slice()),
+        ] {
+            tx.extend_from_slice(&value.to_le_bytes());
+            tx.push(spk.len() as u8);
+            tx.extend_from_slice(spk);
+        }
+        tx.extend_from_slice(&0u32.to_le_bytes());
+
+        let parsed = ParsedTransaction::parse(&tx).unwrap();
+        assert_eq!(parsed.positive_output_count_by_script(&script), 2);
+        assert_eq!(parsed.positive_output_count_by_script(&other), 1);
     }
 }

@@ -38,10 +38,8 @@
 //!    6+N..6+N+P             redemption_request PDAs (writable)
 //!    [optional]              proof_buffer (read, only when proof_source=1, last account)
 
+use crate::pinocchio_compat::{find_program_address, AccountInfo, ProgramError, Pubkey};
 use pinocchio::{
-    account_info::AccountInfo,
-    program_error::ProgramError,
-    pubkey::{find_program_address, Pubkey},
     sysvars::{clock::Clock, rent::Rent, Sysvar},
     ProgramResult,
 };
@@ -104,7 +102,10 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
 
         btc_script_starts[k] = offset;
         btc_script_lens[k] = script_len;
-        take_bytes(data, &mut offset, script_len)?;
+        let script = take_bytes(data, &mut offset, script_len)?;
+        if script.first() == Some(&0x6a) {
+            return Err(UTXOpiaError::InvalidBtcAddress.into());
+        }
 
         // Request nonce
         request_nonces[k] = read_u64_le(data, &mut offset)?;
@@ -126,12 +127,29 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
         let stealth_data_hash = crate::utils::sha256(&data[stealth_data_start..stealth_data_end]);
         // Bind the proof to the requesting signer (accounts[3]) so it cannot be replayed under a
         // different signer to hijack ownership of the resulting RedemptionRequest PDAs.
-        let expected = crate::utils::crypto::compute_bound_params_hash_redeem(
+        let requester: &[u8; 32] = accounts[3]
+            .address()
+            .as_ref()
+            .try_into()
+            .map_err(|_| ProgramError::InvalidAccountData)?;
+        let operation_hash = crate::utils::crypto::compute_bound_params_hash_redeem(
             crate::constants::CHAIN_ID,
             &script_slices[..n_public_outputs],
             &stealth_data_hash,
-            accounts[3].key(),
+            requester,
         );
+        validate_program_owner(&accounts[0], program_id)?;
+        let permissioned = {
+            let pool_data = accounts[0].try_borrow()?;
+            PoolState::from_bytes(&pool_data)?.permissioned()
+        };
+        let expected = crate::utils::crypto::bind_bound_params_to_domain(
+            &operation_hash,
+            crate::constants::CHAIN_ID,
+            program_id,
+            accounts[0].address(),
+            permissioned,
+        )?;
         if *prefix.bound_params_hash != expected {
             return Err(UTXOpiaError::InvalidBoundParams.into());
         }
@@ -161,19 +179,19 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
     // Read token_id; re-derive the ["token_config", mint] PDA so a caller can't
     // pass an arbitrary program-owned config (makes the recorded token_id trustworthy).
     let token_id = {
-        let tc_data = token_config_info.try_borrow_data()?;
+        let tc_data = token_config_info.try_borrow()?;
         let tc = TokenConfig::from_bytes(&tc_data)?;
         if !tc.is_enabled() {
             return Err(UTXOpiaError::TokenDisabled.into());
         }
         let (expected_tc_pda, _) = find_program_address(&[TokenConfig::SEED, &tc.mint], program_id);
-        if token_config_info.key() != &expected_tc_pda {
+        if token_config_info.address() != &expected_tc_pda {
             return Err(ProgramError::InvalidSeeds);
         }
         // Only zkBTC notes may drive the BTC redemption flow — otherwise another registered
         // token could be redeemed against the shared pool BTC accounting.
         {
-            let pool_data = pool_state_info.try_borrow_data()?;
+            let pool_data = pool_state_info.try_borrow()?;
             let pool = PoolState::from_bytes(&pool_data)?;
             if tc.mint != pool.zkbtc_mint {
                 return Err(UTXOpiaError::InvalidTokenConfig.into());
@@ -184,7 +202,7 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
 
     // Validate pool is not paused, validate active tree, read state
     let (pending_redemptions, total_shielded, active_index) = {
-        let pool_data = pool_state_info.try_borrow_data()?;
+        let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
         if pool.is_paused() {
             return Err(UTXOpiaError::PoolPaused.into());
@@ -206,7 +224,8 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
         .filter(|&i| i >= min_accounts)
         .map(|i| &accounts[i])
         .filter(|a| {
-            a.key() != commitment_tree_info.key() && looks_like_commitment_tree(a, program_id)
+            a.address() != commitment_tree_info.address()
+                && looks_like_commitment_tree(a, program_id)
         });
 
     // Validate total redeem amount
@@ -263,7 +282,7 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
 
     // Insert tree outputs into Merkle tree
     {
-        let mut tree_data = commitment_tree_info.try_borrow_mut_data()?;
+        let mut tree_data = commitment_tree_info.try_borrow_mut()?;
         let tree = CommitmentTree::from_bytes_mut(&mut tree_data)?;
 
         for (i, commitment) in prefix
@@ -300,16 +319,19 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
         validate_account_writable(redemption_info)?;
 
         let nonce_bytes = request_nonces[k].to_le_bytes();
-        let redemption_seeds: &[&[u8]] =
-            &[RedemptionRequest::SEED, user.key().as_ref(), &nonce_bytes];
+        let redemption_seeds: &[&[u8]] = &[
+            RedemptionRequest::SEED,
+            user.address().as_ref(),
+            &nonce_bytes,
+        ];
         let (expected_redemption_pda, redemption_bump) =
             find_program_address(redemption_seeds, program_id);
-        if redemption_info.key() != &expected_redemption_pda {
+        if redemption_info.address() != &expected_redemption_pda {
             return Err(ProgramError::InvalidSeeds);
         }
 
         {
-            let redemption_data = redemption_info.try_borrow_data()?;
+            let redemption_data = redemption_info.try_borrow()?;
             if !redemption_data.is_empty() && redemption_data[0] == REDEMPTION_REQUEST_DISCRIMINATOR
             {
                 return Err(UTXOpiaError::AlreadyInitialized.into());
@@ -319,7 +341,7 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
         let redemption_bump_bytes = [redemption_bump];
         let redemption_signer_seeds: &[&[u8]] = &[
             RedemptionRequest::SEED,
-            user.key().as_ref(),
+            user.address().as_ref(),
             &nonce_bytes,
             &redemption_bump_bytes,
         ];
@@ -335,7 +357,7 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
 
         // Compute service fee from pool config (locked at request time)
         let service_fee = {
-            let pool_data = pool_state_info.try_borrow_data()?;
+            let pool_data = pool_state_info.try_borrow()?;
             let pool = PoolState::from_bytes(&pool_data)?;
             pool.compute_service_fee(redeem_amounts[k])
         };
@@ -344,10 +366,12 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
         }
 
         {
-            let mut redemption_data = redemption_info.try_borrow_mut_data()?;
+            let mut redemption_data = redemption_info.try_borrow_mut()?;
             let redemption = RedemptionRequest::init(&mut redemption_data)?;
             redemption.set_request_id(request_nonces[k]);
-            redemption.requester.copy_from_slice(user.key().as_ref());
+            redemption
+                .requester
+                .copy_from_slice(user.address().as_ref());
             redemption.set_amount_sats(redeem_amounts[k]);
             redemption.set_service_fee(service_fee);
             let btc_script = &data[btc_script_starts[k]..btc_script_starts[k] + btc_script_lens[k]];
@@ -366,19 +390,19 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
             redeem_amounts[k],
             service_fee,
             payout,
-            user.key().as_ref().try_into().unwrap(),
+            user.address().as_ref().try_into().unwrap(),
             &token_id,
         );
 
         // Read fee config for event
         let (fee_base, fee_bps) = {
-            let pool_data = pool_state_info.try_borrow_data()?;
+            let pool_data = pool_state_info.try_borrow()?;
             let pool = PoolState::from_bytes(&pool_data)?;
             (pool.service_fee_base(), pool.withdrawal_fee_bps())
         };
 
         crate::utils::events::emit_redemption_requested(
-            user.key().as_ref().try_into().unwrap(),
+            user.address().as_ref().try_into().unwrap(),
             redeem_amounts[k],
             request_nonces[k],
             fee_base,
@@ -389,18 +413,18 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
 
     // Update pool state: decrement total_shielded by sum, increment pending_redemptions
     {
-        let mut pool_data = pool_state_info.try_borrow_mut_data()?;
+        let mut pool_data = pool_state_info.try_borrow_mut()?;
         let pool = PoolState::from_bytes_mut(&mut pool_data)?;
         pool.sub_shielded(total_redeem)?;
         pool.set_pending_redemptions(pending_redemptions.saturating_add(n_public_outputs as u64));
         pool.set_last_update(clock.unix_timestamp);
     }
     {
-        let mut tc_data = token_config_info.try_borrow_mut_data()?;
+        let mut tc_data = token_config_info.try_borrow_mut()?;
         let tc = TokenConfig::from_bytes_mut(&mut tc_data)?;
         tc.sub_shielded(total_redeem)?;
     }
 
-    pinocchio::msg!("UTXOpia: redeem");
+    solana_program_log::log!("UTXOpia: redeem");
     Ok(())
 }

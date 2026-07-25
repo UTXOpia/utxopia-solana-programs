@@ -9,10 +9,8 @@
 //! - Each (N, M) variant has its own VK registry PDA
 //! - VK material can be updated by authority (for circuit upgrades)
 
+use crate::pinocchio_compat::{find_program_address, AccountInfo, ProgramError, Pubkey};
 use pinocchio::{
-    account_info::AccountInfo,
-    program_error::ProgramError,
-    pubkey::{find_program_address, Pubkey},
     sysvars::{rent::Rent, Sysvar},
     ProgramResult,
 };
@@ -133,10 +131,10 @@ pub fn process_init_vk_registry(
 
     // Verify authority matches pool
     {
-        let pool_data = pool_state.try_borrow_data()?;
+        let pool_data = pool_state.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
 
-        if authority.key().as_ref() != pool.authority {
+        if authority.address().as_ref() != pool.authority {
             return Err(UTXOpiaError::Unauthorized.into());
         }
         if pool.vk_registries_are_frozen() {
@@ -150,14 +148,14 @@ pub fn process_init_vk_registry(
     let seeds: &[&[u8]] = &[VkRegistry::SEED, &n_inputs_bytes, &n_outputs_bytes];
     let (expected_pda, bump) = find_program_address(seeds, program_id);
 
-    if vk_registry.key() != &expected_pda {
+    if vk_registry.address() != &expected_pda {
         return Err(ProgramError::InvalidSeeds);
     }
 
     // Check if already initialized
     let account_data_len = vk_registry.data_len();
     if account_data_len > 0 {
-        let vk_data = vk_registry.try_borrow_data()?;
+        let vk_data = vk_registry.try_borrow()?;
         if vk_data[0] == VK_REGISTRY_DISCRIMINATOR {
             return Err(ProgramError::AccountAlreadyInitialized);
         }
@@ -185,16 +183,18 @@ pub fn process_init_vk_registry(
 
     // Initialize VK registry
     {
-        let mut vk_data = vk_registry.try_borrow_mut_data()?;
+        let mut vk_data = vk_registry.try_borrow_mut()?;
         let registry = VkRegistry::init(&mut vk_data)?;
 
         registry.n_inputs = ix_data.n_inputs;
         registry.n_outputs = ix_data.n_outputs;
-        registry.authority.copy_from_slice(authority.key().as_ref());
+        registry
+            .authority
+            .copy_from_slice(authority.address().as_ref());
         registry.set_vk(&ix_data.vk_hash, &ix_data.delta_g2, ix_data.ic())?;
     }
 
-    pinocchio::msg!("UTXOpia: VK registry initialized");
+    solana_program_log::log!("UTXOpia: VK registry initialized");
 
     Ok(())
 }
@@ -228,9 +228,9 @@ pub fn process_update_vk_registry(
     validate_program_owner(vk_registry, program_id)?;
 
     {
-        let pool_data = pool_state.try_borrow_data()?;
+        let pool_data = pool_state.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
-        if authority.key().as_ref() != pool.authority {
+        if authority.address().as_ref() != pool.authority {
             return Err(UTXOpiaError::Unauthorized.into());
         }
         if pool.vk_registries_are_frozen() {
@@ -238,10 +238,10 @@ pub fn process_update_vk_registry(
         }
     }
     {
-        let mut vk_data = vk_registry.try_borrow_mut_data()?;
+        let mut vk_data = vk_registry.try_borrow_mut()?;
         let registry = VkRegistry::from_bytes_mut(&mut vk_data)?;
 
-        if !registry.is_authority(authority.key().as_ref().try_into().unwrap()) {
+        if !registry.is_authority(authority.address().as_ref().try_into().unwrap()) {
             return Err(UTXOpiaError::Unauthorized.into());
         }
 
@@ -259,7 +259,7 @@ pub fn process_update_vk_registry(
         registry.set_vk(&ix_data.vk_hash, &ix_data.delta_g2, ix_data.ic())?;
     }
 
-    pinocchio::msg!("UTXOpia: VK registry updated");
+    solana_program_log::log!("UTXOpia: VK registry updated");
 
     Ok(())
 }
@@ -296,9 +296,9 @@ pub fn process_freeze_vk_registry(
     validate_account_writable(pool_state)?;
 
     {
-        let pool_data = pool_state.try_borrow_data()?;
+        let pool_data = pool_state.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
-        if authority.key().as_ref() != pool.authority {
+        if authority.address().as_ref() != pool.authority {
             return Err(UTXOpiaError::Unauthorized.into());
         }
         if pool.vk_registries_are_frozen() {
@@ -306,22 +306,22 @@ pub fn process_freeze_vk_registry(
         }
     }
     {
-        let mut vk_data = vk_registry.try_borrow_mut_data()?;
+        let mut vk_data = vk_registry.try_borrow_mut()?;
         let registry = VkRegistry::from_bytes_mut(&mut vk_data)?;
 
-        if !registry.is_authority(authority.key().as_ref().try_into().unwrap()) {
+        if !registry.is_authority(authority.address().as_ref().try_into().unwrap()) {
             return Err(UTXOpiaError::Unauthorized.into());
         }
 
         registry.freeze();
     }
     {
-        let mut pool_data = pool_state.try_borrow_mut_data()?;
+        let mut pool_data = pool_state.try_borrow_mut()?;
         let pool = PoolState::from_bytes_mut(&mut pool_data)?;
         pool.freeze_vk_registries();
     }
 
-    pinocchio::msg!("UTXOpia: VK registry frozen");
+    solana_program_log::log!("UTXOpia: VK registry frozen");
 
     Ok(())
 }

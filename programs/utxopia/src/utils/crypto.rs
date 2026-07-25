@@ -3,7 +3,7 @@
 //! Provides Poseidon hashing for Merkle tree operations.
 //! Uses Solana's native Poseidon syscall for efficiency.
 
-use pinocchio::program_error::ProgramError;
+use crate::pinocchio_compat::ProgramError;
 
 /// BN254 scalar field modulus (Fr) — big-endian
 /// = 21888242871839275222246405745257275088548364400416034343698204186575808495617
@@ -199,6 +199,51 @@ fn reduce_to_field_exact(val: &[u8; 32]) -> [u8; 32] {
         result = subtract_modulus(&result);
     }
     result
+}
+
+const DOMAIN_SEPARATOR_TAG: &[u8; 17] = b"UTXOPIA_DOMAIN_V1";
+
+/// Derive the canonical field element identifying a public or institution pool.
+///
+/// Layout:
+///   "UTXOPIA_DOMAIN_V1" || chain_id_le || program_id || pool_state || kind
+/// where kind is 0 for public and 1 for institution.
+pub fn compute_domain_separator(
+    chain_id: u64,
+    program_id: &crate::pinocchio_compat::Pubkey,
+    pool_state: &crate::pinocchio_compat::Pubkey,
+    permissioned: bool,
+) -> [u8; 32] {
+    use super::sha256;
+
+    let mut preimage = [0u8; 17 + 8 + 32 + 32 + 1];
+    let mut offset = 0;
+    preimage[offset..offset + DOMAIN_SEPARATOR_TAG.len()].copy_from_slice(DOMAIN_SEPARATOR_TAG);
+    offset += DOMAIN_SEPARATOR_TAG.len();
+    preimage[offset..offset + 8].copy_from_slice(&chain_id.to_le_bytes());
+    offset += 8;
+    preimage[offset..offset + 32].copy_from_slice(program_id.as_ref());
+    offset += 32;
+    preimage[offset..offset + 32].copy_from_slice(pool_state.as_ref());
+    offset += 32;
+    preimage[offset] = u8::from(permissioned);
+
+    reduce_to_field_exact(&sha256(&preimage))
+}
+
+/// Bind an operation-specific bound-params hash to the exact privacy domain.
+///
+/// The result occupies the existing Groth16 `boundParamsHash` public input, so
+/// no circuit public-input or VK account layout changes are required.
+pub fn bind_bound_params_to_domain(
+    operation_hash: &[u8; 32],
+    chain_id: u64,
+    program_id: &crate::pinocchio_compat::Pubkey,
+    pool_state: &crate::pinocchio_compat::Pubkey,
+    permissioned: bool,
+) -> Result<[u8; 32], ProgramError> {
+    let domain = compute_domain_separator(chain_id, program_id, pool_state, permissioned);
+    poseidon2_hash(&domain, operation_hash)
 }
 
 /// Compute bound params hash for private transfer verification.

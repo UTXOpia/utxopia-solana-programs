@@ -1,6 +1,6 @@
 //! Pool state account (zero-copy)
 
-use pinocchio::program_error::ProgramError;
+use crate::pinocchio_compat::ProgramError;
 
 /// Discriminator for PoolState account
 pub const POOL_STATE_DISCRIMINATOR: u8 = 0x01;

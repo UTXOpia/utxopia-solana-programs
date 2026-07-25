@@ -1,7 +1,6 @@
 //! Auditor-only pool setters.
 //!
-//! Two instructions that allow the pool's designated auditor to update their
-//! own settings without going through the authority timelock:
+//! Auditor self-service settings plus an authority recovery instruction.
 //!
 //! - `set_auditor_frozen` (disc 28): Freeze / un-freeze the auditor role.
 //!   Instruction data: 1 byte — 0 = not frozen, non-zero = frozen.
@@ -12,10 +11,12 @@
 //! Accounts (both instructions):
 //!   0. [writable] Pool state (program-owned, writable)
 //!   1. [signer]   Auditor
+//!
+//! `rotate_auditor` (disc 35) uses the same account order, but account 1 is the
+//! pool authority. Its data is auditor(32) || viewing_pubkey(32).
 
-use pinocchio::{
-    account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, ProgramResult,
-};
+use crate::pinocchio_compat::{AccountInfo, ProgramError, Pubkey};
+use pinocchio::ProgramResult;
 
 use crate::error::UTXOpiaError;
 use crate::state::PoolState;
@@ -48,10 +49,10 @@ pub fn process_set_auditor_frozen(
         return Err(ProgramError::InvalidInstructionData);
     }
 
-    let mut pool_data = pool_state_info.try_borrow_mut_data()?;
+    let mut pool_data = pool_state_info.try_borrow_mut()?;
     let pool = PoolState::from_bytes_mut(&mut pool_data)?;
 
-    if auditor.key().as_ref() != pool.auditor() {
+    if auditor.address().as_ref() != pool.auditor() {
         return Err(UTXOpiaError::Unauthorized.into());
     }
 
@@ -87,16 +88,62 @@ pub fn process_set_auditor_viewing_pubkey(
         return Err(ProgramError::InvalidInstructionData);
     }
 
-    let mut pool_data = pool_state_info.try_borrow_mut_data()?;
+    let mut pool_data = pool_state_info.try_borrow_mut()?;
     let pool = PoolState::from_bytes_mut(&mut pool_data)?;
 
-    if auditor.key().as_ref() != pool.auditor() {
+    if auditor.address().as_ref() != pool.auditor() {
         return Err(UTXOpiaError::Unauthorized.into());
     }
 
     let viewing_pubkey: &[u8; 32] = data[0..32].try_into().unwrap();
     pool.set_auditor_viewing_pubkey(viewing_pubkey);
 
+    Ok(())
+}
+
+/// Atomically replace the permissioned pool auditor and viewing key (disc 35).
+///
+/// This authority-only recovery path prevents an invalid or lost auditor key
+/// from permanently bricking a permissioned pool. Rotation also clears the
+/// frozen flag so the replacement can immediately authorize operations.
+pub fn process_rotate_auditor(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: &[u8],
+) -> ProgramResult {
+    if accounts.len() < 2 {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+    if data.len() != 64 {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+
+    let pool_state_info = &accounts[0];
+    let authority = &accounts[1];
+    if !authority.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    validate_program_owner(pool_state_info, program_id)?;
+    validate_account_writable(pool_state_info)?;
+
+    let auditor: &[u8; 32] = data[..32].try_into().unwrap();
+    let viewing_pubkey: &[u8; 32] = data[32..].try_into().unwrap();
+    if auditor.iter().all(|byte| *byte == 0) || viewing_pubkey.iter().all(|byte| *byte == 0) {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+
+    let mut pool_data = pool_state_info.try_borrow_mut()?;
+    let pool = PoolState::from_bytes_mut(&mut pool_data)?;
+    if !pool.permissioned() {
+        return Err(UTXOpiaError::NotPermissioned.into());
+    }
+    if authority.address().as_ref() != pool.authority {
+        return Err(UTXOpiaError::Unauthorized.into());
+    }
+
+    pool.set_auditor(auditor);
+    pool.set_auditor_viewing_pubkey(viewing_pubkey);
+    pool.set_auditor_frozen(false);
     Ok(())
 }
 
@@ -168,5 +215,16 @@ mod tests {
                 "len {short_len} should trigger short-input rejection"
             );
         }
+    }
+
+    #[test]
+    fn rotate_auditor_requires_exact_nonzero_keys() {
+        let mut data = [0u8; 64];
+        assert!(data[..32].iter().all(|byte| *byte == 0));
+        data[0] = 1;
+        data[32] = 2;
+        assert_eq!(data.len(), 64);
+        assert!(!data[..32].iter().all(|byte| *byte == 0));
+        assert!(!data[32..].iter().all(|byte| *byte == 0));
     }
 }
