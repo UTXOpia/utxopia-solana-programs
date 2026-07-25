@@ -156,7 +156,7 @@ pub fn emit_stealth_announcement(
 /// Trustless accounting:
 ///   miner_fee        = total_input_sats - sum(tx_outputs)  [computed on-chain from raw BTC tx]
 ///   burn_amount      = actual_received + miner_fee          [BTC that left the pool]
-///   protocol_revenue = service_fee - miner_fee              [net profit kept in vault]
+///   protocol_revenue = amount_sats - burn_amount             [backed value kept in vault]
 #[allow(clippy::too_many_arguments)]
 pub fn emit_redemption_completed(
     requester: &[u8; 32],

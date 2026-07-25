@@ -158,6 +158,63 @@ pub(crate) fn redemption_outputs_within_policy(
     true
 }
 
+/// Return the zkBTC amount to burn and the backed amount retained as protocol revenue.
+///
+/// `actual_received` may be below the requested net payout within the bounded completion
+/// tolerance. That shortfall returns to pool custody as BTC change, so it must be credited
+/// alongside the configured service fee instead of becoming unclaimable zkBTC in the vault.
+fn redemption_accounting(
+    amount_sats: u64,
+    actual_received: u64,
+    miner_fee: u64,
+) -> Result<(u64, u64), ProgramError> {
+    let burn_amount = actual_received
+        .checked_add(miner_fee)
+        .ok_or(ProgramError::ArithmeticOverflow)?;
+    let protocol_revenue = amount_sats
+        .checked_sub(burn_amount)
+        .ok_or(UTXOpiaError::RedemptionOutputMismatch)?;
+    Ok((burn_amount, protocol_revenue))
+}
+
+#[cfg(test)]
+mod accounting_tests {
+    use super::*;
+
+    #[test]
+    fn exact_payout_preserves_existing_fee_accounting() {
+        // 100_000 requested, 2_000 service fee, 500 miner fee.
+        let (burn, revenue) = redemption_accounting(100_000, 98_000, 500).unwrap();
+        assert_eq!(burn, 98_500);
+        assert_eq!(revenue, 1_500);
+    }
+
+    #[test]
+    fn accepted_recipient_shortfall_is_credited_as_revenue() {
+        // The extra 500 sats not paid to the recipient remain in pool custody.
+        let (burn, revenue) = redemption_accounting(100_000, 97_500, 500).unwrap();
+        assert_eq!(burn, 98_000);
+        assert_eq!(revenue, 2_000);
+    }
+
+    #[test]
+    fn miner_fee_can_exceed_service_fee_when_shortfall_covers_it() {
+        let (burn, revenue) = redemption_accounting(100_000, 97_000, 2_500).unwrap();
+        assert_eq!(burn, 99_500);
+        assert_eq!(revenue, 500);
+    }
+
+    #[test]
+    fn rejects_outflow_above_redemption_amount() {
+        assert!(redemption_accounting(100_000, 99_000, 1_001).is_err());
+    }
+
+    #[test]
+    fn rejects_burn_overflow() {
+        assert!(redemption_accounting(u64::MAX, u64::MAX, 1).is_err());
+    }
+}
+
 /// Process complete redemption with VerifiedTransaction PDA + output verification
 ///
 /// # Accounts
@@ -488,10 +545,11 @@ pub fn process_complete_redemption(
         check_redemption_signing(pool, amount_sats, miner_fee)?;
     }
 
-    let burn_amount = actual_received
-        .checked_add(miner_fee)
-        .ok_or(ProgramError::ArithmeticOverflow)?;
-    let protocol_revenue = service_fee.saturating_sub(miner_fee);
+    // Burn exactly the BTC that left pool custody. Everything else from the redeemed amount is
+    // still backed by BTC change and is therefore claimable protocol revenue. Deriving revenue
+    // from `amount_sats - burn_amount` also captures any accepted recipient shortfall.
+    let (burn_amount, protocol_revenue) =
+        redemption_accounting(amount_sats, actual_received, miner_fee)?;
 
     let bump_bytes = [pool_bump];
     let pool_signer_seeds: &[&[u8]] = &[PoolState::SEED, &bump_bytes];
@@ -667,7 +725,7 @@ pub fn process_complete_redemption(
         // total_burned = actual_received + miner_fee (BTC that left the pool)
         pool.add_burned(burn_amount)?;
 
-        // protocol_revenue = service_fee - miner_fee (net profit kept in vault)
+        // protocol_revenue = amount_sats - burn_amount (all backed value kept in the vault)
         if protocol_revenue > 0 {
             pool.add_fee_pool(protocol_revenue)?;
         }

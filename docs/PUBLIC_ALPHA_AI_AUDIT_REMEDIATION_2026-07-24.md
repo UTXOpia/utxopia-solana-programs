@@ -31,7 +31,7 @@ the bound-parameter hash.
 | 15 | Obsolete | The reported legacy permissioned-pool bypass path was removed. Permissioned completion uses the auditor-gated entry point. |
 | 16 | Fixed | `RedemptionCompleted` documentation now includes `burn_amount` and `protocol_revenue` in the serialized layout. |
 | 17 | Fixed | A full active commitment tree can be rotated permissionlessly; the transition remains restricted to the canonical full tree and next PDA. |
-| 18 | Fixed | Retained BTC redemption revenue is credited to zkBTC `TokenConfig.accumulated_fees`, making it claimable through the existing fee path. |
+| 18 | Fixed | All retained BTC redemption revenue, including any accepted recipient shortfall, is credited to zkBTC `TokenConfig.accumulated_fees`, making it claimable through the existing fee path. |
 | 19 | Fixed | Sweep deposits locate the unique P2TR output cryptographically derived from the OP_RETURN NPK and Ika internal key. |
 | 20 | Fixed | Same remediation as finding 19; output order is no longer used for attribution. |
 | 21 | Fixed | `redeem` decrements per-token shielded accounting. |

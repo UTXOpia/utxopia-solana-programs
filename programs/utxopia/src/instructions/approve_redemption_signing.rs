@@ -308,6 +308,13 @@ pub fn process_approve_redemption_signing(
     if effective_miner_fee > MAX_MINER_FEE_SATS {
         return Err(UTXOpiaError::RedemptionFeeExceedsLimit.into());
     }
+    // The redeemed note must cover every satoshi burned by the payout. Because the recipient
+    // output is `amount_sats - service_fee`, approving a miner fee above `service_fee` would
+    // burn more zkBTC than this redemption removed from shielded accounting and silently spend
+    // previously accumulated protocol fees.
+    if effective_miner_fee > service_fee {
+        return Err(UTXOpiaError::RedemptionFeeExceedsLimit.into());
+    }
 
     let pool_spk = &pool_script[..pool_script_len];
     let mut sig_outputs: std::vec::Vec<SighashOutput> = std::vec::Vec::with_capacity(2);
