@@ -2,7 +2,10 @@
 
 use crate::error::UTXOpiaError;
 use crate::pinocchio_compat::{find_program_address, AccountInfo, ProgramError, Pubkey};
-use crate::state::{CommitmentTree, NullifierRecord, PoolState, NULLIFIER_RECORD_DISCRIMINATOR};
+use crate::state::{
+    CommitmentTree, NullifierRecord, PolicyApproval, PoolState, NULLIFIER_RECORD_DISCRIMINATOR,
+    POLICY_STATUS_APPROVED, POLICY_STATUS_REJECTED,
+};
 use crate::utils::{validate_account_writable, validate_program_owner, validate_system_program};
 use ephemeral_rollups_pinocchio::{
     acl::{
@@ -11,7 +14,8 @@ use ephemeral_rollups_pinocchio::{
         UpdateEphemeralPermission, PERMISSION_PROGRAM_ID,
     },
     consts::{
-        EPHEMERAL_VAULT_ID, EXTERNAL_UNDELEGATE_DISCRIMINATOR, MAGIC_CONTEXT_ID, MAGIC_PROGRAM_ID,
+        DELEGATION_PROGRAM_ID, EPHEMERAL_VAULT_ID, EXTERNAL_UNDELEGATE_DISCRIMINATOR,
+        MAGIC_CONTEXT_ID, MAGIC_PROGRAM_ID,
     },
     instruction::{delegate_account, delegate_account_with_any_validator, undelegate},
     intent_bundle::MagicIntentBundleBuilder,
@@ -28,7 +32,7 @@ use pinocchio::{
 };
 
 const TARGET_POOL_STATE: u8 = 0;
-const TARGET_COMMITMENT_TREE: u8 = 1;
+const TARGET_POLICY_APPROVAL: u8 = 2;
 const NO_VALIDATOR_SENTINEL: [u8; 32] = [0; 32];
 
 const COMMIT_ABI_VERSION: u8 = 1;
@@ -47,10 +51,10 @@ const PER_ALLOWED_MEMBER_FLAGS: u8 = MemberFlags::AUTHORITY
 pub const MAX_PER_PERMISSION_MEMBERS: usize = crate::constants::MAGICBLOCK_MAX_PER_MEMBERS;
 const PER_CPI_DATA_BUFFER_SIZE: usize = data_buffer_size(MAX_PER_PERMISSION_MEMBERS);
 
-/// Delegate a UTXOpia pool or active commitment-tree PDA on the base layer.
+/// Delegate a one-time PolicyApproval PDA on the base layer.
 ///
 /// Data after the UTXOpia discriminator:
-/// - target: u8, 0 = pool_state, 1 = active commitment_tree
+/// - target: u8, must be 2 = PolicyApproval
 /// - commit_frequency_ms: u32 LE
 /// - validator: optional [u8; 32]; omitted or all-zero allows any validator
 ///
@@ -64,12 +68,13 @@ const PER_CPI_DATA_BUFFER_SIZE: usize = data_buffer_size(MAX_PER_PERMISSION_MEMB
 /// 6. MagicBlock delegation record PDA writable
 /// 7. MagicBlock delegation metadata PDA writable
 /// 8. system program
+/// 9. MagicBlock delegation program (executable, required by the CPI runtime)
 pub fn process_magicblock_delegate(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     data: &[u8],
 ) -> ProgramResult {
-    if accounts.len() != 9 {
+    if accounts.len() != 10 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
     if data.len() != 5 && data.len() != 37 {
@@ -85,6 +90,7 @@ pub fn process_magicblock_delegate(
     let delegation_record = &accounts[6];
     let delegation_metadata = &accounts[7];
     let system_program = &accounts[8];
+    let delegation_program = &accounts[9];
 
     if !payer.is_signer() || !authority.is_signer() {
         return Err(ProgramError::MissingRequiredSignature);
@@ -99,8 +105,14 @@ pub fn process_magicblock_delegate(
     validate_account_writable(delegation_record)?;
     validate_account_writable(delegation_metadata)?;
     validate_system_program(system_program)?;
+    if delegation_program.address() != &DELEGATION_PROGRAM_ID || !delegation_program.executable() {
+        return Err(ProgramError::IncorrectProgramId);
+    }
 
     let target = data[0];
+    if target != TARGET_POLICY_APPROVAL {
+        return Err(ProgramError::InvalidInstructionData);
+    }
     let commit_frequency_ms = u32::from_le_bytes(data[1..5].try_into().unwrap());
     let validator = if data.len() == 37 {
         let mut validator = [0u8; 32];
@@ -115,13 +127,17 @@ pub fn process_magicblock_delegate(
     };
 
     let mut tree_index_bytes = [0u8; 4];
-    let mut seed_refs: [&[u8]; 2] = [&[]; 2];
+    let mut approval_request_hash = [0u8; 32];
+    let mut approval_nonce = [0u8; 32];
+    let mut seed_refs: [&[u8]; 4] = [&[]; 4];
     let (seeds, bump) = delegated_seeds(
         target,
         delegated,
         pool_state,
         program_id,
         &mut tree_index_bytes,
+        &mut approval_request_hash,
+        &mut approval_nonce,
         &mut seed_refs,
     )?;
 
@@ -197,10 +213,7 @@ pub fn process_magicblock_commit(
     validate_magic_accounts(magic_context, magic_program)?;
     validate_account_writable(magic_context)?;
     validate_program_owner(pool_state, program_id)?;
-    let (expected_pool, _) = find_program_address(&[PoolState::SEED], program_id);
-    if pool_state.address() != &expected_pool {
-        return Err(ProgramError::InvalidSeeds);
-    }
+    crate::utils::validate_pool_state_pda(pool_state, program_id)?;
     if parsed.allow_undelegation {
         if !authority.is_signer() {
             return Err(ProgramError::MissingRequiredSignature);
@@ -240,19 +253,19 @@ pub fn process_magicblock_commit(
     }
 }
 
-/// Create, update, or close an ER-local PER permission for a delegated pool or
-/// active tree. At least one member must retain the authority flag.
+/// Create, update, or close an ER-local PER permission for a delegated
+/// PolicyApproval.
 ///
 /// Data after the UTXOpia discriminator:
 /// - operation: u8, 0=create, 1=update, 2=close
-/// - target: u8, 0=pool_state, 1=active commitment_tree
+/// - target: u8, must be 2=PolicyApproval
 /// - member_count: u8
 /// - members: member_count * (flags: u8 + pubkey: [u8; 32])
 ///
 /// Accounts:
 /// 0. pool authority signer
 /// 1. pool state
-/// 2. permissioned pool/tree PDA writable
+/// 2. PolicyApproval PDA writable
 /// 3. canonical ER-local permission PDA writable
 /// 4. ephemeral vault writable
 /// 5. Magic program
@@ -303,17 +316,23 @@ pub fn process_magicblock_per_permission(
 
     let parsed = parse_per_permission_data(data)?;
     let mut tree_index_bytes = [0u8; 4];
-    let mut seed_refs: [&[u8]; 2] = [&[]; 2];
+    let mut approval_request_hash = [0u8; 32];
+    let mut approval_nonce = [0u8; 32];
+    let mut seed_refs: [&[u8]; 4] = [&[]; 4];
     let (seeds, bump) = delegated_seeds(
         parsed.target,
         permissioned_account,
         pool_state,
         program_id,
         &mut tree_index_bytes,
+        &mut approval_request_hash,
+        &mut approval_nonce,
         &mut seed_refs,
     )?;
     let bump_bytes = [bump];
     let mut signer_seeds = [
+        Seed::from(&[][..]),
+        Seed::from(&[][..]),
         Seed::from(&[][..]),
         Seed::from(&[][..]),
         Seed::from(&[][..]),
@@ -466,7 +485,7 @@ fn parse_per_permission_data(data: &[u8]) -> Result<ParsedPerPermissionData<'_>,
     }
     let operation = data[0];
     let target = data[1];
-    if target != TARGET_POOL_STATE && target != TARGET_COMMITMENT_TREE {
+    if target != TARGET_POLICY_APPROVAL {
         return Err(ProgramError::InvalidInstructionData);
     }
 
@@ -524,10 +543,7 @@ fn validate_pool_authority(
     program_id: &Pubkey,
 ) -> ProgramResult {
     validate_program_owner(pool_state, program_id)?;
-    let (expected_pool, _) = find_program_address(&[PoolState::SEED], program_id);
-    if pool_state.address() != &expected_pool {
-        return Err(ProgramError::InvalidSeeds);
-    }
+    crate::utils::validate_pool_state_pda(pool_state, program_id)?;
     let pool_data = pool_state.try_borrow()?;
     let pool = PoolState::from_bytes(&pool_data)?;
     if authority.address().as_ref() != pool.authority {
@@ -545,17 +561,15 @@ fn validate_active_tree(
     validate_account_writable(commitment_tree)?;
     let pool_data = pool_state.try_borrow()?;
     let pool = PoolState::from_bytes(&pool_data)?;
-    let tree_index_bytes = pool.active_tree_index().to_le_bytes();
-    let (expected, bump) = find_program_address(
-        &[CommitmentTree::SEED_PREFIX, &tree_index_bytes],
+    crate::utils::validate_active_tree_pda(
+        commitment_tree,
+        pool_state,
         program_id,
-    );
-    if commitment_tree.address() != &expected {
-        return Err(ProgramError::InvalidSeeds);
-    }
+        pool.active_tree_index(),
+    )?;
     let tree_data = commitment_tree.try_borrow()?;
     let tree = CommitmentTree::from_bytes(&tree_data)?;
-    if tree.bump != bump || tree.tree_index() != pool.active_tree_index() {
+    if tree.tree_index() != pool.active_tree_index() {
         return Err(ProgramError::InvalidSeeds);
     }
     Ok(())
@@ -564,45 +578,88 @@ fn validate_active_tree(
 fn delegated_seeds<'a>(
     target: u8,
     delegated: &'a AccountInfo,
-    pool_state: &AccountInfo,
+    pool_state: &'a AccountInfo,
     program_id: &Pubkey,
-    tree_index_bytes: &'a mut [u8; 4],
-    seed_refs: &'a mut [&'a [u8]; 2],
+    _tree_index_bytes: &'a mut [u8; 4],
+    approval_request_hash: &'a mut [u8; 32],
+    approval_nonce: &'a mut [u8; 32],
+    seed_refs: &'a mut [&'a [u8]; 4],
 ) -> Result<(&'a [&'a [u8]], u8), ProgramError> {
     match target {
-        TARGET_POOL_STATE => {
-            if delegated.address() != pool_state.address() {
-                return Err(ProgramError::InvalidSeeds);
-            }
-            let data = delegated.try_borrow()?;
-            let pool = PoolState::from_bytes(&data)?;
-            let (expected, bump) = find_program_address(&[PoolState::SEED], program_id);
-            if delegated.address() != &expected || pool.bump != bump {
-                return Err(ProgramError::InvalidSeeds);
-            }
-            seed_refs[0] = PoolState::SEED;
-            Ok((&seed_refs[..1], bump))
-        }
-        TARGET_COMMITMENT_TREE => {
+        TARGET_POLICY_APPROVAL => {
             let pool_data = pool_state.try_borrow()?;
             let pool = PoolState::from_bytes(&pool_data)?;
+            if !pool.permissioned() {
+                return Err(UTXOpiaError::NotPermissioned.into());
+            }
             let data = delegated.try_borrow()?;
-            let tree = CommitmentTree::from_bytes(&data)?;
-            if tree.tree_index() != pool.active_tree_index() {
+            PolicyApproval::validate(&data)?;
+            if PolicyApproval::pool(&data) != pool_state.address().as_ref() {
                 return Err(ProgramError::InvalidSeeds);
             }
-            *tree_index_bytes = tree.tree_index().to_le_bytes();
-            let (expected, bump) =
-                find_program_address(&[CommitmentTree::SEED_PREFIX, tree_index_bytes], program_id);
-            if delegated.address() != &expected || tree.bump != bump {
+            approval_request_hash.copy_from_slice(PolicyApproval::request_hash(&data));
+            approval_nonce.copy_from_slice(PolicyApproval::nonce(&data));
+            let (expected, bump) = find_program_address(
+                &[
+                    PolicyApproval::SEED,
+                    pool_state.address().as_ref(),
+                    approval_request_hash,
+                    approval_nonce,
+                ],
+                program_id,
+            );
+            if delegated.address() != &expected || PolicyApproval::bump(&data) != bump {
                 return Err(ProgramError::InvalidSeeds);
             }
-            seed_refs[0] = CommitmentTree::SEED_PREFIX;
-            seed_refs[1] = tree_index_bytes;
-            Ok((&seed_refs[..2], bump))
+            seed_refs[0] = PolicyApproval::SEED;
+            seed_refs[1] = pool_state.address().as_ref();
+            seed_refs[2] = approval_request_hash;
+            seed_refs[3] = approval_nonce;
+            Ok((&seed_refs[..4], bump))
         }
         _ => Err(ProgramError::InvalidInstructionData),
     }
+}
+
+/// Commit and undelegate one approved/rejected PolicyApproval back to Solana.
+///
+/// Accounts: payer signer, Magic context writable, Magic program, approval writable.
+pub fn process_policy_approval_commit(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: &[u8],
+) -> ProgramResult {
+    if accounts.len() != 4 {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+    if !data.is_empty() {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    let payer = &accounts[0];
+    let magic_context = &accounts[1];
+    let magic_program = &accounts[2];
+    let approval = &accounts[3];
+    if !payer.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    validate_magic_accounts(magic_context, magic_program)?;
+    validate_account_writable(magic_context)?;
+    validate_program_owner(approval, program_id)?;
+    validate_account_writable(approval)?;
+    {
+        let approval_data = approval.try_borrow()?;
+        PolicyApproval::validate(&approval_data)?;
+        if !matches!(
+            PolicyApproval::status(&approval_data),
+            POLICY_STATUS_APPROVED | POLICY_STATUS_REJECTED
+        ) {
+            return Err(UTXOpiaError::PolicyApprovalRequired.into());
+        }
+    }
+    let mut intent_data = [0u8; INTENT_DATA_BUFFER_SIZE];
+    MagicIntentBundleBuilder::new(payer.clone(), magic_context.clone(), magic_program.clone())
+        .commit_and_undelegate(core::slice::from_ref(approval))
+        .build_and_invoke(&mut intent_data)
 }
 
 fn validate_magicblock_delegate_accounts(
@@ -667,7 +724,7 @@ mod tests {
     fn per_parser_requires_a_retained_authority() {
         let mut valid = vec![
             PER_OPERATION_CREATE,
-            TARGET_POOL_STATE,
+            TARGET_POLICY_APPROVAL,
             1,
             MemberFlags::AUTHORITY,
         ];
@@ -676,7 +733,7 @@ mod tests {
 
         let mut no_authority = vec![
             PER_OPERATION_UPDATE,
-            TARGET_POOL_STATE,
+            TARGET_POLICY_APPROVAL,
             1,
             MemberFlags::TX_LOGS,
         ];
@@ -686,23 +743,35 @@ mod tests {
 
     #[test]
     fn per_parser_rejects_public_or_oversized_permissions() {
-        assert!(parse_per_permission_data(&[PER_OPERATION_CREATE, TARGET_POOL_STATE, 0]).is_err());
+        assert!(
+            parse_per_permission_data(&[PER_OPERATION_CREATE, TARGET_POLICY_APPROVAL, 0]).is_err()
+        );
         assert!(parse_per_permission_data(&[
             PER_OPERATION_CREATE,
-            TARGET_POOL_STATE,
+            TARGET_POLICY_APPROVAL,
             (MAX_PER_PERMISSION_MEMBERS + 1) as u8,
         ])
         .is_err());
         assert!(
-            parse_per_permission_data(&[PER_OPERATION_CREATE, TARGET_POOL_STATE, 1, 0x80,])
+            parse_per_permission_data(&[
+                PER_OPERATION_CREATE,
+                TARGET_POLICY_APPROVAL,
+                1,
+                0x80,
+            ])
                 .is_err()
         );
+        assert!(parse_per_permission_data(&[PER_OPERATION_CLOSE, TARGET_POOL_STATE, 0]).is_err());
     }
 
     #[test]
     fn per_close_has_no_member_payload() {
-        let close =
-            parse_per_permission_data(&[PER_OPERATION_CLOSE, TARGET_COMMITMENT_TREE, 0]).unwrap();
+        let close = parse_per_permission_data(&[
+            PER_OPERATION_CLOSE,
+            TARGET_POLICY_APPROVAL,
+            0,
+        ])
+        .unwrap();
         assert_eq!(close.operation, PER_OPERATION_CLOSE);
         assert_eq!(close.member_count, 0);
         assert!(close.members.is_empty());

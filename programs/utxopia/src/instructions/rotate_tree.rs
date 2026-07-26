@@ -22,7 +22,8 @@ use pinocchio::{
 
 use crate::state::{CommitmentTree, PoolState};
 use crate::utils::{
-    create_pda_account, validate_account_writable, validate_program_owner, validate_system_program,
+    create_pda_account, validate_account_writable, validate_pool_state_pda,
+    validate_program_owner, validate_system_program,
 };
 
 pub fn process_rotate_tree(
@@ -51,6 +52,7 @@ pub fn process_rotate_tree(
     validate_system_program(system_program)?;
 
     // Read pool state
+    validate_pool_state_pda(pool_state_info, program_id)?;
     let current_index = {
         let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
@@ -60,7 +62,11 @@ pub fn process_rotate_tree(
 
     // Verify current tree PDA matches active index
     let current_index_bytes = current_index.to_le_bytes();
-    let current_tree_seeds: &[&[u8]] = &[CommitmentTree::SEED_PREFIX, &current_index_bytes];
+    let current_tree_seeds: &[&[u8]] = &[
+        CommitmentTree::SEED_PREFIX,
+        pool_state_info.address().as_ref(),
+        &current_index_bytes,
+    ];
     let (expected_current_pda, _) = find_program_address(current_tree_seeds, program_id);
     if current_tree_info.address() != &expected_current_pda {
         return Err(ProgramError::InvalidSeeds);
@@ -79,7 +85,11 @@ pub fn process_rotate_tree(
     // Derive new tree PDA
     let new_index = current_index.wrapping_add(1);
     let new_index_bytes = new_index.to_le_bytes();
-    let new_tree_seeds: &[&[u8]] = &[CommitmentTree::SEED_PREFIX, &new_index_bytes];
+    let new_tree_seeds: &[&[u8]] = &[
+        CommitmentTree::SEED_PREFIX,
+        pool_state_info.address().as_ref(),
+        &new_index_bytes,
+    ];
     let (expected_new_pda, new_bump) = find_program_address(new_tree_seeds, program_id);
     if new_tree_info.address() != &expected_new_pda {
         return Err(ProgramError::InvalidSeeds);
@@ -91,6 +101,7 @@ pub fn process_rotate_tree(
     let new_bump_bytes = [new_bump];
     let new_signer_seeds: &[&[u8]] = &[
         CommitmentTree::SEED_PREFIX,
+        pool_state_info.address().as_ref(),
         &new_index_bytes,
         &new_bump_bytes,
     ];

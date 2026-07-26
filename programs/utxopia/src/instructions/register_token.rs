@@ -6,7 +6,7 @@
 //! 0. `[signer]`   Authority (must match pool.authority)
 //! 1. `[]`         Pool state PDA
 //! 2. `[]`         SPL mint account (Token-2022)
-//! 3. `[writable]` TokenConfig PDA (to create; seeds: ["token_config", mint])
+//! 3. `[writable]` TokenConfig PDA (seeds: ["token_config", pool_state, mint])
 //! 4. `[]`         Vault token account (PDA-owned)
 //! 5. `[]`         System program
 
@@ -99,7 +99,11 @@ pub fn process_register_token(
     };
 
     // Derive and validate TokenConfig PDA
-    let tc_seeds: &[&[u8]] = &[TokenConfig::SEED, mint_info.address().as_ref()];
+    let tc_seeds: &[&[u8]] = &[
+        TokenConfig::SEED,
+        pool_state_info.address().as_ref(),
+        mint_info.address().as_ref(),
+    ];
     let (expected_pda, tc_bump) = find_program_address(tc_seeds, program_id);
     if token_config_info.address() != &expected_pda {
         return Err(UTXOpiaError::InvalidPDA.into());
@@ -125,7 +129,12 @@ pub fn process_register_token(
     let rent = Rent::get()?;
     let lamports = rent.minimum_balance(TokenConfig::LEN);
     let bump_bytes = [tc_bump];
-    let create_seeds: &[&[u8]] = &[TokenConfig::SEED, mint_info.address().as_ref(), &bump_bytes];
+    let create_seeds: &[&[u8]] = &[
+        TokenConfig::SEED,
+        pool_state_info.address().as_ref(),
+        mint_info.address().as_ref(),
+        &bump_bytes,
+    ];
 
     create_pda_account(
         authority,

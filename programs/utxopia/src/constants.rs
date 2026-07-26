@@ -47,11 +47,17 @@ pub const BTC_LIGHT_CLIENT_PROGRAM_ID: [u8; 32] = [
 /// Audited JoinSplit scope (N + M). VK registry accounts support variants up to 10.
 pub const MAX_SAFE_JOINSPLIT_SIZE: usize = 10;
 
-/// Maximum PER members funded by permissioned-pool initialization. Permission
-/// creation and updates enforce the same cap.
+/// Minimal PolicyApproval coprocessor deployed separately so PER never needs
+/// to clone or execute the asset/ZK program.
+pub const POLICY_PROGRAM_ID: [u8; 32] = [
+    127, 138, 197, 238, 106, 229, 114, 241, 179, 216, 130, 79, 100, 240, 58, 143, 160, 74, 31,
+    7, 220, 81, 204, 120, 6, 48, 208, 221, 123, 198, 3, 214,
+];
+
+/// Maximum members accepted by a PolicyApproval PER permission.
 pub const MAGICBLOCK_MAX_PER_MEMBERS: usize = 8;
 
-/// ER-local rent reserved in each permissioned pool/tree PDA for one
+/// ER-local rent reserved in each one-time PolicyApproval PDA for its
 /// `EphemeralPermission` at the configured member cap.
 pub const MAGICBLOCK_PER_PERMISSION_RENT: u64 =
     ephemeral_rollups_pinocchio::ephemeral_accounts::rent(

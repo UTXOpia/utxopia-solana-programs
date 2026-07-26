@@ -10,9 +10,7 @@ use crate::utils::{
     create_pda_account, validate_pool_controlled_zkbtc_mint, validate_system_program,
 };
 
-use crate::constants::{
-    MAGICBLOCK_PER_PERMISSION_RENT, MAX_DEPOSIT_SATS, MAX_FEE_BPS, MIN_DEPOSIT_SATS,
-};
+use crate::constants::{MAX_DEPOSIT_SATS, MAX_FEE_BPS, MIN_DEPOSIT_SATS};
 use crate::error::UTXOpiaError;
 use crate::state::{CommitmentTree, PoolState, POOL_STATE_DISCRIMINATOR};
 
@@ -114,7 +112,7 @@ pub fn process_initialize_permissioned(
     validate_system_program(accounts.system_program)?;
 
     // Verify pool_state PDA
-    let pool_seeds: &[&[u8]] = &[PoolState::SEED];
+    let pool_seeds: &[&[u8]] = &[PoolState::SEED, accounts.zkbtc_mint.address().as_ref()];
     let (expected_pool_pda, pool_bump) = find_program_address(pool_seeds, program_id);
     if accounts.pool_state.address() != &expected_pool_pda {
         return Err(ProgramError::InvalidSeeds);
@@ -123,7 +121,11 @@ pub fn process_initialize_permissioned(
 
     // Verify commitment_tree PDA
     let tree_index_bytes = 0u32.to_le_bytes();
-    let tree_seeds: &[&[u8]] = &[CommitmentTree::SEED_PREFIX, &tree_index_bytes];
+    let tree_seeds: &[&[u8]] = &[
+        CommitmentTree::SEED_PREFIX,
+        accounts.pool_state.address().as_ref(),
+        &tree_index_bytes,
+    ];
     let (expected_tree_pda, tree_bump) = find_program_address(tree_seeds, program_id);
     if accounts.commitment_tree.address() != &expected_tree_pda {
         return Err(ProgramError::InvalidSeeds);
@@ -131,14 +133,8 @@ pub fn process_initialize_permissioned(
 
     // Get rent for account sizes
     let rent = Rent::get()?;
-    let pool_lamports = rent
-        .minimum_balance(PoolState::LEN)
-        .checked_add(MAGICBLOCK_PER_PERMISSION_RENT)
-        .ok_or(ProgramError::ArithmeticOverflow)?;
-    let tree_lamports = rent
-        .minimum_balance(CommitmentTree::LEN)
-        .checked_add(MAGICBLOCK_PER_PERMISSION_RENT)
-        .ok_or(ProgramError::ArithmeticOverflow)?;
+    let pool_lamports = rent.minimum_balance(PoolState::LEN);
+    let tree_lamports = rent.minimum_balance(CommitmentTree::LEN);
 
     // Check if pool_state already exists
     let pool_data_len = accounts.pool_state.data_len();
@@ -152,7 +148,11 @@ pub fn process_initialize_permissioned(
     } else {
         // Create pool_state PDA
         let pool_bump_bytes = [pool_bump];
-        let pool_signer_seeds: &[&[u8]] = &[PoolState::SEED, &pool_bump_bytes];
+        let pool_signer_seeds: &[&[u8]] = &[
+            PoolState::SEED,
+            accounts.zkbtc_mint.address().as_ref(),
+            &pool_bump_bytes,
+        ];
 
         create_pda_account(
             accounts.authority,
@@ -172,6 +172,7 @@ pub fn process_initialize_permissioned(
         let tree_bump_bytes = [tree_bump];
         let tree_signer_seeds: &[&[u8]] = &[
             CommitmentTree::SEED_PREFIX,
+            accounts.pool_state.address().as_ref(),
             &tree_index_bytes,
             &tree_bump_bytes,
         ];

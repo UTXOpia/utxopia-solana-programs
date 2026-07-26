@@ -31,7 +31,8 @@ use crate::utils::chadbuffer::read_transaction_from_buffer;
 use crate::utils::policy::check_redemption_signing;
 use crate::utils::{
     burn_zkbtc_signed, close_account_securely, create_pda_account, validate_account_writable,
-    validate_any_token_program_key, validate_program_owner, validate_token_owner,
+    validate_any_token_program_key, validate_pool_config_pda, validate_program_owner,
+    validate_redemption_pda, validate_token_owner,
 };
 
 /// Required BTC confirmations before completing redemption
@@ -267,6 +268,7 @@ pub fn process_complete_redemption(
     // Validate account owners
     validate_program_owner(pool_state_info, program_id)?;
     validate_program_owner(redemption_info, program_id)?;
+    validate_redemption_pda(redemption_info, pool_state_info, program_id)?;
     validate_account_writable(completion_receipt_info)?;
     let btc_lc_id = Pubkey::new_from_array(crate::constants::BTC_LIGHT_CLIENT_PROGRAM_ID);
     validate_program_owner(verified_tx_info, &btc_lc_id)?;
@@ -297,7 +299,7 @@ pub fn process_complete_redemption(
     // Only validate if pool_script_len > 0 (change UTXO tracking requested).
     // When pool_script_len = 0, no change tracking is done and PoolConfig is not required.
     if ix_data.pool_script_len > 0 {
-        validate_program_owner(pool_config_info, program_id)?;
+        validate_pool_config_pda(pool_config_info, pool_state_info, program_id)?;
 
         let config_data = pool_config_info.try_borrow()?;
         // Reject any program-owned account that is not a valid PoolConfig — otherwise the
@@ -554,7 +556,11 @@ pub fn process_complete_redemption(
         redemption_accounting(amount_sats, actual_received, miner_fee)?;
 
     let bump_bytes = [pool_bump];
-    let pool_signer_seeds: &[&[u8]] = &[PoolState::SEED, &bump_bytes];
+    let pool_signer_seeds: &[&[u8]] = &[
+        PoolState::SEED,
+        zkbtc_mint.address().as_ref(),
+        &bump_bytes,
+    ];
 
     burn_zkbtc_signed(
         token_program,
@@ -656,7 +662,11 @@ pub fn process_complete_redemption(
         let tc_data = token_config_info.try_borrow()?;
         let tc = TokenConfig::from_bytes(&tc_data)?;
         let (expected_tc, _) = find_program_address(
-            &[TokenConfig::SEED, zkbtc_mint.address().as_ref()],
+            &[
+                TokenConfig::SEED,
+                pool_state_info.address().as_ref(),
+                zkbtc_mint.address().as_ref(),
+            ],
             program_id,
         );
         if token_config_info.address() != &expected_tc

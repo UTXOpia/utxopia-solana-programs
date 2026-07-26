@@ -38,16 +38,23 @@ function loadKeypair(keyPath: string): Keypair {
   return Keypair.fromSecretKey(Uint8Array.from(secretKey));
 }
 
-function derivePoolStatePDA(programId: PublicKey): [PublicKey, number] {
+function derivePoolStatePDA(programId: PublicKey, poolMint: PublicKey): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
-    [Buffer.from(SEEDS.POOL_STATE)],
+    [Buffer.from(SEEDS.POOL_STATE), poolMint.toBuffer()],
     programId
   );
 }
 
-function deriveCommitmentTreePDA(programId: PublicKey): [PublicKey, number] {
+function deriveCommitmentTreePDA(
+  programId: PublicKey,
+  poolState: PublicKey
+): [PublicKey, number] {
   return PublicKey.findProgramAddressSync(
-    [Buffer.from(SEEDS.COMMITMENT_TREE), Buffer.from([0, 0, 0, 0])],
+    [
+      Buffer.from(SEEDS.COMMITMENT_TREE),
+      poolState.toBuffer(),
+      Buffer.from([0, 0, 0, 0]),
+    ],
     programId
   );
 }
@@ -104,23 +111,29 @@ async function main() {
 
   const connection = new Connection(RPC_URL, "confirmed");
 
-  // Load authority keypair (johnny.json)
-  const authority = loadKeypair("~/.config/solana/johnny.json");
+  const authorityKeypairPath = "~/.config/solana/id.json";
+  const authority = loadKeypair(authorityKeypairPath);
   console.log(`Authority: ${authority.publicKey.toBase58()}`);
 
   // Check balance
   const balance = await connection.getBalance(authority.publicKey);
   console.log(`Balance: ${balance / 1e9} SOL`);
 
-  if (balance < 3 * 1e9) {
-    console.log("\n⚠️  Low balance! Need at least 3 SOL for deployment.");
+  if (balance < 6 * 1e9) {
+    console.log("\n⚠️  Low balance! Need at least 6 SOL for deployment peak rent.");
     console.log("Request airdrop or transfer SOL to continue.");
     return;
   }
 
   // Generate new program keypair
   const programKeypair = Keypair.generate();
-  const programKeypairPath = path.join(__dirname, "..", "target", "deploy", "aegis-new-keypair.json");
+  const programKeypairPath = path.join(
+    __dirname,
+    "..",
+    "target",
+    "deploy",
+    "utxopia-multipool-keypair.json"
+  );
 
   console.log(`\nNew Program ID: ${programKeypair.publicKey.toBase58()}`);
 
@@ -150,7 +163,7 @@ async function main() {
       `solana program deploy ` +
       `--url ${RPC_URL} ` +
       `--program-id ${programKeypairPath} ` +
-      `--keypair ~/.config/solana/johnny.json ` +
+      `--keypair ${authorityKeypairPath} ` +
       `target/deploy/utxopia.so`,
       { cwd: path.join(__dirname, ".."), stdio: "inherit" }
     );
@@ -162,9 +175,15 @@ async function main() {
   const programId = programKeypair.publicKey;
   console.log(`\n✓ Program deployed: ${programId.toBase58()}`);
 
-  // Derive PDAs
-  const [poolStatePda, poolBump] = derivePoolStatePDA(programId);
-  const [commitmentTreePda, treeBump] = deriveCommitmentTreePDA(programId);
+  const zkbtcMintKeypair = Keypair.generate();
+  const [poolStatePda, poolBump] = derivePoolStatePDA(
+    programId,
+    zkbtcMintKeypair.publicKey
+  );
+  const [commitmentTreePda, treeBump] = deriveCommitmentTreePDA(
+    programId,
+    poolStatePda
+  );
 
   console.log(`\nPool State PDA: ${poolStatePda.toBase58()} (bump: ${poolBump})`);
   console.log(`Commitment Tree PDA: ${commitmentTreePda.toBase58()} (bump: ${treeBump})`);
@@ -177,7 +196,7 @@ async function main() {
     poolStatePda, // Mint authority is pool PDA
     null,
     8, // 8 decimals like BTC
-    Keypair.generate(),
+    zkbtcMintKeypair,
     undefined,
     TOKEN_2022_PROGRAM_ID
   );

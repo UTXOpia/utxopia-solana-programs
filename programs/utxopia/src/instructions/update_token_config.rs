@@ -20,7 +20,9 @@ use pinocchio::ProgramResult;
 
 use crate::error::UTXOpiaError;
 use crate::state::{PoolState, TokenConfig};
-use crate::utils::{validate_account_writable, validate_program_owner};
+use crate::utils::{
+    validate_account_writable, validate_program_owner, validate_token_config_pda,
+};
 
 const FLAG_SERVICE_FEE: u8 = 1 << 0;
 const FLAG_MIN_DEPOSIT: u8 = 1 << 1;
@@ -50,6 +52,7 @@ pub fn process_update_token_config(
     }
 
     validate_program_owner(pool_state_info, program_id)?;
+    validate_token_config_pda(token_config_info, pool_state_info, program_id)?;
     validate_program_owner(token_config_info, program_id)?;
     validate_account_writable(token_config_info)?;
 

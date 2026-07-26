@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "programs/utxopia",
     "programs/btc-light-client",
+    "programs/utxopia-policy",
 ]
 exclude = [
     "programs/chadbuffer",

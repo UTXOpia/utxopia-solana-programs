@@ -2,16 +2,10 @@
 /**
  * Initialize an already-deployed UTXOpia program in PERMISSIONED mode.
  *
- * SINGLE-POOL CONSTRAINT
- * ──────────────────────
- * The Solana UTXOpia program uses a singleton PDA: seeds=[b"pool_state"].
- * There is exactly ONE pool per program deployment. The choice between
- * permissioned and permissionless is made at initialization time and is
- * irreversible without redeploying the program.
- *
- * If you need MULTIPLE permissioned pools you MUST deploy separate program
- * instances (each with a unique program ID). This script initializes THE ONE
- * pool as permissioned — do not attempt to call it twice on the same program.
+ * MULTI-POOL NAMESPACE
+ * ────────────────────
+ * pool_state uses seeds=[b"pool_state", zkbtc_mint], so one program can host
+ * a public pool and multiple independent permissioned pools.
  *
  * DISC-21 DATA LAYOUT (initialize_permissioned)
  * ──────────────────────────────────────────────
@@ -33,7 +27,8 @@
  *
  * USAGE
  * ─────
- *   bun scripts/init-permissioned.ts <auditorPubkey> [--viewing-pubkey <base58|hex>] \
+ *   bun scripts/init-permissioned.ts <auditorPubkey> --viewing-pubkey <base58|hex> \
+ *     --program <id> \
  *     [--deposit-fee <bps>] [--withdrawal-fee <bps>] \
  *     [--rpc <url>] [--keypair <path>] [--program <id>] [--network <name>]
  *
@@ -67,8 +62,7 @@ const __dirname = path.dirname(__filename);
 // ─── Defaults ───────────────────────────────────────────────────────────────
 
 const DEFAULT_RPC_URL = "https://api.devnet.solana.com";
-const DEFAULT_KEYPAIR = "~/.config/solana/johnny.json";
-const DEFAULT_PROGRAM_ID = "7JJeVjVCy1fZqCDWvf41R7LuTWirTjX7Tp6suC2WVUMQ";
+const DEFAULT_KEYPAIR = "~/.config/solana/id.json";
 const DEFAULT_NETWORK = "devnet";
 const DEFAULT_DEPOSIT_FEE_BPS = 0;
 const DEFAULT_WITHDRAWAL_FEE_BPS = 0;
@@ -192,18 +186,16 @@ Required:
   <auditorPubkey>               Base58 Solana pubkey of the auditor
 
 Options:
-  --viewing-pubkey <base58|hex> Auditor viewing pubkey (32-byte hex or base58; default: zero bytes)
+  --viewing-pubkey <base58|hex> Auditor viewing pubkey (required; 32-byte hex or base58)
   --deposit-fee <bps>           Deposit fee in basis points (default: ${DEFAULT_DEPOSIT_FEE_BPS})
   --withdrawal-fee <bps>        Withdrawal fee in basis points (default: ${DEFAULT_WITHDRAWAL_FEE_BPS})
   --rpc <url>                   RPC endpoint (default: ${DEFAULT_RPC_URL})
   --keypair <path>              Authority keypair path (default: ${DEFAULT_KEYPAIR})
-  --program <id>                Program ID (default: ${DEFAULT_PROGRAM_ID})
+  --program <id>                Fresh deployed program ID (required)
   --network <name>              Network label for the config file (default: ${DEFAULT_NETWORK})
   --help                        Show this help message
 
-NOTE: Solana UTXOpia is single-pool per program deployment. Initializing as
-      permissioned is permanent for this program ID. For multiple permissioned
-      pools, deploy separate program instances.
+NOTE: Mode is permanent for this pool, but the program supports multiple pools.
 `);
     process.exit(0);
   }
@@ -232,7 +224,7 @@ NOTE: Solana UTXOpia is single-pool per program deployment. Initializing as
   let withdrawalFeeBps = DEFAULT_WITHDRAWAL_FEE_BPS;
   let rpcUrl = DEFAULT_RPC_URL;
   let keypairPath = DEFAULT_KEYPAIR;
-  let programIdStr = DEFAULT_PROGRAM_ID;
+  let programIdStr: string | undefined;
   let network = DEFAULT_NETWORK;
 
   for (let i = 1; i < argv.length; i++) {
@@ -262,7 +254,7 @@ NOTE: Solana UTXOpia is single-pool per program deployment. Initializing as
         i++;
         break;
       case "--program":
-        programIdStr = next ?? programIdStr;
+        programIdStr = next;
         i++;
         break;
       case "--network":
@@ -273,6 +265,15 @@ NOTE: Solana UTXOpia is single-pool per program deployment. Initializing as
         console.error(`Unknown flag: ${flag}`);
         process.exit(1);
     }
+  }
+
+  if (!viewingPubkeyStr) {
+    console.error("Error: --viewing-pubkey is required and must be nonzero.");
+    process.exit(1);
+  }
+  if (!programIdStr) {
+    console.error("Error: --program is required.");
+    process.exit(1);
   }
 
   return {
@@ -304,6 +305,9 @@ async function main() {
   const PROGRAM_ID = new PublicKey(programIdStr);
   const auditorBytes = auditorPubkey.toBytes();
   const auditorViewingBytes = decodeViewingPubkey(viewingPubkeyStr);
+  if (auditorViewingBytes.every((byte) => byte === 0)) {
+    throw new Error("--viewing-pubkey must not be all zeroes");
+  }
 
   const connection = new Connection(rpcUrl, "confirmed");
   const authority = loadKeypair(keypairPath);
@@ -325,25 +329,37 @@ async function main() {
   console.log(`Withdrawal fee:   ${withdrawalFeeBps} bps`);
   console.log(`RPC:              ${rpcUrl}`);
   console.log();
-  console.log(
-    "NOTE: This program is SINGLE-POOL. Initializing as permissioned is an\n" +
-    "      irreversible init-time choice. For multiple permissioned pools, deploy\n" +
-    "      separate program instances with distinct program IDs."
-  );
-  console.log();
-
-  // Derive PDAs
+  // The mint identity is the pool namespace and must exist before PDA derivation.
+  const zkbtcMintKeypair = Keypair.generate();
   const [poolStatePda, poolBump] = PublicKey.findProgramAddressSync(
-    [Buffer.from("pool_state")],
+    [Buffer.from("pool_state"), zkbtcMintKeypair.publicKey.toBuffer()],
     PROGRAM_ID
   );
   const [commitmentTreePda, treeBump] = PublicKey.findProgramAddressSync(
-    [Buffer.from("commitment_tree"), Buffer.from(new Uint8Array(4))], // index 0 as u32 LE
+    [
+      Buffer.from("commitment_tree"),
+      poolStatePda.toBuffer(),
+      Buffer.from(new Uint8Array(4)),
+    ],
     PROGRAM_ID
   );
 
   console.log(`Pool State PDA:   ${poolStatePda.toBase58()} (bump: ${poolBump})`);
   console.log(`Commitment Tree:  ${commitmentTreePda.toBase58()} (bump: ${treeBump})`);
+
+  // Fail before creating any mint or token accounts.
+  const [programInfo, existingPool] = await Promise.all([
+    connection.getAccountInfo(PROGRAM_ID, "confirmed"),
+    connection.getAccountInfo(poolStatePda, "confirmed"),
+  ]);
+  if (!programInfo?.executable) {
+    throw new Error(`Program ${PROGRAM_ID.toBase58()} is not executable on ${network}`);
+  }
+  if (existingPool) {
+    throw new Error(
+      `Pool ${poolStatePda.toBase58()} already exists; generate a different pool mint`
+    );
+  }
 
   // Create zkBTC Token-2022 mint
   console.log("\nCreating zkBTC Token-2022 mint...");
@@ -353,7 +369,7 @@ async function main() {
     poolStatePda,
     null,
     8,
-    Keypair.generate(),
+    zkbtcMintKeypair,
     undefined,
     TOKEN_2022_PROGRAM_ID
   );
@@ -416,7 +432,7 @@ async function main() {
   const auditorViewingPubkeyHex = Buffer.from(auditorViewingBytes).toString("hex");
 
   // Write config JSON — mirrors .devnet-config.json + adds permissioned fields
-  const configFilename = `.${network}-config.json`;
+  const configFilename = `.${network}-permissioned-config.json`;
   const outConfig = {
     network,
     rpcUrl,
@@ -425,6 +441,7 @@ async function main() {
     auditorViewingPubkey: auditorViewingPubkeyHex,
     programs: {
       UTXOpia: PROGRAM_ID.toBase58(),
+      PolicyApproval: "9asWYKVriWGpExW5xM44ChHjZtispkLCiWKkM8SQi8Rs",
     },
     accounts: {
       poolState: poolStatePda.toBase58(),

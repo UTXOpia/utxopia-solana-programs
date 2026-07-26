@@ -17,8 +17,6 @@ const RPC_URL = "https://api.devnet.solana.com";
 const CHADBUFFER_ID = new PublicKey("C5RpjtTMFXKVZCtXSzKXD4CDNTaWBg3dVeMfYvjZYHDF");
 const GROTH16_VERIFIER_ID = new PublicKey("5uAoTLSexeKKLU3ZXniWFE2CsCWGPzMiYPpKiywCGqsd");
 
-const PROGRAM_ID = new PublicKey("7JJeVjVCy1fZqCDWvf41R7LuTWirTjX7Tp6suC2WVUMQ");
-
 function loadKeypair(keyPath: string): Keypair {
   const absolutePath = keyPath.replace("~", process.env.HOME || "");
   const secretKey = JSON.parse(fs.readFileSync(absolutePath, "utf-8"));
@@ -52,16 +50,27 @@ function buildInitializeIx(
 }
 
 async function main() {
+  const programArg = process.argv[2];
+  if (!programArg) {
+    throw new Error("Usage: bun scripts/init-deployed.ts <program-id>");
+  }
+  const PROGRAM_ID = new PublicKey(programArg);
   const connection = new Connection(RPC_URL, "confirmed");
-  const authority = loadKeypair("~/.config/solana/johnny.json");
+  const authority = loadKeypair("~/.config/solana/id.json");
   console.log(`Authority: ${authority.publicKey.toBase58()}`);
   console.log(`Program:   ${PROGRAM_ID.toBase58()}`);
 
+  const zkbtcMintKeypair = Keypair.generate();
   const [poolStatePda, poolBump] = PublicKey.findProgramAddressSync(
-    [Buffer.from("pool_state")], PROGRAM_ID
+    [Buffer.from("pool_state"), zkbtcMintKeypair.publicKey.toBuffer()], PROGRAM_ID
   );
   const [commitmentTreePda, treeBump] = PublicKey.findProgramAddressSync(
-    [Buffer.from("commitment_tree")], PROGRAM_ID
+    [
+      Buffer.from("commitment_tree"),
+      poolStatePda.toBuffer(),
+      Buffer.from([0, 0, 0, 0]),
+    ],
+    PROGRAM_ID
   );
 
   console.log(`Pool State PDA: ${poolStatePda.toBase58()} (bump: ${poolBump})`);
@@ -71,7 +80,7 @@ async function main() {
   console.log("\nCreating zkBTC Token-2022 mint...");
   const zkbtcMint = await createMint(
     connection, authority, poolStatePda, null, 8,
-    Keypair.generate(), undefined, TOKEN_2022_PROGRAM_ID
+    zkbtcMintKeypair, undefined, TOKEN_2022_PROGRAM_ID
   );
   console.log(`✓ zkBTC Mint: ${zkbtcMint.toBase58()}`);
 
@@ -108,6 +117,7 @@ async function main() {
     rpcUrl: RPC_URL,
     programs: {
       UTXOpia: PROGRAM_ID.toBase58(),
+      PolicyApproval: "9asWYKVriWGpExW5xM44ChHjZtispkLCiWKkM8SQi8Rs",
       groth16Verifier: GROTH16_VERIFIER_ID.toBase58(),
       chadbuffer: CHADBUFFER_ID.toBase58(),
     },

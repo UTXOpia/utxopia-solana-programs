@@ -16,7 +16,10 @@ use crate::state::{
     CommitmentTree, PoolState, RedemptionRequest, RedemptionStatus, UtxoRecord, UtxoStatus,
 };
 use crate::utils::crypto::compute_commitment;
-use crate::utils::{close_account_securely, validate_account_writable, validate_program_owner};
+use crate::utils::{
+    close_account_securely, validate_account_writable, validate_program_owner,
+    validate_redemption_pda,
+};
 
 /// Upper bound on reserved UTXOs released by a single cancel (matches mark_processing).
 const MAX_UTXOS_PER_CANCEL: usize = 20;
@@ -87,6 +90,7 @@ pub fn process_cancel_redemption(
     // Validate account owners
     validate_program_owner(pool_state_info, program_id)?;
     validate_program_owner(redemption_info, program_id)?;
+    validate_redemption_pda(redemption_info, pool_state_info, program_id)?;
     validate_program_owner(commitment_tree_info, program_id)?;
 
     // Validate writable
@@ -146,7 +150,14 @@ pub fn process_cancel_redemption(
     {
         let tc_data = token_config_info.try_borrow()?;
         let tc = TokenConfig::from_bytes(&tc_data)?;
-        let (expected_tc_pda, _) = find_program_address(&[TokenConfig::SEED, &tc.mint], program_id);
+        let (expected_tc_pda, _) = find_program_address(
+            &[
+                TokenConfig::SEED,
+                pool_state_info.address().as_ref(),
+                &tc.mint,
+            ],
+            program_id,
+        );
         if token_config_info.address() != &expected_tc_pda {
             return Err(ProgramError::InvalidSeeds);
         }

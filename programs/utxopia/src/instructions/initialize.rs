@@ -91,7 +91,7 @@ pub fn process_initialize(
     validate_system_program(accounts.system_program)?;
 
     // Verify pool_state PDA
-    let pool_seeds: &[&[u8]] = &[PoolState::SEED];
+    let pool_seeds: &[&[u8]] = &[PoolState::SEED, accounts.zkbtc_mint.address().as_ref()];
     let (expected_pool_pda, pool_bump) = find_program_address(pool_seeds, program_id);
     if accounts.pool_state.address() != &expected_pool_pda {
         return Err(ProgramError::InvalidSeeds);
@@ -100,7 +100,11 @@ pub fn process_initialize(
 
     // Verify commitment_tree PDA
     let tree_index_bytes = 0u32.to_le_bytes();
-    let tree_seeds: &[&[u8]] = &[CommitmentTree::SEED_PREFIX, &tree_index_bytes];
+    let tree_seeds: &[&[u8]] = &[
+        CommitmentTree::SEED_PREFIX,
+        accounts.pool_state.address().as_ref(),
+        &tree_index_bytes,
+    ];
     let (expected_tree_pda, tree_bump) = find_program_address(tree_seeds, program_id);
     if accounts.commitment_tree.address() != &expected_tree_pda {
         return Err(ProgramError::InvalidSeeds);
@@ -123,7 +127,11 @@ pub fn process_initialize(
     } else {
         // Create pool_state PDA
         let pool_bump_bytes = [pool_bump];
-        let pool_signer_seeds: &[&[u8]] = &[PoolState::SEED, &pool_bump_bytes];
+        let pool_signer_seeds: &[&[u8]] = &[
+            PoolState::SEED,
+            accounts.zkbtc_mint.address().as_ref(),
+            &pool_bump_bytes,
+        ];
 
         create_pda_account(
             accounts.authority,
@@ -143,6 +151,7 @@ pub fn process_initialize(
         let tree_bump_bytes = [tree_bump];
         let tree_signer_seeds: &[&[u8]] = &[
             CommitmentTree::SEED_PREFIX,
+            accounts.pool_state.address().as_ref(),
             &tree_index_bytes,
             &tree_bump_bytes,
         ];

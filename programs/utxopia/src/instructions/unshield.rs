@@ -33,9 +33,7 @@
 //!    8+P..8+P+N             nullifier_records (writable, PDA)
 //!    [optional]              proof_buffer (read, only when proof_source=1, last account)
 
-use crate::pinocchio_compat::{
-    account_owner, find_program_address, AccountInfo, ProgramError, Pubkey,
-};
+use crate::pinocchio_compat::{account_owner, AccountInfo, ProgramError, Pubkey};
 use pinocchio::{
     sysvars::{clock::Clock, rent::Rent, Sysvar},
     ProgramResult,
@@ -51,7 +49,8 @@ use crate::state::{CommitmentTree, NullifierOperationType, PoolState, TokenConfi
 use crate::utils::token::{is_native_sol_account, transfer_zkbtc, unwrap_lamports_signed};
 use crate::utils::{
     validate_account_writable, validate_active_tree_pda, validate_any_token_program_key,
-    validate_program_owner, validate_system_program, validate_token_owner,
+    validate_pool_state_pda, validate_program_owner, validate_system_program,
+    validate_token_config_pda, validate_token_owner,
 };
 
 /// Number of fixed accounts before recipient token accounts
@@ -112,6 +111,7 @@ pub fn process_unshield(
     validate_any_token_program_key(token_program)?;
     validate_account_writable(pool_state_info)?;
     validate_account_writable(commitment_tree_info)?;
+    validate_token_config_pda(token_config_info, pool_state_info, program_id)?;
     validate_account_writable(token_config_info)?;
     validate_account_writable(vault)?;
 
@@ -123,6 +123,11 @@ pub fn process_unshield(
     // Instruction data and proof format stay unchanged: the proof already binds
     // the recipient's 32-byte Solana address.
     let native_sol = is_native_sol_account(vault, token_program)?;
+    let (permissioned, policy_authority) = {
+        let pool_data = pool_state_info.try_borrow()?;
+        let pool = PoolState::from_bytes(&pool_data)?;
+        (pool.permissioned(), *pool.auditor())
+    };
 
     // Validate public destinations. SPL outputs use token accounts; native SOL
     // outputs use the proof-bound recipient account directly.
@@ -174,10 +179,6 @@ pub fn process_unshield(
             &owners_concat[..n_public_outputs * 32],
             &stealth_data_hash,
         );
-        let permissioned = {
-            let pool_data = pool_state_info.try_borrow()?;
-            PoolState::from_bytes(&pool_data)?.permissioned()
-        };
         let expected = crate::utils::crypto::bind_bound_params_to_domain(
             &operation_hash,
             crate::constants::CHAIN_ID,
@@ -197,7 +198,15 @@ pub fn process_unshield(
         if pool.is_paused() {
             return Err(UTXOpiaError::PoolPaused.into());
         }
-        validate_active_tree_pda(commitment_tree_info, program_id, pool.active_tree_index())?;
+        if permissioned && pool.auditor_is_frozen() {
+            return Err(UTXOpiaError::AuditorFrozen.into());
+        }
+        validate_active_tree_pda(
+            commitment_tree_info,
+            pool_state_info,
+            program_id,
+            pool.active_tree_index(),
+        )?;
         (
             pool.withdrawal_fee_bps(),
             pool.active_tree_index(),
@@ -209,9 +218,19 @@ pub fn process_unshield(
     // just before the optional proof_buffer (which parse_prefix reads as the last account).
     // Identified by being a program-owned CommitmentTree, so it cannot be confused with the buffer.
     let pb = usize::from(proof_source == 1);
+    let policy = if permissioned { 2 } else { 0 };
+    if permissioned && accounts.len() < min_accounts + policy + pb {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+    let approval_info = permissioned
+        .then(|| accounts.get(accounts.len() - 2 - pb))
+        .flatten();
+    let policy_program_info = permissioned
+        .then(|| accounts.get(accounts.len() - 1 - pb))
+        .flatten();
     let source_tree_info = accounts
         .len()
-        .checked_sub(1 + pb)
+        .checked_sub(1 + pb + policy)
         .filter(|&i| i >= min_accounts)
         .map(|i| &accounts[i])
         .filter(|a| {
@@ -237,14 +256,28 @@ pub fn process_unshield(
     };
 
     // Derive pool PDA for signing vault transfer
-    let pool_seeds: &[&[u8]] = &[PoolState::SEED];
-    let (expected_pool_pda, pool_bump) = find_program_address(pool_seeds, program_id);
-    if pool_state_info.address() != &expected_pool_pda {
-        return Err(ProgramError::InvalidSeeds);
+    validate_pool_state_pda(pool_state_info, program_id)?;
+    let pool_bump = {
+        let pool_data = pool_state_info.try_borrow()?;
+        PoolState::from_bytes(&pool_data)?.bump
+    };
+
+    if let (Some(approval), Some(policy_program)) = (approval_info, policy_program_info) {
+        crate::instructions::consume_policy_approval(
+            program_id,
+            approval,
+            policy_program,
+            pool_state_info,
+            user.address(),
+            &policy_authority,
+            crate::instruction::UNSHIELD,
+            data,
+        )?;
     }
 
     verify_vk_merkle_and_proof(
         program_id,
+        pool_state_info,
         vk_registry_info,
         commitment_tree_info,
         active_index,
@@ -322,7 +355,8 @@ pub fn process_unshield(
     let mut total_protocol_fee: u64 = 0;
 
     let pool_bump_bytes = [pool_bump];
-    let pool_signer_seeds: &[&[u8]] = &[PoolState::SEED, &pool_bump_bytes];
+    let pool_signer_seeds: &[&[u8]] =
+        &[PoolState::SEED, &zkbtc_mint, &pool_bump_bytes];
 
     for k in 0..n_public_outputs {
         let amount = unshield_amounts[k];

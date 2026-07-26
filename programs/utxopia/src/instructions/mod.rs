@@ -32,6 +32,9 @@
 //! | 32 | `magicblock_delegate` | MagicBlock |
 //! | 33 | `magicblock_commit` | MagicBlock |
 //! | 34 | `magicblock_per_permission` | MagicBlock |
+//! | 36 | `initialize_policy_approval` | Policy |
+//! | 37 | `policy_approval_decision` | Policy / PER |
+//! | 38 | `policy_approval_commit` | Policy / PER |
 
 // Core operations
 pub mod approve_redemption_signing;
@@ -42,6 +45,7 @@ pub mod initialize;
 pub mod initialize_permissioned;
 pub mod magicblock;
 pub mod mark_processing;
+pub mod policy_approval;
 pub mod redeem;
 pub mod transact;
 
@@ -83,6 +87,7 @@ pub use initialize::*;
 pub use initialize_permissioned::*;
 pub use magicblock::*;
 pub use mark_processing::*;
+pub use policy_approval::*;
 pub use redeem::*;
 pub use register_token::*;
 pub use rotate_tree::*;

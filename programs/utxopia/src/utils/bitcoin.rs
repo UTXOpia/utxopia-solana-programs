@@ -27,9 +27,13 @@ pub fn double_sha256(data: &[u8]) -> [u8; 32] {
     sha256(&first)
 }
 
-/// SHA256 over multiple non-contiguous byte ranges, as if they were concatenated.
-/// Uses sol_sha256's multi-chunk form so no intermediate buffer is needed on-chain.
-pub fn sha256_parts(parts: &[&[u8]]) -> [u8; 32] {
+/// SHA256 over a compile-time-sized set of non-contiguous byte ranges, as if they
+/// were concatenated.
+///
+/// Uses sol_sha256's multi-chunk form so no intermediate buffer is needed
+/// on-chain. The descriptor array is sized from the input itself, avoiding a
+/// fixed upper bound that can panic when a caller adds another bound field.
+pub fn sha256_parts<const N: usize>(parts: [&[u8]; N]) -> [u8; 32] {
     let mut result = [0u8; 32];
 
     #[cfg(target_os = "solana")]
@@ -39,19 +43,17 @@ pub fn sha256_parts(parts: &[&[u8]]) -> [u8; 32] {
                 fn sol_sha256(vals: *const u8, val_len: u64, hash_result: *mut u8) -> u64;
             }
             // sol_sha256 expects an array of (ptr, len) descriptors, one per chunk.
-            const MAX_PARTS: usize = 4;
-            let mut descs = [[core::ptr::null::<u8>(), core::ptr::null::<u8>()]; MAX_PARTS];
-            let n = parts.len();
+            let mut descs = [[core::ptr::null::<u8>(), core::ptr::null::<u8>()]; N];
             for (i, p) in parts.iter().enumerate() {
                 descs[i] = [p.as_ptr(), p.len() as *const u8];
             }
-            sol_sha256(descs.as_ptr() as *const u8, n as u64, result.as_mut_ptr());
+            sol_sha256(descs.as_ptr() as *const u8, N as u64, result.as_mut_ptr());
         }
     }
 
     #[cfg(not(target_os = "solana"))]
     {
-        let buf = alloc_concat(parts);
+        let buf = alloc_concat(&parts);
         result.copy_from_slice(&sha256(&buf));
     }
 
@@ -145,7 +147,7 @@ pub fn compute_tx_hash(raw_tx: &[u8]) -> [u8; 32] {
             let version = &raw_tx[0..4];
             let body = &raw_tx[6..body_end];
             let locktime = &raw_tx[raw_tx.len() - 4..];
-            let inner = sha256_parts(&[version, body, locktime]);
+            let inner = sha256_parts([version, body, locktime]);
             sha256(&inner)
         }
         // Legacy tx (or unparseable as segwit): hash raw bytes as before.
@@ -533,6 +535,20 @@ fn read_varint(data: &[u8]) -> Result<(u64, usize), ProgramError> {
 #[cfg(test)]
 mod txid_tests {
     use super::*;
+
+    #[test]
+    fn hashes_six_non_contiguous_parts_without_a_fixed_descriptor_limit() {
+        let parts: [&[u8]; 6] = [
+            b"utxopia-policy-request-v1",
+            &[1u8; 32],
+            &[2u8; 32],
+            &[3u8; 32],
+            &[23],
+            b"permissioned-shield-payload",
+        ];
+        let expected = sha256(&parts.concat());
+        assert_eq!(sha256_parts(parts), expected);
+    }
 
     // Build a 1-in/1-out transaction body shared by the legacy and segwit encodings.
     // version(4) | [marker|flag] | vin_count | input(prevout36 + scriptlen + script + seq4)

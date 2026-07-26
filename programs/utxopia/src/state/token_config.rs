@@ -1,7 +1,7 @@
 //! Token configuration account (zero-copy)
 //!
 //! Per-token settings for multi-token shielded pool.
-//! PDA seeds: ["token_config", mint_pubkey]
+//! PDA seeds: ["token_config", pool_state, mint_pubkey]
 
 use crate::pinocchio_compat::ProgramError;
 

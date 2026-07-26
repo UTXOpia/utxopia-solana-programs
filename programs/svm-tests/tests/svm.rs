@@ -35,11 +35,16 @@ use solana_pubkey::Pubkey;
 
 const SYSTEM_ID: Pubkey = Pubkey::new_from_array([0u8; 32]);
 
-/// utxopia's compiled-in BTC_LIGHT_CLIENT_PROGRAM_ID (default features = devnet).
-/// C8JoSKzondM7X1ESwrBSodGMrXWtEWNmawXyjh9zEWJZ — from programs/utxopia/src/constants.rs
+/// utxopia's compiled-in BTC_LIGHT_CLIENT_PROGRAM_ID for the Devnet-regtest
+/// artifact exercised by this suite.
 const BTC_LC_OWNER: [u8; 32] = [
-    0xa5, 0x4f, 0xbf, 0xc4, 0x89, 0x7f, 0xa5, 0x53, 0x1c, 0x76, 0xa4, 0x82, 0xba, 0xce, 0x0f, 0x72,
-    0x9d, 0x18, 0x8b, 0xc4, 0x4e, 0x4d, 0xdb, 0xe9, 0xf2, 0x1d, 0x69, 0x81, 0xa2, 0x08, 0x41, 0xa6,
+    0x72, 0x4d, 0xf9, 0x1e, 0xc8, 0xc4, 0x80, 0x2c, 0x6a, 0x7c, 0x00, 0x7a, 0x03, 0x44, 0x91, 0x2c,
+    0x89, 0xe8, 0x73, 0x4e, 0x07, 0x71, 0x59, 0x93, 0xb3, 0x9c, 0xc3, 0xad, 0x89, 0x36, 0x61, 0x67,
+];
+
+const POLICY_PROGRAM: [u8; 32] = [
+    127, 138, 197, 238, 106, 229, 114, 241, 179, 216, 130, 79, 100, 240, 58, 143, 160, 74, 31, 7,
+    220, 81, 204, 120, 6, 48, 208, 221, 123, 198, 3, 214,
 ];
 
 /// Token-2022 program id (validate_token_owner / validate_any_token_program_key).
@@ -84,7 +89,7 @@ fn double_sha256(d: &[u8]) -> [u8; 32] {
 fn complete_deposit_call(
     pid: &Pubkey,
     zkbtc_mint: &Pubkey,
-    token_config_key: &Pubkey,
+    token_config_key: Option<&Pubkey>,
 ) -> (Instruction, Vec<(Pubkey, Account)>) {
     let token_2022 = Pubkey::new_from_array(TOKEN_2022);
     let btc_lc = Pubkey::new_from_array(BTC_LC_OWNER);
@@ -101,6 +106,13 @@ fn complete_deposit_call(
     let utxo_record = Pubkey::new_unique();
     let pool_config = Pubkey::new_unique(); // accounts[14]; read only after the PDA gate
     let (system_key, system_acct) = keyed_account_for_system_program();
+    let token_config_key = token_config_key.copied().unwrap_or_else(|| {
+        Pubkey::find_program_address(
+            &[b"token_config", pool_state.as_ref(), zkbtc_mint.as_ref()],
+            pid,
+        )
+        .0
+    });
 
     let metas = vec![
         AccountMeta::new(pool_state, false),
@@ -116,7 +128,7 @@ fn complete_deposit_call(
         AccountMeta::new_readonly(deposit_tx_buffer, false),
         AccountMeta::new(deposit_receipt, false),
         AccountMeta::new(utxo_record, false),
-        AccountMeta::new(*token_config_key, false),
+        AccountMeta::new(token_config_key, false),
         AccountMeta::new_readonly(pool_config, false),
     ];
 
@@ -149,7 +161,7 @@ fn complete_deposit_call(
         (deposit_tx_buffer, acct(1, vec![], SYSTEM_ID)),
         (deposit_receipt, acct(1, vec![], *pid)),
         (utxo_record, acct(1, vec![], *pid)),
-        (*token_config_key, acct(1, vec![0u8; 164], *pid)),
+        (token_config_key, acct(1, vec![0u8; 164], *pid)),
         (pool_config, acct(1, vec![], *pid)),
     ];
 
@@ -167,7 +179,7 @@ fn complete_deposit_rejects_substituted_token_config() {
     // i.e. another token's config substituted to mint a foreign token_id.
     let wrong_token_config = Pubkey::new_unique();
 
-    let (ix, accounts) = complete_deposit_call(&pid, &zkbtc_mint, &wrong_token_config);
+    let (ix, accounts) = complete_deposit_call(&pid, &zkbtc_mint, Some(&wrong_token_config));
     let res = mollusk.process_instruction(&ix, &accounts);
 
     assert!(
@@ -184,11 +196,7 @@ fn complete_deposit_accepts_canonical_token_config() {
     let mollusk = Mollusk::new(&pid, "utxopia");
 
     let zkbtc_mint = Pubkey::new_unique();
-    // The canonical PDA ["token_config", zkbtc_mint] passes the binding gate.
-    let (canonical_tc, _) =
-        Pubkey::find_program_address(&[b"token_config", zkbtc_mint.as_ref()], &pid);
-
-    let (ix, accounts) = complete_deposit_call(&pid, &zkbtc_mint, &canonical_tc);
+    let (ix, accounts) = complete_deposit_call(&pid, &zkbtc_mint, None);
     let res = mollusk.process_instruction(&ix, &accounts);
 
     // The binding gate is passed; the instruction then fails later (uninitialized pool state
@@ -776,13 +784,15 @@ fn shield_on_permissioned_pool_returns_not_permissioned() {
 // ---- shield_permissioned (disc 23) gate tests --------------------------------
 
 /// Shared inner builder for shield_permissioned (disc 23).
-/// Produces a call with the given auditor account appended at index 7.
+/// Produces a call with an invalid placeholder approval at index 7 and the
+/// fixed policy program at index 8. Early pool gates run before approval
+/// validation, while a valid pool proceeds to the approval owner check.
 /// The pool is always permissioned.  `pool_flags` lets callers pass
 /// FLAG_PERMISSIONED | FLAG_AUDITOR_FROZEN etc.
 fn shield_permissioned_call(
     pid: &Pubkey,
     user: &Pubkey,
-    auditor_signer: &Pubkey, // the account placed at index 7
+    approval: &Pubkey,
     pool_auditor: &[u8; 32], // the auditor key baked into the pool state blob
     pool_flags: u8,
 ) -> (Instruction, Vec<(Pubkey, Account)>) {
@@ -793,6 +803,7 @@ fn shield_permissioned_call(
     let token_config = Pubkey::new_unique();
     let vault = Pubkey::new_unique();
     let commitment_tree = Pubkey::new_unique();
+    let policy_program = Pubkey::new_from_array(POLICY_PROGRAM);
 
     let metas = vec![
         AccountMeta::new_readonly(*user, true),       // 0 user signer
@@ -802,7 +813,8 @@ fn shield_permissioned_call(
         AccountMeta::new(vault, false),               // 4
         AccountMeta::new(commitment_tree, false),     // 5
         AccountMeta::new_readonly(token_2022, false), // 6
-        AccountMeta::new_readonly(*auditor_signer, true), // 7 auditor signer
+        AccountMeta::new(*approval, false),           // 7 policy approval
+        AccountMeta::new_readonly(policy_program, false), // 8 policy program
     ];
 
     // Discriminator 23 + 72-byte shield header
@@ -831,7 +843,17 @@ fn shield_permissioned_call(
         ),
         (commitment_tree, acct(1, vec![], *pid)),
         (token_2022, acct(1, vec![], SYSTEM_ID)),
-        (*auditor_signer, acct(1_000_000, vec![], SYSTEM_ID)),
+        (*approval, acct(1_000_000, vec![], SYSTEM_ID)),
+        (
+            policy_program,
+            Account {
+                lamports: 1,
+                data: vec![],
+                owner: SYSTEM_ID,
+                executable: true,
+                rent_epoch: 0,
+            },
+        ),
     ];
 
     (ix, accounts)
@@ -890,23 +912,28 @@ fn shield_permissioned_gate_passes_with_correct_auditor() {
     );
 }
 
-/// Wrong auditor key at index 7 — Unauthorized must be returned.
+/// A placeholder not owned by the fixed policy program must fail closed.
 #[test]
-fn shield_permissioned_fails_with_wrong_auditor_key() {
+fn shield_permissioned_fails_with_invalid_policy_approval() {
     std::env::set_var("SBF_OUT_DIR", so_dir());
     let pid = Pubkey::new_unique();
     let mollusk = Mollusk::new(&pid, "utxopia");
 
     let user = Pubkey::new_unique();
-    let real_auditor: [u8; 32] = [0xAAu8; 32]; // baked into pool state
-    let impersonator = Pubkey::new_unique(); // wrong key presented as signer
+    let real_auditor: [u8; 32] = [0xAAu8; 32];
+    let invalid_approval = Pubkey::new_unique();
 
-    let (ix, accounts) =
-        shield_permissioned_call(&pid, &user, &impersonator, &real_auditor, FLAG_PERMISSIONED);
+    let (ix, accounts) = shield_permissioned_call(
+        &pid,
+        &user,
+        &invalid_approval,
+        &real_auditor,
+        FLAG_PERMISSIONED,
+    );
     let res = mollusk.process_instruction(&ix, &accounts);
     assert!(
-        is_custom(&res.program_result, UNAUTHORIZED),
-        "wrong auditor key must return Unauthorized (6011), got {:?}",
+        is_custom(&res.program_result, 6026),
+        "invalid approval owner must fail closed (6026), got {:?}",
         res.program_result
     );
 }

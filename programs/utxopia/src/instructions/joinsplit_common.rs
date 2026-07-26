@@ -215,6 +215,7 @@ pub fn looks_like_commitment_tree(account: &AccountInfo, program_id: &Pubkey) ->
 
 pub fn verify_vk_merkle_and_proof(
     program_id: &Pubkey,
+    pool_state_info: &AccountInfo,
     vk_registry_info: &AccountInfo,
     commitment_tree_info: &AccountInfo,
     active_index: u32,
@@ -235,7 +236,13 @@ pub fn verify_vk_merkle_and_proof(
         if !active_root_ok {
             let frozen_ok = match source_tree_info {
                 Some(src) => {
-                    validate_frozen_tree(src, program_id, active_index, prefix.merkle_root)?
+                    validate_frozen_tree(
+                        src,
+                        pool_state_info,
+                        program_id,
+                        active_index,
+                        prefix.merkle_root,
+                    )?
                 }
                 None => false,
             };

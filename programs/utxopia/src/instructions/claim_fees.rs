@@ -10,15 +10,15 @@
 //!
 //! Instruction data: amount(8) — allows partial claims
 
-use crate::pinocchio_compat::{find_program_address, AccountInfo, ProgramError};
+use crate::pinocchio_compat::{AccountInfo, ProgramError};
 use pinocchio::ProgramResult;
 
 use crate::error::UTXOpiaError;
 use crate::state::{PoolState, TokenConfig};
 use crate::utils::token::transfer_zkbtc;
 use crate::utils::{
-    validate_account_writable, validate_any_token_program_key, validate_program_owner,
-    validate_token_owner,
+    validate_account_writable, validate_any_token_program_key, validate_pool_state_pda,
+    validate_program_owner, validate_token_config_pda, validate_token_owner,
 };
 
 pub fn process_claim_fees(
@@ -54,6 +54,7 @@ pub fn process_claim_fees(
     validate_account_writable(token_config_info)?;
     validate_account_writable(vault)?;
     validate_account_writable(admin_token_account)?;
+    validate_token_config_pda(token_config_info, pool_state_info, program_id)?;
 
     // Reject vault == destination: a self-transfer moves no tokens, but accumulated_fees would
     // still be decremented below, permanently stranding that fee value in the vault.
@@ -62,21 +63,17 @@ pub fn process_claim_fees(
     }
 
     // Validate authority
-    let pool_bump = {
+    let (pool_bump, zkbtc_mint) = {
         let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
         if authority.address().as_ref() != pool.authority {
             return Err(UTXOpiaError::Unauthorized.into());
         }
-        pool.bump
+        (pool.bump, pool.zkbtc_mint)
     };
 
     // Verify pool PDA
-    let pool_seeds: &[&[u8]] = &[PoolState::SEED];
-    let (expected_pda, _) = find_program_address(pool_seeds, program_id);
-    if pool_state_info.address() != &expected_pda {
-        return Err(ProgramError::InvalidSeeds);
-    }
+    validate_pool_state_pda(pool_state_info, program_id)?;
 
     // Validate amount against accumulated_fees; capture token_id for the event.
     let token_id = {
@@ -96,7 +93,8 @@ pub fn process_claim_fees(
 
     // Transfer from vault to admin (signed by pool PDA)
     let pool_bump_bytes = [pool_bump];
-    let pool_signer_seeds: &[&[u8]] = &[PoolState::SEED, &pool_bump_bytes];
+    let pool_signer_seeds: &[&[u8]] =
+        &[PoolState::SEED, &zkbtc_mint, &pool_bump_bytes];
 
     transfer_zkbtc(
         token_program,

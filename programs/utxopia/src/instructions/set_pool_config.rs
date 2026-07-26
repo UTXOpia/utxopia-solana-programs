@@ -100,7 +100,7 @@ pub fn process_set_pool_config(
     validate_pool_script_matches_ika_xonly(pool_script, &ika_dwallet_xonly)?;
 
     // Verify PoolConfig PDA
-    let config_seeds: &[&[u8]] = &[PoolConfig::SEED];
+    let config_seeds: &[&[u8]] = &[PoolConfig::SEED, pool_state_info.address().as_ref()];
     let (expected_pda, config_bump) = find_program_address(config_seeds, program_id);
     if pool_config_info.address() != &expected_pda {
         return Err(ProgramError::InvalidSeeds);
@@ -111,7 +111,11 @@ pub fn process_set_pool_config(
     if config_data_len == 0 {
         let rent = Rent::get()?;
         let bump_bytes = [config_bump];
-        let signer_seeds: &[&[u8]] = &[PoolConfig::SEED, &bump_bytes];
+        let signer_seeds: &[&[u8]] = &[
+            PoolConfig::SEED,
+            pool_state_info.address().as_ref(),
+            &bump_bytes,
+        ];
 
         create_pda_account(
             authority,

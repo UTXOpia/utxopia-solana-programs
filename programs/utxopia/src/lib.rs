@@ -111,6 +111,11 @@ pub mod instruction {
 
     // Authority recovery for a permissioned pool's auditor identity (35)
     pub const ROTATE_AUDITOR: u8 = 35;
+
+    // One-time permissioned-pool policy approval lifecycle (36-38)
+    pub const INITIALIZE_POLICY_APPROVAL: u8 = 36;
+    pub const POLICY_APPROVAL_DECISION: u8 = 37;
+    pub const POLICY_APPROVAL_COMMIT: u8 = 38;
 }
 
 #[cfg(not(feature = "no-entrypoint"))]
@@ -234,6 +239,15 @@ pub fn process_instruction(
         }
         instruction::ROTATE_AUDITOR => {
             instructions::process_rotate_auditor(program_id, accounts, data)
+        }
+        instruction::INITIALIZE_POLICY_APPROVAL => {
+            instructions::process_initialize_policy_approval(program_id, accounts, data)
+        }
+        instruction::POLICY_APPROVAL_DECISION => {
+            instructions::process_policy_approval_decision(program_id, accounts, data)
+        }
+        instruction::POLICY_APPROVAL_COMMIT => {
+            instructions::process_policy_approval_commit(program_id, accounts, data)
         }
         _ => Err(ProgramError::InvalidInstructionData),
     }

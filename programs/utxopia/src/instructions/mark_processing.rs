@@ -18,7 +18,9 @@ use crate::error::UTXOpiaError;
 use crate::state::utxo::UTXO_RECORD_DISCRIMINATOR;
 use crate::state::{PoolState, RedemptionRequest, RedemptionStatus, UtxoRecord, UtxoStatus};
 use crate::utils::sighash::{canonical_sort, inputs_commitment, ReservedInput};
-use crate::utils::{validate_account_writable, validate_program_owner};
+use crate::utils::{
+    validate_account_writable, validate_program_owner, validate_redemption_pda,
+};
 
 /// Maximum UTXOs that can be selected in a single mark_processing call
 const MAX_UTXOS_PER_MARK: usize = 20;
@@ -54,6 +56,7 @@ pub fn process_mark_processing(
     // Validate account owners and writable
     validate_program_owner(pool_state_info, program_id)?;
     validate_program_owner(redemption_info, program_id)?;
+    validate_redemption_pda(redemption_info, pool_state_info, program_id)?;
     validate_account_writable(pool_state_info)?;
     validate_account_writable(redemption_info)?;
 

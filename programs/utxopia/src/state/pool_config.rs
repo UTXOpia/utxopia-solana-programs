@@ -3,7 +3,7 @@
 //! Stores the pool's BTC scriptPubKey (P2TR) and Ika custody keys on-chain for
 //! trustless verification in `complete_redemption` and `verify_deposit`.
 //!
-//! PDA seeds: ["pool_config"]
+//! PDA seeds: ["pool_config", pool_state]
 
 use crate::pinocchio_compat::ProgramError;
 

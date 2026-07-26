@@ -113,6 +113,12 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
     if offset != data.len() {
         return Err(ProgramError::InvalidInstructionData);
     }
+    validate_program_owner(&accounts[0], program_id)?;
+    let (permissioned, policy_authority) = {
+        let pool_data = accounts[0].try_borrow()?;
+        let pool = PoolState::from_bytes(&pool_data)?;
+        (pool.permissioned(), *pool.auditor())
+    };
 
     // Verify bound params hash — binds BTC scripts + stealth data to proof.
     // scriptsHash = length_prefixed_hash(script_1, script_2, ...) so the scripts cannot be
@@ -138,11 +144,6 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
             &stealth_data_hash,
             requester,
         );
-        validate_program_owner(&accounts[0], program_id)?;
-        let permissioned = {
-            let pool_data = accounts[0].try_borrow()?;
-            PoolState::from_bytes(&pool_data)?.permissioned()
-        };
         let expected = crate::utils::crypto::bind_bound_params_to_domain(
             &operation_hash,
             crate::constants::CHAIN_ID,
@@ -184,7 +185,14 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
         if !tc.is_enabled() {
             return Err(UTXOpiaError::TokenDisabled.into());
         }
-        let (expected_tc_pda, _) = find_program_address(&[TokenConfig::SEED, &tc.mint], program_id);
+        let (expected_tc_pda, _) = find_program_address(
+            &[
+                TokenConfig::SEED,
+                pool_state_info.address().as_ref(),
+                &tc.mint,
+            ],
+            program_id,
+        );
         if token_config_info.address() != &expected_tc_pda {
             return Err(ProgramError::InvalidSeeds);
         }
@@ -207,7 +215,15 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
         if pool.is_paused() {
             return Err(UTXOpiaError::PoolPaused.into());
         }
-        validate_active_tree_pda(commitment_tree_info, program_id, pool.active_tree_index())?;
+        if permissioned && pool.auditor_is_frozen() {
+            return Err(UTXOpiaError::AuditorFrozen.into());
+        }
+        validate_active_tree_pda(
+            commitment_tree_info,
+            pool_state_info,
+            program_id,
+            pool.active_tree_index(),
+        )?;
         (
             pool.pending_redemptions(),
             pool.total_shielded(),
@@ -218,15 +234,38 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
     // Optional frozen source tree for spending notes committed before a tree rotation; appended
     // just before the optional proof_buffer and identified by being a program-owned CommitmentTree.
     let pb = usize::from(proof_source == 1);
+    let policy = if permissioned { 2 } else { 0 };
+    if permissioned && accounts.len() < min_accounts + policy + pb {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+    let approval_info = permissioned
+        .then(|| accounts.get(accounts.len() - 2 - pb))
+        .flatten();
+    let policy_program_info = permissioned
+        .then(|| accounts.get(accounts.len() - 1 - pb))
+        .flatten();
     let source_tree_info = accounts
         .len()
-        .checked_sub(1 + pb)
+        .checked_sub(1 + pb + policy)
         .filter(|&i| i >= min_accounts)
         .map(|i| &accounts[i])
         .filter(|a| {
             a.address() != commitment_tree_info.address()
                 && looks_like_commitment_tree(a, program_id)
         });
+
+    if let (Some(approval), Some(policy_program)) = (approval_info, policy_program_info) {
+        crate::instructions::consume_policy_approval(
+            program_id,
+            approval,
+            policy_program,
+            pool_state_info,
+            user.address(),
+            &policy_authority,
+            crate::instruction::REDEEM,
+            data,
+        )?;
+    }
 
     // Validate total redeem amount
     let mut total_redeem: u64 = 0;
@@ -244,6 +283,7 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
 
     verify_vk_merkle_and_proof(
         program_id,
+        pool_state_info,
         vk_registry_info,
         commitment_tree_info,
         active_index,
@@ -321,6 +361,7 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
         let nonce_bytes = request_nonces[k].to_le_bytes();
         let redemption_seeds: &[&[u8]] = &[
             RedemptionRequest::SEED,
+            pool_state_info.address().as_ref(),
             user.address().as_ref(),
             &nonce_bytes,
         ];
@@ -341,6 +382,7 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
         let redemption_bump_bytes = [redemption_bump];
         let redemption_signer_seeds: &[&[u8]] = &[
             RedemptionRequest::SEED,
+            pool_state_info.address().as_ref(),
             user.address().as_ref(),
             &nonce_bytes,
             &redemption_bump_bytes,

@@ -52,7 +52,12 @@ pub fn create_pda_account<'a>(
     signer_seeds: &[&[u8]],
 ) -> ProgramResult {
     // Convert seeds to Pinocchio format
-    let seeds: [Seed; 4] = [
+    // PolicyApproval uses four namespace seeds plus its bump. Keep this
+    // helper large enough for every PDA family accepted by the program.
+    if signer_seeds.len() > 5 {
+        return Err(ProgramError::MaxSeedLengthExceeded);
+    }
+    let seeds: [Seed; 5] = [
         if !signer_seeds.is_empty() {
             Seed::from(signer_seeds[0])
         } else {
@@ -70,6 +75,11 @@ pub fn create_pda_account<'a>(
         },
         if signer_seeds.len() > 3 {
             Seed::from(signer_seeds[3])
+        } else {
+            Seed::from(&[][..])
+        },
+        if signer_seeds.len() > 4 {
+            Seed::from(signer_seeds[4])
         } else {
             Seed::from(&[][..])
         },
@@ -373,9 +383,119 @@ pub fn close_account_securely(
     Ok(())
 }
 
-/// Validate that a commitment tree account matches the active tree index.
+/// Validate a mint-namespaced pool: ["pool_state", zkbtc_mint].
+pub fn validate_pool_state_pda(
+    pool_account: &AccountInfo,
+    program_id: &Pubkey,
+) -> Result<(), ProgramError> {
+    use crate::pinocchio_compat::find_program_address;
+    use crate::state::PoolState;
+
+    validate_program_owner(pool_account, program_id)?;
+    let pool_data = pool_account.try_borrow()?;
+    let pool = PoolState::from_bytes(&pool_data)?;
+    let (namespaced, bump) =
+        find_program_address(&[PoolState::SEED, &pool.zkbtc_mint], program_id);
+    if pool_account.address() != &namespaced || pool.bump != bump {
+        return Err(ProgramError::InvalidSeeds);
+    }
+    Ok(())
+}
+
+/// Return signer material after validating the pool PDA.
+pub fn validated_pool_signer(
+    pool_account: &AccountInfo,
+    program_id: &Pubkey,
+) -> Result<([u8; 32], u8), ProgramError> {
+    validate_pool_state_pda(pool_account, program_id)?;
+    let pool_data = pool_account.try_borrow()?;
+    let pool = crate::state::PoolState::from_bytes(&pool_data)?;
+    Ok((pool.zkbtc_mint, pool.bump))
+}
+
+/// Validate ["token_config", pool_state, mint].
+pub fn validate_token_config_pda(
+    token_config_account: &AccountInfo,
+    pool_account: &AccountInfo,
+    program_id: &Pubkey,
+) -> Result<(), ProgramError> {
+    use crate::pinocchio_compat::find_program_address;
+    use crate::state::TokenConfig;
+
+    validate_program_owner(token_config_account, program_id)?;
+    validate_pool_state_pda(pool_account, program_id)?;
+    let data = token_config_account.try_borrow()?;
+    let config = TokenConfig::from_bytes(&data)?;
+    let (expected, bump) = find_program_address(
+        &[
+            TokenConfig::SEED,
+            pool_account.address().as_ref(),
+            &config.mint,
+        ],
+        program_id,
+    );
+    if token_config_account.address() != &expected || config.bump != bump {
+        return Err(ProgramError::InvalidSeeds);
+    }
+    Ok(())
+}
+
+/// Validate ["pool_config", pool_state].
+pub fn validate_pool_config_pda(
+    pool_config_account: &AccountInfo,
+    pool_account: &AccountInfo,
+    program_id: &Pubkey,
+) -> Result<(), ProgramError> {
+    use crate::pinocchio_compat::find_program_address;
+    use crate::state::PoolConfig;
+
+    validate_program_owner(pool_config_account, program_id)?;
+    validate_pool_state_pda(pool_account, program_id)?;
+    let expected = find_program_address(
+        &[PoolConfig::SEED, pool_account.address().as_ref()],
+        program_id,
+    )
+    .0;
+    if pool_config_account.address() != &expected {
+        return Err(ProgramError::InvalidSeeds);
+    }
+    Ok(())
+}
+
+/// Validate ["redemption", pool_state, requester, request_id].
+pub fn validate_redemption_pda(
+    redemption_account: &AccountInfo,
+    pool_account: &AccountInfo,
+    program_id: &Pubkey,
+) -> Result<(), ProgramError> {
+    use crate::pinocchio_compat::find_program_address;
+    use crate::state::RedemptionRequest;
+
+    validate_program_owner(redemption_account, program_id)?;
+    validate_pool_state_pda(pool_account, program_id)?;
+    let data = redemption_account.try_borrow()?;
+    let redemption = RedemptionRequest::from_bytes(&data)?;
+    let nonce = redemption.request_id().to_le_bytes();
+    let expected = find_program_address(
+        &[
+            RedemptionRequest::SEED,
+            pool_account.address().as_ref(),
+            &redemption.requester,
+            &nonce,
+        ],
+        program_id,
+    )
+    .0;
+    if redemption_account.address() != &expected {
+        return Err(ProgramError::InvalidSeeds);
+    }
+    Ok(())
+}
+
+/// Validate that a commitment tree account matches its pool and active tree index.
 pub fn validate_active_tree_pda(
     tree_account: &AccountInfo,
+    pool_account: &AccountInfo,
     program_id: &Pubkey,
     active_index: u32,
 ) -> Result<(), ProgramError> {
@@ -383,7 +503,12 @@ pub fn validate_active_tree_pda(
     use crate::state::CommitmentTree;
 
     let index_bytes = active_index.to_le_bytes();
-    let indexed_seeds: &[&[u8]] = &[CommitmentTree::SEED_PREFIX, &index_bytes];
+    validate_pool_state_pda(pool_account, program_id)?;
+    let indexed_seeds: &[&[u8]] = &[
+        CommitmentTree::SEED_PREFIX,
+        pool_account.address().as_ref(),
+        &index_bytes,
+    ];
     let (expected_pda, _) = find_program_address(indexed_seeds, program_id);
 
     if tree_account.address() != &expected_pda {
@@ -399,6 +524,7 @@ pub fn validate_active_tree_pda(
 /// Returns the tree's current_root for root verification.
 pub fn validate_frozen_tree(
     tree_account: &AccountInfo,
+    pool_account: &AccountInfo,
     program_id: &Pubkey,
     active_index: u32,
     expected_root: &[u8; 32],
@@ -426,7 +552,12 @@ pub fn validate_frozen_tree(
         return Err(ProgramError::InvalidSeeds);
     }
     let idx_bytes = idx.to_le_bytes();
-    let seeds: &[&[u8]] = &[CommitmentTree::SEED_PREFIX, &idx_bytes];
+    validate_pool_state_pda(pool_account, program_id)?;
+    let seeds: &[&[u8]] = &[
+        CommitmentTree::SEED_PREFIX,
+        pool_account.address().as_ref(),
+        &idx_bytes,
+    ];
     let (pda, _) = find_program_address(seeds, program_id);
     if tree_account.address() != &pda {
         return Err(ProgramError::InvalidSeeds);

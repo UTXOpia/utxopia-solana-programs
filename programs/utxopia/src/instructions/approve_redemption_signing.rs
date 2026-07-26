@@ -32,7 +32,8 @@ use crate::utils::sighash::{
 };
 use crate::utils::{
     policy::{check_redemption_signing, MAX_MINER_FEE_SATS},
-    validate_program_owner, validate_system_program,
+    validate_pool_config_pda, validate_program_owner, validate_redemption_pda,
+    validate_system_program,
 };
 
 /// Number of fixed accounts before the variable-length reserved UTXO accounts.
@@ -126,7 +127,8 @@ pub fn process_approve_redemption_signing(
 
     validate_program_owner(pool_state_info, program_id)?;
     validate_program_owner(redemption_info, program_id)?;
-    validate_program_owner(pool_config_info, program_id)?;
+    validate_redemption_pda(redemption_info, pool_state_info, program_id)?;
+    validate_pool_config_pda(pool_config_info, pool_state_info, program_id)?;
     validate_system_program(system_program)?;
 
     // Capture the redemption's authoritative fields for trustless sighash reconstruction.

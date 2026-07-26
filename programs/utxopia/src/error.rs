@@ -207,6 +207,18 @@ pub enum UTXOpiaError {
 
     #[error("Auditor is frozen and cannot sign")]
     AuditorFrozen = 6092,
+
+    #[error("A valid policy approval is required")]
+    PolicyApprovalRequired = 6093,
+
+    #[error("Policy approval does not match this instruction")]
+    PolicyApprovalMismatch = 6094,
+
+    #[error("Policy approval has expired")]
+    PolicyApprovalExpired = 6095,
+
+    #[error("Policy approval is no longer pending or reusable")]
+    PolicyApprovalAlreadyUsed = 6096,
 }
 
 impl From<UTXOpiaError> for ProgramError {

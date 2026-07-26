@@ -46,8 +46,8 @@ use crate::utils::events::ANNOUNCEMENT_TYPE_DEPOSIT;
 use crate::utils::secp256k1::verify_taproot_output_key;
 use crate::utils::{
     create_pda_account, mint_zkbtc, validate_account_writable, validate_active_tree_pda,
-    validate_any_token_program_key, validate_program_owner, validate_system_program,
-    validate_token_owner,
+    validate_any_token_program_key, validate_pool_config_pda, validate_program_owner,
+    validate_system_program, validate_token_owner,
 };
 
 /// Required confirmations for deposits
@@ -168,28 +168,26 @@ pub fn process_complete_deposit(
     complete_deposit_inner(program_id, accounts, &ix_data, &[])
 }
 
-/// Auditor-gated deposit for permissioned pools (disc 22).
+/// Policy-approved deposit for permissioned pools (disc 22).
 ///
 /// Same accounts as `process_complete_deposit` (indices 0-14), plus one
 /// appended account:
 ///
-/// 15. `[signer]` Auditor — must match `pool.auditor()` and must not be frozen.
+/// 15. `[writable]` One-time PolicyApproval bound to this exact instruction.
 ///
 /// Instruction data layout:
 ///   CompleteDepositData fixed part (80 bytes) || auditor_ciphertext (variable, may be empty)
 ///
 /// Gate logic:
 /// - Pool MUST be permissioned (else InvalidInstructionData / wrong handler)
-/// - Auditor account must be a signer (MissingRequiredSignature)
-/// - Auditor account key must equal pool.auditor() (Unauthorized)
 /// - Pool auditor must not be frozen (AuditorFrozen)
 pub fn process_complete_deposit_permissioned(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
     data: &[u8],
 ) -> ProgramResult {
-    // Need the 15 base accounts + 1 auditor signer
-    if accounts.len() < 16 {
+    // Need the 15 base accounts + PolicyApproval + PolicyApproval program
+    if accounts.len() < 17 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
@@ -207,7 +205,7 @@ pub fn process_complete_deposit_permissioned(
 
     // Validate authority + pool state; enforce permissioned gate
     validate_program_owner(pool_state_info, program_id)?;
-    {
+    let policy_authority = {
         let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
 
@@ -216,17 +214,6 @@ pub fn process_complete_deposit_permissioned(
         }
 
         if authority.address().as_ref() != pool.authority {
-            return Err(UTXOpiaError::Unauthorized.into());
-        }
-
-        // Auditor gate — account 15 is the appended auditor signer
-        let auditor_info = &accounts[15];
-
-        if !auditor_info.is_signer() {
-            return Err(ProgramError::MissingRequiredSignature);
-        }
-
-        if auditor_info.address().as_ref() != pool.auditor() {
             return Err(UTXOpiaError::Unauthorized.into());
         }
 
@@ -239,7 +226,19 @@ pub fn process_complete_deposit_permissioned(
         if !pool.permissioned() {
             return Err(UTXOpiaError::NotPermissioned.into());
         }
-    }
+        *pool.auditor()
+    };
+
+    crate::instructions::consume_policy_approval(
+        program_id,
+        &accounts[15],
+        &accounts[16],
+        pool_state_info,
+        authority.address(),
+        &policy_authority,
+        crate::instruction::COMPLETE_DEPOSIT_PERMISSIONED,
+        data,
+    )?;
 
     complete_deposit_inner(program_id, accounts, &ix_data, auditor_ciphertext)
 }
@@ -302,7 +301,11 @@ fn complete_deposit_inner(
     // Bind token_config to the mint actually being credited (prevents cross-token mint:
     // supplying another token's canonical config to mint a note under its token_id).
     {
-        let tc_seeds: &[&[u8]] = &[TokenConfig::SEED, zkbtc_mint.address().as_ref()];
+        let tc_seeds: &[&[u8]] = &[
+            TokenConfig::SEED,
+            pool_state_info.address().as_ref(),
+            zkbtc_mint.address().as_ref(),
+        ];
         let (expected_tc_pda, _) = find_program_address(tc_seeds, program_id);
         if token_config_info.address() != &expected_tc_pda {
             return Err(UTXOpiaError::InvalidPDA.into());
@@ -319,7 +322,12 @@ fn complete_deposit_inner(
         {
             return Err(UTXOpiaError::InvalidVault.into());
         }
-        validate_active_tree_pda(commitment_tree_info, program_id, pool.active_tree_index())?;
+        validate_active_tree_pda(
+            commitment_tree_info,
+            pool_state_info,
+            program_id,
+            pool.active_tree_index(),
+        )?;
         (
             pool.bump,
             pool.min_deposit(),
@@ -501,7 +509,7 @@ fn complete_deposit_inner(
     }
 
     let pool_config_info = &accounts[14];
-    validate_program_owner(pool_config_info, program_id)?;
+    validate_pool_config_pda(pool_config_info, pool_state_info, program_id)?;
     let config_data = pool_config_info.try_borrow()?;
     if config_data.len() < PoolConfig::LEN || config_data[0] != POOL_CONFIG_DISCRIMINATOR {
         return Err(UTXOpiaError::IkaCpiAccountsMissing.into());
@@ -720,7 +728,11 @@ fn complete_deposit_inner(
     // path). Minting only `shielded_amount` while crediting `total_fee` to accumulated_fees let
     // claim_fees withdraw user-backing tokens and undercollateralize the vault (audit f15).
     let pool_bump_bytes = [pool_bump];
-    let pool_signer_seeds: &[&[u8]] = &[PoolState::SEED, &pool_bump_bytes];
+    let pool_signer_seeds: &[&[u8]] = &[
+        PoolState::SEED,
+        zkbtc_mint.address().as_ref(),
+        &pool_bump_bytes,
+    ];
 
     mint_zkbtc(
         token_program,

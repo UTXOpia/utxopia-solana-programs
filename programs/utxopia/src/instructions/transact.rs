@@ -100,13 +100,21 @@ pub fn process_transact(
     validate_account_writable(commitment_tree_info)?;
 
     // Validate pool is not paused + tree PDA matches active index
-    let active_index = {
+    let (active_index, permissioned, policy_authority) = {
         let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
         if pool.is_paused() {
             return Err(UTXOpiaError::PoolPaused.into());
         }
-        validate_active_tree_pda(commitment_tree_info, program_id, pool.active_tree_index())?;
+        if pool.permissioned() && pool.auditor_is_frozen() {
+            return Err(UTXOpiaError::AuditorFrozen.into());
+        }
+        validate_active_tree_pda(
+            commitment_tree_info,
+            pool_state_info,
+            program_id,
+            pool.active_tree_index(),
+        )?;
 
         // Bind the proof to the exact public/institution pool. A matching Merkle
         // root in another tree is insufficient because its domain field differs.
@@ -126,7 +134,11 @@ pub fn process_transact(
             return Err(UTXOpiaError::InvalidBoundParams.into());
         }
 
-        pool.active_tree_index()
+        (
+            pool.active_tree_index(),
+            pool.permissioned(),
+            *pool.auditor(),
+        )
     };
 
     // Optional account layout after nullifiers:
@@ -137,9 +149,19 @@ pub fn process_transact(
     // relayer (signer) or proof_buffer (ChadBuffer-owned).
     let has_proof_buffer = proof_source == 1;
     let pb = usize::from(has_proof_buffer);
+    let policy = if permissioned { 2 } else { 0 };
+    if permissioned && accounts.len() < min_accounts + policy + pb {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+    let approval_info = permissioned
+        .then(|| accounts.get(accounts.len() - 2 - pb))
+        .flatten();
+    let policy_program_info = permissioned
+        .then(|| accounts.get(accounts.len() - 1 - pb))
+        .flatten();
     let source_tree_info = accounts
         .len()
-        .checked_sub(1 + pb)
+        .checked_sub(1 + pb + policy)
         .filter(|&i| i >= 5 + n_inputs)
         .map(|i| &accounts[i])
         .filter(|a| {
@@ -149,7 +171,7 @@ pub fn process_transact(
     let frozen = usize::from(source_tree_info.is_some());
 
     let extra_accounts_after_nullifiers = accounts.len() - (5 + n_inputs);
-    let has_relayer = extra_accounts_after_nullifiers > frozen + pb;
+    let has_relayer = extra_accounts_after_nullifiers > frozen + pb + policy;
     let payer = if has_relayer {
         let relayer = &accounts[5 + n_inputs];
         if !relayer.is_signer() {
@@ -163,8 +185,22 @@ pub fn process_transact(
         user
     };
 
+    if let (Some(approval), Some(policy_program)) = (approval_info, policy_program_info) {
+        crate::instructions::consume_policy_approval(
+            program_id,
+            approval,
+            policy_program,
+            pool_state_info,
+            user.address(),
+            &policy_authority,
+            crate::instruction::TRANSACT,
+            data,
+        )?;
+    }
+
     verify_vk_merkle_and_proof(
         program_id,
+        pool_state_info,
         vk_registry_info,
         commitment_tree_info,
         active_index,

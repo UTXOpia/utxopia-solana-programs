@@ -13,6 +13,7 @@
     "scripts/test-flow/**/*.ts",
     "scripts/test-helpers.ts",
     "scripts/regtest-helpers.ts",
-    "scripts/init-permissioned.ts"
+    "scripts/init-permissioned.ts",
+    "scripts/policy-approval-devnet.ts"
   ]
 }

@@ -14,7 +14,7 @@
 //!
 //! # Accounts (permissioned path, disc 23)
 //! 0-6. Same as above
-//! 7. `[signer]`   Auditor — must match `pool.auditor()` and must not be frozen
+//! 7. `[writable]` One-time PolicyApproval
 
 use crate::pinocchio_compat::{AccountInfo, ProgramError};
 use pinocchio::{
@@ -28,7 +28,8 @@ use crate::utils::{
     crypto::compute_commitment,
     events::{emit_shield_meta, emit_stealth_announcement, ANNOUNCEMENT_TYPE_DEPOSIT},
     transfer_token_user, validate_account_writable, validate_active_tree_pda,
-    validate_any_token_program_key, validate_program_owner, validate_token_owner,
+    validate_any_token_program_key, validate_program_owner, validate_token_config_pda,
+    validate_token_owner,
 };
 
 /// Instruction data: amount(8) + npk(32) + ephemeral_pub(32) = 72 bytes
@@ -73,11 +74,11 @@ pub fn process_shield(
     shield_inner(program_id, accounts, data, &[])
 }
 
-/// Auditor-gated SPL shield for permissioned pools (disc 23).
+/// Policy-approved SPL shield for permissioned pools (disc 23).
 ///
 /// Same accounts as `process_shield` (indices 0-6), plus one appended account:
 ///
-/// 7. `[signer]` Auditor — must match `pool.auditor()` and must not be frozen.
+/// 7. `[writable]` One-time PolicyApproval bound to this exact instruction.
 ///
 /// Instruction data layout:
 ///   fixed shield header (72 bytes) || auditor_ciphertext (variable, may be empty)
@@ -85,16 +86,14 @@ pub fn process_shield(
 /// Gate logic:
 /// - User MUST be a signer (token transfer authority)
 /// - Pool MUST be permissioned (else NotPermissioned)
-/// - Auditor account must be a signer (MissingRequiredSignature)
-/// - Auditor account key must equal pool.auditor() (Unauthorized)
 /// - Pool auditor must not be frozen (AuditorFrozen)
 pub fn process_shield_permissioned(
     program_id: &crate::pinocchio_compat::Pubkey,
     accounts: &[AccountInfo],
     data: &[u8],
 ) -> ProgramResult {
-    // Need the 7 base accounts + 1 auditor signer
-    if accounts.len() < 8 {
+    // Need the 7 base accounts + PolicyApproval + PolicyApproval program
+    if accounts.len() < 9 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
     if data.len() < DATA_LEN {
@@ -114,7 +113,7 @@ pub fn process_shield_permissioned(
 
     // Validate pool state and enforce permissioned gate
     validate_program_owner(pool_state_info, program_id)?;
-    {
+    let policy_authority = {
         let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
 
@@ -123,21 +122,22 @@ pub fn process_shield_permissioned(
             return Err(UTXOpiaError::NotPermissioned.into());
         }
 
-        // Auditor gate — account 7 is the appended auditor signer
-        let auditor_info = &accounts[7];
-
-        if !auditor_info.is_signer() {
-            return Err(ProgramError::MissingRequiredSignature);
-        }
-
-        if auditor_info.address().as_ref() != pool.auditor() {
-            return Err(UTXOpiaError::Unauthorized.into());
-        }
-
         if pool.auditor_is_frozen() {
             return Err(UTXOpiaError::AuditorFrozen.into());
         }
-    }
+        *pool.auditor()
+    };
+
+    crate::instructions::consume_policy_approval(
+        program_id,
+        &accounts[7],
+        &accounts[8],
+        pool_state_info,
+        user.address(),
+        &policy_authority,
+        crate::instruction::SHIELD_PERMISSIONED,
+        data,
+    )?;
 
     shield_inner(program_id, accounts, data, auditor_ciphertext)
 }
@@ -180,6 +180,7 @@ fn shield_inner(
     validate_account_writable(token_config_info)?;
     validate_account_writable(vault)?;
     validate_account_writable(commitment_tree_info)?;
+    validate_token_config_pda(token_config_info, pool_state_info, program_id)?;
 
     // Read pool state — check paused, validate active tree, read deposit_fee_bps
     let (deposit_fee_bps, zkbtc_mint) = {
@@ -188,7 +189,12 @@ fn shield_inner(
         if pool.is_paused() {
             return Err(UTXOpiaError::PoolPaused.into());
         }
-        validate_active_tree_pda(commitment_tree_info, program_id, pool.active_tree_index())?;
+        validate_active_tree_pda(
+            commitment_tree_info,
+            pool_state_info,
+            program_id,
+            pool.active_tree_index(),
+        )?;
         (pool.deposit_fee_bps(), pool.zkbtc_mint)
     };
 
