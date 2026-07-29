@@ -8,7 +8,32 @@ use pinocchio::{
 };
 
 use crate::constants::TOKEN_2022_PROGRAM_ID;
+
 use crate::error::UTXOpiaError;
+
+/// Build a CPI signer seed array for any PDA family the program signs with.
+///
+/// Callers pass the full seed list INCLUDING the bump (e.g. PoolState is
+/// `["pool_state", mint, bump]`). Returns the fixed-size array plus the used
+/// length; slice with `&seeds[..len]` when constructing the `Signer`.
+fn pda_signer_seeds<'a>(
+    signer_seeds: &[&'a [u8]],
+) -> Result<([Seed<'a>; 5], usize), ProgramError> {
+    if signer_seeds.is_empty() || signer_seeds.len() > 5 {
+        return Err(ProgramError::MaxSeedLengthExceeded);
+    }
+    let mut seeds: [Seed<'a>; 5] = [
+        Seed::from(&[][..]),
+        Seed::from(&[][..]),
+        Seed::from(&[][..]),
+        Seed::from(&[][..]),
+        Seed::from(&[][..]),
+    ];
+    for (slot, seed) in seeds.iter_mut().zip(signer_seeds.iter()) {
+        *slot = Seed::from(*seed);
+    }
+    Ok((seeds, signer_seeds.len()))
+}
 
 const SPL_MINT_BASE_LEN: usize = 82;
 const SPL_MINT_AUTHORITY_TAG_OFFSET: usize = 0;
@@ -176,8 +201,8 @@ pub fn unwrap_lamports_signed(
         data: &data,
     };
 
-    let seeds: [Seed; 2] = [Seed::from(signer_seeds[0]), Seed::from(signer_seeds[1])];
-    let signer = Signer::from(&seeds[..]);
+    let (seeds, seed_len) = pda_signer_seeds(signer_seeds)?;
+    let signer = Signer::from(&seeds[..seed_len]);
     let signers = [signer];
     invoke_signed(&instruction, &[source, destination, authority], &signers)
 }
@@ -214,8 +239,8 @@ pub fn mint_zkbtc(
         data: &data,
     };
 
-    let seeds: [Seed; 2] = [Seed::from(signer_seeds[0]), Seed::from(signer_seeds[1])];
-    let signer = Signer::from(&seeds[..]);
+    let (seeds, seed_len) = pda_signer_seeds(signer_seeds)?;
+    let signer = Signer::from(&seeds[..seed_len]);
     let signers = [signer];
 
     invoke_signed(&instruction, &[mint, destination, authority], &signers)
@@ -286,8 +311,8 @@ pub fn burn_zkbtc_signed(
         data: &data,
     };
 
-    let seeds: [Seed; 2] = [Seed::from(signer_seeds[0]), Seed::from(signer_seeds[1])];
-    let signer = Signer::from(&seeds[..]);
+    let (seeds, seed_len) = pda_signer_seeds(signer_seeds)?;
+    let signer = Signer::from(&seeds[..seed_len]);
     let signers = [signer];
 
     invoke_signed(&instruction, &[source, mint, authority], &signers)
@@ -323,8 +348,8 @@ pub fn transfer_zkbtc(
     if signer_seeds.is_empty() {
         invoke(&instruction, &[source, destination, authority])
     } else {
-        let seeds: [Seed; 2] = [Seed::from(signer_seeds[0]), Seed::from(signer_seeds[1])];
-        let signer = Signer::from(&seeds[..]);
+        let (seeds, seed_len) = pda_signer_seeds(signer_seeds)?;
+        let signer = Signer::from(&seeds[..seed_len]);
         let signers = [signer];
         invoke_signed(&instruction, &[source, destination, authority], &signers)
     }
