@@ -257,7 +257,11 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
     // A permissioned pool decides every spend. Exits stay reachable through the
     // forced-exit path in consume_policy_approval, so a silent authority can
     // halt circulation but never trap funds.
-    if permissioned && (approval_info.is_none() || policy_program_info.is_none()) {
+    if crate::instructions::approval_is_missing(
+        permissioned,
+        approval_info.is_some(),
+        policy_program_info.is_some(),
+    ) {
         return Err(UTXOpiaError::PolicyApprovalRequired.into());
     }
     if let (Some(approval), Some(policy_program)) = (approval_info, policy_program_info) {
