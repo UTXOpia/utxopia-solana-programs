@@ -183,6 +183,19 @@ pub fn compute_policy_request_hash(
 
 /// Validate and consume an approved account. Call this before any asset state
 /// mutation; Solana transaction atomicity rolls the status back if later work fails.
+/// Slots a spender must wait past a request's expiry before exiting without a
+/// decision. The request TTL is caller-chosen, so the delay is fixed here:
+/// otherwise a one-slot TTL would be an instant bypass.
+/// ~24h at 400ms slots.
+pub const FORCED_EXIT_DELAY_SLOTS: u64 = 216_000;
+
+/// Exits may proceed on an undecided request once the delay passes; moving
+/// funds inside the pool never can. An auditor that stops answering must not
+/// be able to trap funds, but must still be able to halt circulation.
+fn allows_forced_exit(action: u8) -> bool {
+    matches!(action, crate::instruction::UNSHIELD | crate::instruction::REDEEM)
+}
+
 pub fn consume_policy_approval(
     program_id: &Pubkey,
     approval_info: &AccountInfo,
@@ -205,7 +218,8 @@ pub fn consume_policy_approval(
         compute_policy_request_hash(program_id, pool_info.address(), actor, action, instruction_data);
     let approval_data = approval_info.try_borrow()?;
     PolicyApproval::validate(&approval_data)?;
-    if PolicyApproval::status(&approval_data) != POLICY_STATUS_APPROVED {
+    let status = PolicyApproval::status(&approval_data);
+    if status != POLICY_STATUS_APPROVED && status != POLICY_STATUS_PENDING {
         return Err(UTXOpiaError::PolicyApprovalRequired.into());
     }
     if PolicyApproval::action(&approval_data) != action
@@ -216,8 +230,20 @@ pub fn consume_policy_approval(
     {
         return Err(UTXOpiaError::PolicyApprovalMismatch.into());
     }
-    if Clock::get()?.slot > PolicyApproval::expires_at_slot(&approval_data) {
-        return Err(UTXOpiaError::PolicyApprovalExpired.into());
+    let slot = Clock::get()?.slot;
+    let expires_at = PolicyApproval::expires_at_slot(&approval_data);
+    if status == POLICY_STATUS_APPROVED {
+        if slot > expires_at {
+            return Err(UTXOpiaError::PolicyApprovalExpired.into());
+        }
+    } else {
+        // Undecided: only an exit, and only once the authority has had the
+        // request's own window plus the fixed delay to answer it.
+        if !allows_forced_exit(action)
+            || slot <= expires_at.saturating_add(FORCED_EXIT_DELAY_SLOTS)
+        {
+            return Err(UTXOpiaError::PolicyApprovalRequired.into());
+        }
     }
     let (expected, bump) = find_program_address(
         &[
@@ -326,5 +352,26 @@ mod tests {
         )
         .0;
         assert_ne!(a, b);
+    }
+
+    /// The forced-exit rule, isolated from account plumbing: who may proceed on
+    /// an undecided request, and when.
+    #[test]
+    fn forced_exit_covers_exits_only_and_only_after_the_delay() {
+        use crate::instruction::{REDEEM, TRANSACT, UNSHIELD};
+
+        assert!(allows_forced_exit(UNSHIELD));
+        assert!(allows_forced_exit(REDEEM));
+        // Moving funds inside the pool is what the authority must be able to stop.
+        assert!(!allows_forced_exit(TRANSACT));
+        assert!(!allows_forced_exit(crate::instruction::COMPLETE_DEPOSIT_PERMISSIONED));
+
+        // A one-slot request TTL must not become an instant bypass: the fixed
+        // delay is measured past expiry, so the wait is the same either way.
+        let expires_at = 10u64;
+        let allowed = |slot: u64| slot > expires_at + FORCED_EXIT_DELAY_SLOTS;
+        assert!(!allowed(expires_at + 1));
+        assert!(!allowed(expires_at + FORCED_EXIT_DELAY_SLOTS));
+        assert!(allowed(expires_at + FORCED_EXIT_DELAY_SLOTS + 1));
     }
 }

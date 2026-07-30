@@ -262,6 +262,12 @@ pub fn process_unshield(
         PoolState::from_bytes(&pool_data)?.bump
     };
 
+    // A permissioned pool decides every spend. Exits stay reachable through the
+    // forced-exit path in consume_policy_approval, so a silent authority can
+    // halt circulation but never trap funds.
+    if permissioned && (approval_info.is_none() || policy_program_info.is_none()) {
+        return Err(UTXOpiaError::PolicyApprovalRequired.into());
+    }
     if let (Some(approval), Some(policy_program)) = (approval_info, policy_program_info) {
         crate::instructions::consume_policy_approval(
             program_id,
