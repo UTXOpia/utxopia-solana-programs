@@ -75,6 +75,7 @@ pub fn process_transact(
     validate_account_count(accounts.len(), min_accounts, proof_source)?;
     let mut proof_buf = [0u8; crate::utils::groth16::GROTH16_PROOF_SIZE];
     let prefix = parse_prefix(data, accounts, header, n_outputs, &mut proof_buf)?;
+    let mut nullifiers_buf = [0u8; crate::instructions::joinsplit_common::MAX_JOINSPLIT_SIZE * 32];
     let stealth_data_start = prefix.stealth_data_start;
     let stealth_data_end = prefix.stealth_data_end;
 
@@ -185,16 +186,16 @@ pub fn process_transact(
         user
     };
 
-    // A permissioned pool decides every spend. Exits stay reachable through the
-    // forced-exit path in consume_policy_approval, so a silent authority can
-    // halt circulation but never trap funds.
-    if crate::instructions::approval_is_missing(
+    // Circulation inside a permissioned pool always needs the auditor: there is
+    // no external destination here for a registry to bound, so `transact` has no
+    // ragequit. Funds are still never trapped — the holder can unshield or
+    // redeem out to a registered destination without any approval at all.
+    crate::instructions::resolve_spend_path(
         permissioned,
         approval_info.is_some(),
         policy_program_info.is_some(),
-    ) {
-        return Err(UTXOpiaError::PolicyApprovalRequired.into());
-    }
+        crate::instruction::TRANSACT,
+    )?;
     if let (Some(approval), Some(policy_program)) = (approval_info, policy_program_info) {
         crate::instructions::consume_policy_approval(
             program_id,
@@ -204,7 +205,15 @@ pub fn process_transact(
             user.address(),
             &policy_authority,
             crate::instruction::TRANSACT,
-            data,
+            // An internal transfer reveals no amount and no external
+            // destination, so the only thing the auditor is deciding is whether
+            // this participant may spend these particular notes at all — which
+            // is exactly what the nullifiers name.
+            &[crate::instructions::joinsplit_common::nullifiers_concat(
+                &prefix,
+                n_inputs,
+                &mut nullifiers_buf,
+            )],
         )?;
     }
 

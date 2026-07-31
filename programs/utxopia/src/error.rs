@@ -219,6 +219,12 @@ pub enum UTXOpiaError {
 
     #[error("Policy approval is no longer pending or reusable")]
     PolicyApprovalAlreadyUsed = 6096,
+
+    #[error("Ragequit destination is not in the pool's exit registry")]
+    ExitDestinationNotRegistered = 6097,
+
+    #[error("This action has no ragequit path and requires a policy approval")]
+    RagequitNotAvailable = 6098,
 }
 
 impl From<UTXOpiaError> for ProgramError {

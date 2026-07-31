@@ -795,6 +795,7 @@ fn shield_permissioned_call(
     approval: &Pubkey,
     pool_auditor: &[u8; 32], // the auditor key baked into the pool state blob
     pool_flags: u8,
+    exit_registered: bool,
 ) -> (Instruction, Vec<(Pubkey, Account)>) {
     let token_2022 = Pubkey::new_from_array(TOKEN_2022);
 
@@ -804,6 +805,15 @@ fn shield_permissioned_call(
     let vault = Pubkey::new_unique();
     let commitment_tree = Pubkey::new_unique();
     let policy_program = Pubkey::new_from_array(POLICY_PROGRAM);
+    let (exit_destination, exit_bump) = Pubkey::find_program_address(
+        &[
+            b"exit_destination",
+            pool_state.as_ref(),
+            &[EXIT_KIND_SOLANA_OWNER],
+            user.as_ref(),
+        ],
+        pid,
+    );
 
     let metas = vec![
         AccountMeta::new_readonly(*user, true),       // 0 user signer
@@ -815,6 +825,7 @@ fn shield_permissioned_call(
         AccountMeta::new_readonly(token_2022, false), // 6
         AccountMeta::new(*approval, false),           // 7 policy approval
         AccountMeta::new_readonly(policy_program, false), // 8 policy program
+        AccountMeta::new_readonly(exit_destination, false), // 9 depositor's exit entry
     ];
 
     // Discriminator 23 + 72-byte shield header
@@ -854,6 +865,18 @@ fn shield_permissioned_call(
                 rent_epoch: 0,
             },
         ),
+        (
+            exit_destination,
+            if exit_registered {
+                acct(
+                    1_000_000,
+                    exit_destination_blob(exit_bump, EXIT_KIND_SOLANA_OWNER, &user.to_bytes()),
+                    *pid,
+                )
+            } else {
+                acct(0, vec![], SYSTEM_ID)
+            },
+        ),
     ];
 
     (ix, accounts)
@@ -871,7 +894,7 @@ fn shield_permissioned_fails_on_public_pool() {
     let auditor_bytes: [u8; 32] = auditor.to_bytes();
 
     // Pool has permissioned flag CLEAR.
-    let (ix, accounts) = shield_permissioned_call(&pid, &user, &auditor, &auditor_bytes, 0u8);
+    let (ix, accounts) = shield_permissioned_call(&pid, &user, &auditor, &auditor_bytes, 0u8, true);
     let res = mollusk.process_instruction(&ix, &accounts);
     assert!(
         is_custom(&res.program_result, NOT_PERMISSIONED),
@@ -894,7 +917,7 @@ fn shield_permissioned_gate_passes_with_correct_auditor() {
     let auditor_bytes: [u8; 32] = auditor.to_bytes();
 
     let (ix, accounts) =
-        shield_permissioned_call(&pid, &user, &auditor, &auditor_bytes, FLAG_PERMISSIONED);
+        shield_permissioned_call(&pid, &user, &auditor, &auditor_bytes, FLAG_PERMISSIONED, true);
     let res = mollusk.process_instruction(&ix, &accounts);
 
     // Gate errors must not appear — the permissioned gate has been cleared.
@@ -929,6 +952,7 @@ fn shield_permissioned_fails_with_invalid_policy_approval() {
         &invalid_approval,
         &real_auditor,
         FLAG_PERMISSIONED,
+        true,
     );
     let res = mollusk.process_instruction(&ix, &accounts);
     assert!(
@@ -955,6 +979,7 @@ fn shield_permissioned_fails_when_auditor_frozen() {
         &auditor,
         &auditor_bytes,
         FLAG_PERMISSIONED | FLAG_AUDITOR_FROZEN, // auditor is frozen
+        true,
     );
     let res = mollusk.process_instruction(&ix, &accounts);
     assert!(
@@ -1150,6 +1175,431 @@ fn extend_blockchain_accepts_fork_at_finality() {
             ProgramResult::Failure(ProgramError::InvalidArgument)
         ),
         "fork at finalized_height must NOT be rejected by the fork-point gate, got {:?}",
+        res.program_result
+    );
+}
+
+// ---- ragequit exit path (unshield disc 14, no approval accounts) ------------
+//
+// A permissioned pool exits either through an auditor approval or through the
+// ragequit path, which needs no approval but only reaches destinations the
+// auditor has registered. These tests pin the registry gate and — most
+// importantly — that freezing the auditor does not close it. An auditor able to
+// block withdrawal outright is the one power the design must not hand over.
+
+const EXIT_DESTINATION_NOT_REGISTERED: u32 = 6097;
+const INVALID_BOUND_PARAMS: u32 = 6067;
+
+const EXIT_KIND_SOLANA_OWNER: u8 = 0;
+const EXIT_KIND_BTC_SCRIPT: u8 = 1;
+
+const TOKEN_CONFIG_DISC: u8 = 0x0B;
+const TOKEN_CONFIG_LEN: usize = 164;
+const EXIT_DESTINATION_DISC: u8 = 0x0d;
+const EXIT_DESTINATION_LEN: usize = 36;
+
+const POOL_OFF_BUMP: usize = 1;
+const POOL_OFF_ZKBTC_MINT: usize = 36;
+
+/// A token account blob: mint(32) || owner(32) || amount(8).
+fn token_account_blob(mint: &Pubkey, owner: &Pubkey) -> Vec<u8> {
+    let mut d = vec![0u8; 72];
+    d[0..32].copy_from_slice(mint.as_ref());
+    d[32..64].copy_from_slice(owner.as_ref());
+    d
+}
+
+fn token_config_blob(bump: u8, mint: &Pubkey, vault: &Pubkey) -> Vec<u8> {
+    let mut d = vec![0u8; TOKEN_CONFIG_LEN];
+    d[0] = TOKEN_CONFIG_DISC;
+    d[1] = bump;
+    d[2..34].copy_from_slice(mint.as_ref());
+    d[66..98].copy_from_slice(vault.as_ref());
+    d[99] = 1; // enabled
+    d
+}
+
+fn exit_destination_blob(bump: u8, kind: u8, key: &[u8; 32]) -> Vec<u8> {
+    let mut d = vec![0u8; EXIT_DESTINATION_LEN];
+    d[0] = EXIT_DESTINATION_DISC;
+    d[1] = 1; // version
+    d[2] = bump;
+    d[3] = kind;
+    d[4..36].copy_from_slice(key);
+    d
+}
+
+/// What the caller passes in the single trailing ragequit slot.
+enum RagequitSlot {
+    /// Correct PDA for the recipient's owner, initialized.
+    Registered,
+    /// Correct PDA address, never created (the "not registered yet" case).
+    Unregistered,
+    /// A registered entry — for a *different* owner than the one being paid.
+    RegisteredForAnotherOwner,
+    /// A registered entry whose key matches, but under the BTC-script kind.
+    RegisteredUnderBtcKind,
+}
+
+/// Build a 1-in / 1-out / 1-public-output unshield with no approval accounts,
+/// i.e. the ragequit path. The proof and bound-params bytes are garbage: every
+/// assertion here is about a gate that runs before they are examined.
+fn unshield_ragequit_call(
+    pid: &Pubkey,
+    frozen: bool,
+    slot: RagequitSlot,
+) -> (Instruction, Vec<(Pubkey, Account)>) {
+    let token_program = Pubkey::new_from_array(TOKEN_2022);
+    let mint = Pubkey::new_unique();
+    let (pool_state, pool_bump) = Pubkey::find_program_address(&[b"pool_state", mint.as_ref()], pid);
+    let (token_config, tc_bump) =
+        Pubkey::find_program_address(&[b"token_config", pool_state.as_ref(), mint.as_ref()], pid);
+    let (tree, _) = Pubkey::find_program_address(
+        &[b"commitment_tree", pool_state.as_ref(), &0u32.to_le_bytes()],
+        pid,
+    );
+
+    let vk_registry = Pubkey::new_unique();
+    let user = Pubkey::new_unique();
+    let system_key = SYSTEM_ID;
+    let vault = Pubkey::new_unique();
+    let recipient = Pubkey::new_unique();
+    let recipient_owner = Pubkey::new_unique();
+    let nullifier_record = Pubkey::new_unique();
+
+    // The registry key is the destination that actually gets paid: the token
+    // account's OWNER, which is also what bound-params binds.
+    let paid_owner: [u8; 32] = recipient_owner.to_bytes();
+    let other_owner: [u8; 32] = Pubkey::new_unique().to_bytes();
+
+    let (dest_key, dest_kind) = match slot {
+        RagequitSlot::RegisteredForAnotherOwner => (other_owner, EXIT_KIND_SOLANA_OWNER),
+        RagequitSlot::RegisteredUnderBtcKind => (paid_owner, EXIT_KIND_BTC_SCRIPT),
+        _ => (paid_owner, EXIT_KIND_SOLANA_OWNER),
+    };
+    let (exit_destination, exit_bump) = Pubkey::find_program_address(
+        &[
+            b"exit_destination",
+            pool_state.as_ref(),
+            &[dest_kind],
+            &dest_key,
+        ],
+        pid,
+    );
+
+    // header(4) + proof(256) + merkle_root(32) + bound_params(32)
+    //   + nullifiers(1*32) + commitments_out(1*32) + stealth_data(0) + amounts(1*8)
+    let mut data = vec![14u8]; // discriminator
+    data.extend_from_slice(&[1u8, 1, 1, 0]); // n_in, n_out, n_pub, proof_source=inline
+    data.extend_from_slice(&[7u8; 256]); // proof (garbage)
+    data.extend_from_slice(&[0u8; 32]); // merkle_root
+    data.extend_from_slice(&[0u8; 32]); // bound_params_hash (garbage)
+    data.extend_from_slice(&[1u8; 32]); // nullifier
+    data.extend_from_slice(&[2u8; 32]); // commitment_out
+    data.extend_from_slice(&1_000u64.to_le_bytes()); // unshield amount
+
+    let metas = vec![
+        AccountMeta::new(pool_state, false),
+        AccountMeta::new(tree, false),
+        AccountMeta::new_readonly(vk_registry, false),
+        AccountMeta::new(user, true),
+        AccountMeta::new_readonly(system_key, false),
+        AccountMeta::new(token_config, false),
+        AccountMeta::new(vault, false),
+        AccountMeta::new_readonly(token_program, false),
+        AccountMeta::new(recipient, false),
+        AccountMeta::new(nullifier_record, false),
+        AccountMeta::new_readonly(exit_destination, false),
+    ];
+    let ix = Instruction::new_with_bytes(*pid, &data, metas);
+
+    let mut flags = FLAG_PERMISSIONED;
+    if frozen {
+        flags |= FLAG_AUDITOR_FROZEN;
+    }
+    let mut pool_blob = pool_state_blob(flags, &[9u8; 32], &[0u8; 32]);
+    pool_blob[POOL_OFF_BUMP] = pool_bump;
+    pool_blob[POOL_OFF_ZKBTC_MINT..POOL_OFF_ZKBTC_MINT + 32].copy_from_slice(mint.as_ref());
+
+    let exit_account = match slot {
+        RagequitSlot::Unregistered => acct(0, vec![], SYSTEM_ID),
+        _ => acct(
+            1_000_000,
+            exit_destination_blob(exit_bump, dest_kind, &dest_key),
+            *pid,
+        ),
+    };
+
+    let (system_pk, system_acct) = keyed_account_for_system_program();
+    let accounts = vec![
+        (pool_state, acct(1_000_000, pool_blob, *pid)),
+        (tree, acct(1_000_000, vec![0u8; 128], *pid)),
+        (vk_registry, acct(1, vec![0u8; 8], *pid)),
+        (user, acct(1_000_000_000, vec![], SYSTEM_ID)),
+        (system_pk, system_acct),
+        (
+            token_config,
+            acct(1, token_config_blob(tc_bump, &mint, &vault), *pid),
+        ),
+        (
+            vault,
+            acct(1, token_account_blob(&mint, &pool_state), token_program),
+        ),
+        (token_program, acct(1, vec![], SYSTEM_ID)),
+        (
+            recipient,
+            acct(1, token_account_blob(&mint, &recipient_owner), token_program),
+        ),
+        (nullifier_record, acct(0, vec![], SYSTEM_ID)),
+        (exit_destination, exit_account),
+    ];
+
+    (ix, accounts)
+}
+
+fn run_ragequit(frozen: bool, slot: RagequitSlot) -> ProgramResult {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "utxopia");
+    let (ix, accounts) = unshield_ragequit_call(&pid, frozen, slot);
+    mollusk.process_instruction(&ix, &accounts).program_result
+}
+
+#[test]
+fn ragequit_rejects_an_unregistered_destination() {
+    let res = run_ragequit(false, RagequitSlot::Unregistered);
+    assert!(
+        is_custom(&res, EXIT_DESTINATION_NOT_REGISTERED),
+        "an unapproved exit must not reach an unvetted address, got {res:?}"
+    );
+}
+
+/// The registry entry is derived from the owner actually being paid, so holding
+/// *some* registration is not enough — a spender cannot borrow another
+/// participant's entry to reach their address.
+#[test]
+fn ragequit_rejects_a_registration_for_a_different_owner() {
+    let res = run_ragequit(false, RagequitSlot::RegisteredForAnotherOwner);
+    assert!(
+        is_custom(&res, EXIT_DESTINATION_NOT_REGISTERED),
+        "registry entry must bind to the destination being paid, got {res:?}"
+    );
+}
+
+/// A Solana owner and a BTC script hash share one 32-byte key space; only the
+/// kind seed stops a registration for one from authorizing the other.
+#[test]
+fn ragequit_rejects_a_btc_registration_used_as_a_solana_destination() {
+    let res = run_ragequit(false, RagequitSlot::RegisteredUnderBtcKind);
+    assert!(
+        is_custom(&res, EXIT_DESTINATION_NOT_REGISTERED),
+        "kind must separate the two destination spaces, got {res:?}"
+    );
+}
+
+/// The load-bearing guarantee: freezing is the auditor's strongest lever and it
+/// still cannot close the exit. Reaching the bound-params check means the freeze
+/// and the registry gate both let this through — everything past it is ordinary
+/// proof validation, which garbage bytes are expected to fail.
+#[test]
+fn a_frozen_auditor_cannot_close_the_ragequit_exit() {
+    let res = run_ragequit(true, RagequitSlot::Registered);
+    assert!(
+        is_custom(&res, INVALID_BOUND_PARAMS),
+        "a frozen pool must still be exitable to a registered address, got {res:?}"
+    );
+    assert!(
+        !is_custom(&res, AUDITOR_FROZEN),
+        "freezing must never block the ragequit path"
+    );
+}
+
+/// The same call on an unfrozen pool must behave identically — otherwise the
+/// test above would pass for the wrong reason.
+#[test]
+fn ragequit_to_a_registered_destination_passes_the_gate() {
+    let res = run_ragequit(false, RagequitSlot::Registered);
+    assert!(
+        is_custom(&res, INVALID_BOUND_PARAMS),
+        "a registered destination must pass the registry gate, got {res:?}"
+    );
+}
+
+// ---- redemption driver gate (mark_processing disc 18) ----------------------
+//
+// The BTC legs of a redemption used to be pool-authority-only, which let a
+// silent operator strand a withdrawal the pool has no right to prevent. They now
+// also accept the requester. They are NOT open to anyone: a third party could
+// otherwise push a redemption into Processing with a bad input set, and only a
+// cancel — which waits out the processing timeout — could undo it.
+
+const REDEMPTION_DISC: u8 = 0x04;
+const RED_OFF_REQUEST_ID: usize = 8;
+const RED_OFF_REQUESTER: usize = 16;
+/// Comfortably larger than RedemptionRequest::LEN; `from_bytes` only requires a
+/// lower bound, and every field this test sets sits in the fixed prefix.
+const REDEMPTION_BLOB_LEN: usize = 512;
+
+fn redemption_blob(requester: &Pubkey, request_id: u64) -> Vec<u8> {
+    let mut d = vec![0u8; REDEMPTION_BLOB_LEN];
+    d[0] = REDEMPTION_DISC;
+    d[1] = 0; // status = Pending
+    d[RED_OFF_REQUEST_ID..RED_OFF_REQUEST_ID + 8].copy_from_slice(&request_id.to_le_bytes());
+    d[RED_OFF_REQUESTER..RED_OFF_REQUESTER + 32].copy_from_slice(requester.as_ref());
+    d
+}
+
+/// Call mark_processing with an empty payload: every assertion here is about the
+/// driver gate, which runs before the payload is parsed.
+fn mark_processing_call(
+    pid: &Pubkey,
+    signer: MarkProcessingSigner,
+) -> (Instruction, Vec<(Pubkey, Account)>) {
+    let mint = Pubkey::new_unique();
+    let (pool_state, pool_bump) = Pubkey::find_program_address(&[b"pool_state", mint.as_ref()], pid);
+
+    let operator = Pubkey::new_unique();
+    let requester = Pubkey::new_unique();
+    let stranger = Pubkey::new_unique();
+    let request_id: u64 = 1;
+    let (redemption, _) = Pubkey::find_program_address(
+        &[
+            b"redemption",
+            pool_state.as_ref(),
+            requester.as_ref(),
+            &request_id.to_le_bytes(),
+        ],
+        pid,
+    );
+
+    let caller = match signer {
+        MarkProcessingSigner::Operator => operator,
+        MarkProcessingSigner::Requester => requester,
+        MarkProcessingSigner::Stranger => stranger,
+    };
+
+    let metas = vec![
+        AccountMeta::new(pool_state, false),
+        AccountMeta::new(redemption, false),
+        AccountMeta::new_readonly(caller, true),
+    ];
+    let ix = Instruction::new_with_bytes(*pid, &[18u8], metas);
+
+    let mut pool_blob = pool_state_blob(0, &[0u8; 32], &[0u8; 32]);
+    pool_blob[POOL_OFF_BUMP] = pool_bump;
+    pool_blob[POOL_OFF_ZKBTC_MINT..POOL_OFF_ZKBTC_MINT + 32].copy_from_slice(mint.as_ref());
+    pool_blob[POOL_OFF_AUTHORITY..POOL_OFF_AUTHORITY + 32].copy_from_slice(operator.as_ref());
+
+    let accounts = vec![
+        (pool_state, acct(1_000_000, pool_blob, *pid)),
+        (
+            redemption,
+            acct(1_000_000, redemption_blob(&requester, request_id), *pid),
+        ),
+        (caller, acct(1_000_000_000, vec![], SYSTEM_ID)),
+    ];
+
+    (ix, accounts)
+}
+
+enum MarkProcessingSigner {
+    Operator,
+    Requester,
+    Stranger,
+}
+
+fn run_mark_processing(signer: MarkProcessingSigner) -> ProgramResult {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "utxopia");
+    let (ix, accounts) = mark_processing_call(&pid, signer);
+    mollusk.process_instruction(&ix, &accounts).program_result
+}
+
+#[test]
+fn the_operator_still_drives_a_redemption() {
+    let res = run_mark_processing(MarkProcessingSigner::Operator);
+    assert!(
+        !is_custom(&res, UNAUTHORIZED),
+        "operator must keep its existing path, got {res:?}"
+    );
+}
+
+/// The guarantee: a withdrawal does not depend on the operator answering.
+#[test]
+fn the_requester_can_drive_their_own_redemption_on_chain() {
+    let res = run_mark_processing(MarkProcessingSigner::Requester);
+    assert!(
+        !is_custom(&res, UNAUTHORIZED),
+        "requester must be able to push their own redemption, got {res:?}"
+    );
+}
+
+/// ...and its limit: not open to the world, or a stranger could wedge a
+/// redemption into Processing with an input set only a cancel can undo.
+#[test]
+fn a_stranger_cannot_drive_someone_elses_redemption_on_chain() {
+    let res = run_mark_processing(MarkProcessingSigner::Stranger);
+    assert!(
+        is_custom(&res, UNAUTHORIZED),
+        "third parties must not drive redemptions, got {res:?}"
+    );
+}
+
+/// Value must not enter without a way back out: an SPL depositor with no entry
+/// in the exit registry is refused before the approval is even consumed. This is
+/// what turns "nobody can be trapped" from an onboarding promise into an
+/// on-chain invariant.
+#[test]
+fn shield_permissioned_refuses_a_depositor_with_no_registered_exit() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "utxopia");
+
+    let user = Pubkey::new_unique();
+    let auditor = Pubkey::new_unique();
+    let auditor_bytes: [u8; 32] = auditor.to_bytes();
+
+    let (ix, accounts) = shield_permissioned_call(
+        &pid,
+        &user,
+        &auditor,
+        &auditor_bytes,
+        FLAG_PERMISSIONED,
+        false,
+    );
+    let res = mollusk.process_instruction(&ix, &accounts);
+    assert!(
+        is_custom(&res.program_result, EXIT_DESTINATION_NOT_REGISTERED),
+        "a depositor with no exit must be refused, got {:?}",
+        res.program_result
+    );
+}
+
+/// ...and the same call with the entry present gets past it, so the test above
+/// cannot be passing for some unrelated reason.
+#[test]
+fn shield_permissioned_accepts_a_depositor_with_a_registered_exit() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "utxopia");
+
+    let user = Pubkey::new_unique();
+    let auditor = Pubkey::new_unique();
+    let auditor_bytes: [u8; 32] = auditor.to_bytes();
+
+    let (ix, accounts) = shield_permissioned_call(
+        &pid,
+        &user,
+        &auditor,
+        &auditor_bytes,
+        FLAG_PERMISSIONED,
+        true,
+    );
+    let res = mollusk.process_instruction(&ix, &accounts);
+    assert!(
+        !is_custom(&res.program_result, EXIT_DESTINATION_NOT_REGISTERED),
+        "a registered depositor must clear the exit gate, got {:?}",
         res.program_result
     );
 }

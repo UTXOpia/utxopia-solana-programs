@@ -283,14 +283,20 @@ pub fn process_complete_redemption(
     validate_account_writable(zkbtc_mint)?;
     validate_account_writable(pool_vault)?;
 
-    // Validate authority and get pool state
+    // Validate the driver and get pool state. Either the operator finalizes this,
+    // or the requester does — the BTC has already moved by now and everything
+    // here is checked against the SPV-verified broadcast transaction, so leaving
+    // it operator-only would only let a silent operator strand the accounting.
     let (pool_bump, pending_redemptions) = {
         let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
-
-        if authority.address().as_ref() != pool.authority {
-            return Err(UTXOpiaError::Unauthorized.into());
-        }
+        let redemption_data = redemption_info.try_borrow()?;
+        let redemption = RedemptionRequest::from_bytes(&redemption_data)?;
+        crate::utils::policy::redemption_driver_is_allowed(
+            authority.address().as_ref(),
+            &pool.authority,
+            &redemption.requester,
+        )?;
 
         (pool.bump, pool.pending_redemptions())
     };

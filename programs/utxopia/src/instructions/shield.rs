@@ -76,9 +76,11 @@ pub fn process_shield(
 
 /// Policy-approved SPL shield for permissioned pools (disc 23).
 ///
-/// Same accounts as `process_shield` (indices 0-6), plus one appended account:
+/// Same accounts as `process_shield` (indices 0-6), plus three appended:
 ///
-/// 7. `[writable]` One-time PolicyApproval bound to this exact instruction.
+/// 7. `[writable]` One-time PolicyApproval bound to this instruction's intent.
+/// 8. `[]`         Policy program.
+/// 9. `[]`         ExitDestination PDA registered for the depositor (account 0).
 ///
 /// Instruction data layout:
 ///   fixed shield header (72 bytes) || auditor_ciphertext (variable, may be empty)
@@ -87,13 +89,16 @@ pub fn process_shield(
 /// - User MUST be a signer (token transfer authority)
 /// - Pool MUST be permissioned (else NotPermissioned)
 /// - Pool auditor must not be frozen (AuditorFrozen)
+/// - The depositor MUST already have a registered exit (else
+///   ExitDestinationNotRegistered) — value never enters without a way out
 pub fn process_shield_permissioned(
     program_id: &crate::pinocchio_compat::Pubkey,
     accounts: &[AccountInfo],
     data: &[u8],
 ) -> ProgramResult {
     // Need the 7 base accounts + PolicyApproval + PolicyApproval program
-    if accounts.len() < 9 {
+    // + the depositor's own exit-registry entry.
+    if accounts.len() < 10 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
     if data.len() < DATA_LEN {
@@ -128,6 +133,27 @@ pub fn process_shield_permissioned(
         *pool.auditor()
     };
 
+    // No value enters without a way back out. The registry key for an SPL exit
+    // is the recipient token account's owner, which is this signer, so a
+    // depositor who clears this check can always ragequit to their own wallet —
+    // without the auditor, and whatever the auditor later decides.
+    //
+    // This is what makes "nobody can be trapped" an on-chain invariant instead
+    // of an operational promise. Requiring merely *some* registry entry would
+    // only prove the registry is non-empty, which a single placeholder address
+    // satisfies while leaving this depositor with no exit at all.
+    //
+    // Checked before the approval is consumed: having no exit is a precondition
+    // of the depositor, not a verdict on this deposit, so it should not cost a
+    // CPI to discover.
+    crate::instructions::assert_exit_destination_registered(
+        program_id,
+        pool_state_info.address(),
+        &accounts[9],
+        crate::state::EXIT_KIND_SOLANA_OWNER,
+        user.address().as_ref().try_into().unwrap(),
+    )?;
+
     crate::instructions::consume_policy_approval(
         program_id,
         &accounts[7],
@@ -136,7 +162,9 @@ pub fn process_shield_permissioned(
         user.address(),
         &policy_authority,
         crate::instruction::SHIELD_PERMISSIONED,
-        data,
+        // Whole payload: nothing in a deposit ages, so the depositor can hold
+        // these exact bytes until the answer arrives and never re-derive them.
+        &[data],
     )?;
 
     shield_inner(program_id, accounts, data, auditor_ciphertext)

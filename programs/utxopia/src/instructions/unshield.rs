@@ -81,6 +81,7 @@ pub fn process_unshield(
     let prefix = parse_prefix(data, accounts, header, n_tree_outputs, &mut proof_buf)?;
     let stealth_data_start = prefix.stealth_data_start;
     let stealth_data_end = prefix.stealth_data_end;
+    let mut nullifiers_buf = [0u8; crate::instructions::joinsplit_common::MAX_JOINSPLIT_SIZE * 32];
     let mut offset = stealth_data_end;
 
     // Parse per-output unshield amounts
@@ -157,49 +158,30 @@ pub fn process_unshield(
         }
     }
 
-    // Verify bound params hash — binds recipient addresses + stealth data to proof.
-    // destinations_hash = SHA256(owner_1 || owner_2 || ...)
-    {
-        let mut owners_concat = [0u8; MAX_PUBLIC_OUTPUTS * 32]; // stack-allocated
-        for k in 0..n_public_outputs {
-            let recipient = &accounts[FIXED_ACCOUNTS + k];
-            if native_sol {
-                owners_concat[k * 32..(k + 1) * 32].copy_from_slice(recipient.address().as_ref());
-            } else {
-                let uta_data = recipient.try_borrow()?;
-                if uta_data.len() < 64 {
-                    return Err(ProgramError::InvalidAccountData);
-                }
-                owners_concat[k * 32..(k + 1) * 32].copy_from_slice(&uta_data[32..64]);
+    // Collect the public destinations: the token account's owner for SPL, the
+    // account itself for native SOL. Read before anything expensive, because two
+    // later steps need them — the ragequit gate matches them against the exit
+    // registry, and the bound-params hash binds them to the proof.
+    let mut owners_concat = [0u8; MAX_PUBLIC_OUTPUTS * 32]; // stack-allocated
+    for k in 0..n_public_outputs {
+        let recipient = &accounts[FIXED_ACCOUNTS + k];
+        if native_sol {
+            owners_concat[k * 32..(k + 1) * 32].copy_from_slice(recipient.address().as_ref());
+        } else {
+            let uta_data = recipient.try_borrow()?;
+            if uta_data.len() < 64 {
+                return Err(ProgramError::InvalidAccountData);
             }
-        }
-        let stealth_data_hash = crate::utils::sha256(&data[stealth_data_start..stealth_data_end]);
-        let operation_hash = crate::utils::crypto::compute_bound_params_hash_unshield(
-            crate::constants::CHAIN_ID,
-            &owners_concat[..n_public_outputs * 32],
-            &stealth_data_hash,
-        );
-        let expected = crate::utils::crypto::bind_bound_params_to_domain(
-            &operation_hash,
-            crate::constants::CHAIN_ID,
-            program_id,
-            pool_state_info.address(),
-            permissioned,
-        )?;
-        if *prefix.bound_params_hash != expected {
-            return Err(UTXOpiaError::InvalidBoundParams.into());
+            owners_concat[k * 32..(k + 1) * 32].copy_from_slice(&uta_data[32..64]);
         }
     }
 
     // Read pool state — check paused, validate active tree, get withdrawal_fee_bps
-    let (withdrawal_fee_bps, active_index, zkbtc_mint) = {
+    let (withdrawal_fee_bps, active_index, zkbtc_mint, auditor_frozen) = {
         let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
         if pool.is_paused() {
             return Err(UTXOpiaError::PoolPaused.into());
-        }
-        if permissioned && pool.auditor_is_frozen() {
-            return Err(UTXOpiaError::AuditorFrozen.into());
         }
         validate_active_tree_pda(
             commitment_tree_info,
@@ -211,6 +193,7 @@ pub fn process_unshield(
             pool.withdrawal_fee_bps(),
             pool.active_tree_index(),
             pool.zkbtc_mint,
+            permissioned && pool.auditor_is_frozen(),
         )
     };
 
@@ -218,14 +201,30 @@ pub fn process_unshield(
     // just before the optional proof_buffer (which parse_prefix reads as the last account).
     // Identified by being a program-owned CommitmentTree, so it cannot be confused with the buffer.
     let pb = usize::from(proof_source == 1);
-    let policy = if permissioned { 2 } else { 0 };
+    // A permissioned exit appends either the approval pair (verified) or one
+    // registry entry per public output (ragequit). Which is in play is read off
+    // the tail account the same way the frozen source tree is: the policy
+    // program's id is fixed and known, so it cannot be confused with a PDA.
+    let verified = permissioned
+        && accounts
+            .len()
+            .checked_sub(1 + pb)
+            .is_some_and(|i| {
+                accounts[i].address()
+                    == &Pubkey::new_from_array(crate::constants::POLICY_PROGRAM_ID)
+            });
+    let policy = match (permissioned, verified) {
+        (false, _) => 0,
+        (true, true) => 2,
+        (true, false) => n_public_outputs,
+    };
     if permissioned && accounts.len() < min_accounts + policy + pb {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
-    let approval_info = permissioned
+    let approval_info = verified
         .then(|| accounts.get(accounts.len() - 2 - pb))
         .flatten();
-    let policy_program_info = permissioned
+    let policy_program_info = verified
         .then(|| accounts.get(accounts.len() - 1 - pb))
         .flatten();
     let source_tree_info = accounts
@@ -262,27 +261,91 @@ pub fn process_unshield(
         PoolState::from_bytes(&pool_data)?.bump
     };
 
-    // A permissioned pool decides every spend. Exits stay reachable through the
-    // forced-exit path in consume_policy_approval, so a silent authority can
-    // halt circulation but never trap funds.
-    if crate::instructions::approval_is_missing(
+    // Verified: the auditor decided this spend, so the destination is theirs to
+    // allow. Ragequit: nobody decided anything, so the destination must already
+    // be registered. An auditor can bound where an unapproved exit lands, never
+    // whether it happens.
+    let spend_path = crate::instructions::resolve_spend_path(
         permissioned,
         approval_info.is_some(),
         policy_program_info.is_some(),
-    ) {
-        return Err(UTXOpiaError::PolicyApprovalRequired.into());
+        crate::instruction::UNSHIELD,
+    )?;
+    match spend_path {
+        crate::instructions::SpendPath::Open => {}
+        crate::instructions::SpendPath::Verified => {
+            // Freezing halts the approved flow: an approval issued before the
+            // freeze must not still spend through it.
+            if auditor_frozen {
+                return Err(UTXOpiaError::AuditorFrozen.into());
+            }
+            crate::instructions::consume_policy_approval(
+                program_id,
+                approval_info.ok_or(ProgramError::NotEnoughAccountKeys)?,
+                policy_program_info.ok_or(ProgramError::NotEnoughAccountKeys)?,
+                pool_state_info,
+                user.address(),
+                &policy_authority,
+                crate::instruction::UNSHIELD,
+                // Which notes, how much, and to whom — everything past
+                // `stealth_data_end` is the per-output amounts, and the owners
+                // are the destinations the payout actually credits.
+                &[
+                    crate::instructions::joinsplit_common::nullifiers_concat(
+                        &prefix,
+                        n_inputs,
+                        &mut nullifiers_buf,
+                    ),
+                    &data[stealth_data_end..],
+                    &owners_concat[..n_public_outputs * 32],
+                ],
+            )?;
+        }
+        crate::instructions::SpendPath::Ragequit => {
+            // Deliberately ignores `auditor_frozen`. Freezing is the auditor's
+            // strongest lever and it still stops short of the exit: a frozen
+            // pool that could not be ragequit out of is a pool whose operator
+            // can prevent withdrawal, which is the one power they must not have.
+            //
+            // `is_paused` above is deliberately NOT waived the same way. It is
+            // the protocol-wide emergency stop for an active exploit, not a
+            // compliance lever, and halting a drain means halting every exit.
+            let base = accounts
+                .len()
+                .checked_sub(n_public_outputs + pb)
+                .ok_or(ProgramError::NotEnoughAccountKeys)?;
+            for k in 0..n_public_outputs {
+                let owner: &[u8; 32] = owners_concat[k * 32..(k + 1) * 32].try_into().unwrap();
+                crate::instructions::assert_exit_destination_registered(
+                    program_id,
+                    pool_state_info.address(),
+                    &accounts[base + k],
+                    crate::state::EXIT_KIND_SOLANA_OWNER,
+                    owner,
+                )?;
+            }
+        }
     }
-    if let (Some(approval), Some(policy_program)) = (approval_info, policy_program_info) {
-        crate::instructions::consume_policy_approval(
+
+    // Bind the destinations and stealth data to the proof. Authorization is
+    // settled above so an unauthorized spend never reaches the hashing.
+    {
+        let stealth_data_hash = crate::utils::sha256(&data[stealth_data_start..stealth_data_end]);
+        let operation_hash = crate::utils::crypto::compute_bound_params_hash_unshield(
+            crate::constants::CHAIN_ID,
+            &owners_concat[..n_public_outputs * 32],
+            &stealth_data_hash,
+        );
+        let expected = crate::utils::crypto::bind_bound_params_to_domain(
+            &operation_hash,
+            crate::constants::CHAIN_ID,
             program_id,
-            approval,
-            policy_program,
-            pool_state_info,
-            user.address(),
-            &policy_authority,
-            crate::instruction::UNSHIELD,
-            data,
+            pool_state_info.address(),
+            permissioned,
         )?;
+        if *prefix.bound_params_hash != expected {
+            return Err(UTXOpiaError::InvalidBoundParams.into());
+        }
     }
 
     verify_vk_merkle_and_proof(

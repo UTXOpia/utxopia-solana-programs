@@ -35,12 +35,14 @@
 //! | 36 | `initialize_policy_approval` | Policy |
 //! | 37 | `policy_approval_decision` | Policy / PER |
 //! | 38 | `policy_approval_commit` | Policy / PER |
+//! | 39 | `register_exit_destination` | Policy / ragequit |
 
 // Core operations
 pub mod approve_redemption_signing;
 pub mod cancel_redemption;
 pub mod complete_deposit;
 pub mod complete_redemption;
+pub mod exit_destination;
 pub mod initialize;
 pub mod initialize_permissioned;
 pub mod magicblock;
@@ -82,6 +84,7 @@ pub use complete_deposit::*;
 pub use complete_redemption::*;
 #[cfg(feature = "devnet-regtest")]
 pub use devnet_reset::*;
+pub use exit_destination::*;
 pub use init_vk_registry::*;
 pub use initialize::*;
 pub use initialize_permissioned::*;

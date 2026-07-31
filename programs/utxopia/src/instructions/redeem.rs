@@ -81,6 +81,7 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
     let prefix = parse_prefix(data, accounts, header, n_tree_outputs, &mut proof_buf)?;
     let stealth_data_start = prefix.stealth_data_start;
     let stealth_data_end = prefix.stealth_data_end;
+    let mut nullifiers_buf = [0u8; crate::instructions::joinsplit_common::MAX_JOINSPLIT_SIZE * 32];
     let mut offset = stealth_data_end;
 
     // Parse per-output redeem data (amount + script + nonce)
@@ -119,42 +120,6 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
         let pool = PoolState::from_bytes(&pool_data)?;
         (pool.permissioned(), *pool.auditor())
     };
-
-    // Verify bound params hash — binds BTC scripts + stealth data to proof.
-    // scriptsHash = length_prefixed_hash(script_1, script_2, ...) so the scripts cannot be
-    // re-partitioned to the same concatenation (audit #4 parity with the Sui program).
-    {
-        let mut script_slices: [&[u8]; MAX_PUBLIC_OUTPUTS] = [&[]; MAX_PUBLIC_OUTPUTS];
-        for k in 0..n_public_outputs {
-            script_slices[k] =
-                &data[btc_script_starts[k]..btc_script_starts[k] + btc_script_lens[k]];
-        }
-
-        let stealth_data_hash = crate::utils::sha256(&data[stealth_data_start..stealth_data_end]);
-        // Bind the proof to the requesting signer (accounts[3]) so it cannot be replayed under a
-        // different signer to hijack ownership of the resulting RedemptionRequest PDAs.
-        let requester: &[u8; 32] = accounts[3]
-            .address()
-            .as_ref()
-            .try_into()
-            .map_err(|_| ProgramError::InvalidAccountData)?;
-        let operation_hash = crate::utils::crypto::compute_bound_params_hash_redeem(
-            crate::constants::CHAIN_ID,
-            &script_slices[..n_public_outputs],
-            &stealth_data_hash,
-            requester,
-        );
-        let expected = crate::utils::crypto::bind_bound_params_to_domain(
-            &operation_hash,
-            crate::constants::CHAIN_ID,
-            program_id,
-            accounts[0].address(),
-            permissioned,
-        )?;
-        if *prefix.bound_params_hash != expected {
-            return Err(UTXOpiaError::InvalidBoundParams.into());
-        }
-    }
 
     let pool_state_info = &accounts[0];
     let commitment_tree_info = &accounts[1];
@@ -209,14 +174,11 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
     };
 
     // Validate pool is not paused, validate active tree, read state
-    let (pending_redemptions, total_shielded, active_index) = {
+    let (pending_redemptions, total_shielded, active_index, auditor_frozen) = {
         let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
         if pool.is_paused() {
             return Err(UTXOpiaError::PoolPaused.into());
-        }
-        if permissioned && pool.auditor_is_frozen() {
-            return Err(UTXOpiaError::AuditorFrozen.into());
         }
         validate_active_tree_pda(
             commitment_tree_info,
@@ -228,20 +190,37 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
             pool.pending_redemptions(),
             pool.total_shielded(),
             pool.active_tree_index(),
+            permissioned && pool.auditor_is_frozen(),
         )
     };
 
     // Optional frozen source tree for spending notes committed before a tree rotation; appended
     // just before the optional proof_buffer and identified by being a program-owned CommitmentTree.
     let pb = usize::from(proof_source == 1);
-    let policy = if permissioned { 2 } else { 0 };
+    // A permissioned exit appends either the approval pair (verified) or one
+    // registry entry per public output (ragequit). Which is in play is read off
+    // the tail account the same way the frozen source tree is: the policy
+    // program's id is fixed and known, so it cannot be confused with a PDA.
+    let verified = permissioned
+        && accounts
+            .len()
+            .checked_sub(1 + pb)
+            .is_some_and(|i| {
+                accounts[i].address()
+                    == &Pubkey::new_from_array(crate::constants::POLICY_PROGRAM_ID)
+            });
+    let policy = match (permissioned, verified) {
+        (false, _) => 0,
+        (true, true) => 2,
+        (true, false) => n_public_outputs,
+    };
     if permissioned && accounts.len() < min_accounts + policy + pb {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
-    let approval_info = permissioned
+    let approval_info = verified
         .then(|| accounts.get(accounts.len() - 2 - pb))
         .flatten();
-    let policy_program_info = permissioned
+    let policy_program_info = verified
         .then(|| accounts.get(accounts.len() - 1 - pb))
         .flatten();
     let source_tree_info = accounts
@@ -254,27 +233,110 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
                 && looks_like_commitment_tree(a, program_id)
         });
 
-    // A permissioned pool decides every spend. Exits stay reachable through the
-    // forced-exit path in consume_policy_approval, so a silent authority can
-    // halt circulation but never trap funds.
-    if crate::instructions::approval_is_missing(
+    // Verified: the auditor decided this spend, so the destination is theirs to
+    // allow. Ragequit: nobody decided anything, so every BTC script must already
+    // be registered. An auditor can bound where an unapproved exit lands, never
+    // whether it happens.
+    let spend_path = crate::instructions::resolve_spend_path(
         permissioned,
         approval_info.is_some(),
         policy_program_info.is_some(),
-    ) {
-        return Err(UTXOpiaError::PolicyApprovalRequired.into());
+        crate::instruction::REDEEM,
+    )?;
+    match spend_path {
+        crate::instructions::SpendPath::Open => {}
+        crate::instructions::SpendPath::Verified => {
+            // Freezing halts the approved flow: an approval issued before the
+            // freeze must not still spend through it.
+            if auditor_frozen {
+                return Err(UTXOpiaError::AuditorFrozen.into());
+            }
+            crate::instructions::consume_policy_approval(
+                program_id,
+                approval_info.ok_or(ProgramError::NotEnoughAccountKeys)?,
+                policy_program_info.ok_or(ProgramError::NotEnoughAccountKeys)?,
+                pool_state_info,
+                user.address(),
+                &policy_authority,
+                crate::instruction::REDEEM,
+                // Everything past `stealth_data_end` is the per-output amount,
+                // BTC script and nonce — the amounts and destinations together,
+                // already length-framed by the instruction layout.
+                &[
+                    crate::instructions::joinsplit_common::nullifiers_concat(
+                        &prefix,
+                        n_inputs,
+                        &mut nullifiers_buf,
+                    ),
+                    &data[stealth_data_end..],
+                ],
+            )?;
+        }
+        crate::instructions::SpendPath::Ragequit => {
+            // Deliberately ignores `auditor_frozen`. Freezing is the auditor's
+            // strongest lever and it still stops short of the exit: a frozen
+            // pool that could not be ragequit out of is a pool whose operator
+            // can prevent withdrawal, which is the one power they must not have.
+            //
+            // `is_paused` above is deliberately NOT waived the same way. It is
+            // the protocol-wide emergency stop for an active exploit, not a
+            // compliance lever, and halting a drain means halting every exit.
+            let base = accounts
+                .len()
+                .checked_sub(n_public_outputs + pb)
+                .ok_or(ProgramError::NotEnoughAccountKeys)?;
+            for k in 0..n_public_outputs {
+                // Scripts are variable-length; the registry key is their hash so
+                // every destination kind is one uniform 32-byte PDA seed.
+                let script =
+                    &data[btc_script_starts[k]..btc_script_starts[k] + btc_script_lens[k]];
+                let key = crate::utils::sha256(script);
+                crate::instructions::assert_exit_destination_registered(
+                    program_id,
+                    pool_state_info.address(),
+                    &accounts[base + k],
+                    crate::state::EXIT_KIND_BTC_SCRIPT,
+                    &key,
+                )?;
+            }
+        }
     }
-    if let (Some(approval), Some(policy_program)) = (approval_info, policy_program_info) {
-        crate::instructions::consume_policy_approval(
+
+    // Bind the BTC scripts and stealth data to the proof. Authorization is
+    // settled above so an unauthorized spend never reaches the hashing.
+    // scriptsHash = length_prefixed_hash(script_1, script_2, ...) so the scripts cannot be
+    // re-partitioned to the same concatenation (audit #4 parity with the Sui program).
+    {
+        let mut script_slices: [&[u8]; MAX_PUBLIC_OUTPUTS] = [&[]; MAX_PUBLIC_OUTPUTS];
+        for k in 0..n_public_outputs {
+            script_slices[k] =
+                &data[btc_script_starts[k]..btc_script_starts[k] + btc_script_lens[k]];
+        }
+
+        let stealth_data_hash = crate::utils::sha256(&data[stealth_data_start..stealth_data_end]);
+        // Bind the proof to the requesting signer so it cannot be replayed under a
+        // different signer to hijack ownership of the resulting RedemptionRequest PDAs.
+        let requester: &[u8; 32] = user
+            .address()
+            .as_ref()
+            .try_into()
+            .map_err(|_| ProgramError::InvalidAccountData)?;
+        let operation_hash = crate::utils::crypto::compute_bound_params_hash_redeem(
+            crate::constants::CHAIN_ID,
+            &script_slices[..n_public_outputs],
+            &stealth_data_hash,
+            requester,
+        );
+        let expected = crate::utils::crypto::bind_bound_params_to_domain(
+            &operation_hash,
+            crate::constants::CHAIN_ID,
             program_id,
-            approval,
-            policy_program,
-            pool_state_info,
-            user.address(),
-            &policy_authority,
-            crate::instruction::REDEEM,
-            data,
+            pool_state_info.address(),
+            permissioned,
         )?;
+        if *prefix.bound_params_hash != expected {
+            return Err(UTXOpiaError::InvalidBoundParams.into());
+        }
     }
 
     // Validate total redeem amount

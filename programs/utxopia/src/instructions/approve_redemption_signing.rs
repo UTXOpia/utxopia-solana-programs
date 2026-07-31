@@ -143,12 +143,15 @@ pub fn process_approve_redemption_signing(
     ) = {
         let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
-        if authority.address().as_ref() != pool.authority {
-            return Err(UTXOpiaError::Unauthorized.into());
-        }
 
         let redemption_data = redemption_info.try_borrow()?;
         let redemption = RedemptionRequest::from_bytes(&redemption_data)?;
+        // Either the operator drives this, or the requester drives it themselves.
+        crate::utils::policy::redemption_driver_is_allowed(
+            authority.address().as_ref(),
+            &pool.authority,
+            &redemption.requester,
+        )?;
         if redemption.get_status() != RedemptionStatus::Processing {
             return Err(UTXOpiaError::InvalidRedemptionState.into());
         }

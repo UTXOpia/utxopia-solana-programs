@@ -116,6 +116,9 @@ pub mod instruction {
     pub const INITIALIZE_POLICY_APPROVAL: u8 = 36;
     pub const POLICY_APPROVAL_DECISION: u8 = 37;
     pub const POLICY_APPROVAL_COMMIT: u8 = 38;
+
+    // Append-only exit registry backing the ragequit path (39)
+    pub const REGISTER_EXIT_DESTINATION: u8 = 39;
 }
 
 #[cfg(not(feature = "no-entrypoint"))]
@@ -248,6 +251,10 @@ pub fn process_instruction(
         }
         instruction::POLICY_APPROVAL_COMMIT => {
             instructions::process_policy_approval_commit(program_id, accounts, data)
+        }
+        // Append-only exit registry backing the ragequit path (39)
+        instruction::REGISTER_EXIT_DESTINATION => {
+            instructions::process_register_exit_destination(program_id, accounts, data)
         }
         _ => Err(ProgramError::InvalidInstructionData),
     }

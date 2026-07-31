@@ -237,7 +237,9 @@ pub fn process_complete_deposit_permissioned(
         authority.address(),
         &policy_authority,
         crate::instruction::COMPLETE_DEPOSIT_PERMISSIONED,
-        data,
+        // Whole payload: nothing in a deposit ages, so the depositor can hold
+        // these exact bytes until the answer arrives and never re-derive them.
+        &[data],
     )?;
 
     complete_deposit_inner(program_id, accounts, &ix_data, auditor_ciphertext)

@@ -57,6 +57,20 @@ pub struct JoinSplitPrefix<'a> {
     pub stealth_data_end: usize,
 }
 
+/// Rebuild the canonical nullifier concatenation for the policy intent hash.
+/// Parsing hands them back as separate refs; the hash wants one slice, in the
+/// order the instruction listed them.
+pub fn nullifiers_concat<'a>(
+    prefix: &JoinSplitPrefix,
+    n_inputs: usize,
+    buf: &'a mut [u8; MAX_JOINSPLIT_SIZE * 32],
+) -> &'a [u8] {
+    for i in 0..n_inputs {
+        buf[i * 32..(i + 1) * 32].copy_from_slice(prefix.nullifiers[i]);
+    }
+    &buf[..n_inputs * 32]
+}
+
 pub fn parse_header(data: &[u8]) -> Result<JoinSplitHeader, ProgramError> {
     if data.len() < 4 {
         return Err(ProgramError::InvalidInstructionData);

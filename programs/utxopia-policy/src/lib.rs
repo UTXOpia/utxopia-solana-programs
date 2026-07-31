@@ -55,21 +55,15 @@ const STATUS_APPROVED: u8 = 1;
 const STATUS_REJECTED: u8 = 2;
 const STATUS_CONSUMED: u8 = 3;
 const TARGET_POLICY: u8 = 2;
-const IX_UNSHIELD: u8 = 14;
-const IX_REDEEM: u8 = 15;
-/// ~24h at 400ms slots. Must equal FORCED_EXIT_DELAY_SLOTS in the asset program.
-const FORCED_EXIT_DELAY_SLOTS: u64 = 216_000;
 
 /// Mirrors `spend_is_allowed` in the asset program. This program holds the
 /// account, so it re-decides rather than trusting the pool signature; a rule
-/// that drifts from the asset program's stalls every forced exit in the CPI.
-fn spend_is_allowed(status: u8, action: u8, slot: u64, expires_at: u64) -> bool {
-    if status == STATUS_APPROVED {
-        return slot <= expires_at;
-    }
-    matches!(status, STATUS_PENDING | STATUS_REJECTED)
-        && matches!(action, IX_UNSHIELD | IX_REDEEM)
-        && slot > expires_at.saturating_add(FORCED_EXIT_DELAY_SLOTS)
+/// that drifts from the asset program's stalls every approved spend in the CPI.
+///
+/// An unapproved exit never comes through here at all — it takes the asset
+/// program's ragequit path, which consumes no approval.
+fn spend_is_allowed(status: u8, slot: u64, expires_at: u64) -> bool {
+    status == STATUS_APPROVED && slot <= expires_at
 }
 
 entrypoint!(process_instruction);
@@ -410,7 +404,7 @@ fn consume(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> Progr
 
     let mut state = approval.try_borrow_mut()?;
     let expires_at = u64::from_le_bytes(state[8..16].try_into().unwrap());
-    if !spend_is_allowed(state[2], data[0], Clock::get()?.slot, expires_at)
+    if !spend_is_allowed(state[2], Clock::get()?.slot, expires_at)
         || state[4] != data[0]
         || state[80..112] != auditor
         || state[112..144] != data[1..33]
@@ -449,26 +443,20 @@ mod tests {
     use super::*;
 
     const EXPIRES_AT: u64 = 10;
-    const AFTER_DELAY: u64 = EXPIRES_AT + FORCED_EXIT_DELAY_SLOTS + 1;
 
     /// This program owns the account, so it re-decides what the asset program
-    /// already decided. Any drift between the two stalls a forced exit in the
-    /// CPI, which is how the rule shipped dead the first time.
+    /// already decided. Any drift between the two stalls an approved spend in
+    /// the CPI.
     #[test]
     fn consume_matches_the_asset_program_rule() {
-        // Approved spends until it expires, whatever the action.
-        assert!(spend_is_allowed(STATUS_APPROVED, 13, EXPIRES_AT, EXPIRES_AT));
-        assert!(!spend_is_allowed(STATUS_APPROVED, 13, EXPIRES_AT + 1, EXPIRES_AT));
+        assert!(spend_is_allowed(STATUS_APPROVED, EXPIRES_AT, EXPIRES_AT));
+        assert!(!spend_is_allowed(STATUS_APPROVED, EXPIRES_AT + 1, EXPIRES_AT));
 
-        for status in [STATUS_PENDING, STATUS_REJECTED] {
-            // Exits outlive both silence and refusal.
-            assert!(spend_is_allowed(status, IX_UNSHIELD, AFTER_DELAY, EXPIRES_AT));
-            assert!(spend_is_allowed(status, IX_REDEEM, AFTER_DELAY, EXPIRES_AT));
-            // But not before the delay, and never for circulation.
-            assert!(!spend_is_allowed(status, IX_UNSHIELD, EXPIRES_AT + 1, EXPIRES_AT));
-            assert!(!spend_is_allowed(status, 13, AFTER_DELAY, EXPIRES_AT));
+        // Nothing ripens by waiting. An unapproved exit never reaches this
+        // program at all; it takes the asset program's ragequit path.
+        for status in [STATUS_PENDING, STATUS_REJECTED, STATUS_CONSUMED] {
+            assert!(!spend_is_allowed(status, EXPIRES_AT, EXPIRES_AT));
+            assert!(!spend_is_allowed(status, u64::MAX, EXPIRES_AT));
         }
-        // A consumed approval is spent.
-        assert!(!spend_is_allowed(STATUS_CONSUMED, IX_UNSHIELD, AFTER_DELAY, EXPIRES_AT));
     }
 }
