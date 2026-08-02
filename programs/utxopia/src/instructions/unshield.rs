@@ -382,6 +382,7 @@ pub fn process_unshield(
         accounts,
         nullifier_base,
         &prefix.nullifiers[..n_inputs],
+        pool_state_info.address(),
         user,
         &rent,
         NullifierOperationType::FullWithdrawal as u8,

@@ -386,6 +386,7 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
         accounts,
         FIXED_ACCOUNTS,
         &prefix.nullifiers[..n_inputs],
+        pool_state_info.address(),
         user,
         &rent,
         NullifierOperationType::FullWithdrawal as u8,

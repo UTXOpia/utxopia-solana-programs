@@ -227,7 +227,11 @@ pub fn process_magicblock_commit(
         let nullifier = &accounts[6 + i];
         validate_program_owner(nullifier, program_id)?;
         validate_account_writable(nullifier)?;
-        let expected = find_program_address(&[NullifierRecord::SEED, nullifier_hash], program_id).0;
+        let expected = find_program_address(
+            &[NullifierRecord::SEED, pool_state.address().as_ref(), nullifier_hash],
+            program_id,
+        )
+        .0;
         if nullifier.address() != &expected {
             return Err(ProgramError::InvalidSeeds);
         }

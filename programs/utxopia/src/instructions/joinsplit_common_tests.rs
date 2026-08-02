@@ -57,3 +57,31 @@ fn parse_prefix_rejects_noncanonical_nullifier() {
     let res = parse_prefix(&data, &[], header, 1, &mut proof_buf);
     assert!(res.is_err(), "non-canonical nullifier must be rejected");
 }
+
+/// The nullifier PDA must include pool_state, so the same nullifier in two pools
+/// lands on two different accounts. Before this, one global PDA meant spending a
+/// note in one pool bricked the same-seed twin note in the other.
+#[test]
+fn nullifier_pda_is_pool_scoped() {
+    use crate::pinocchio_compat::{find_program_address, Pubkey};
+    use crate::state::NullifierRecord;
+
+    let program = Pubkey::from([7u8; 32]);
+    let nullifier = [3u8; 32];
+    let pool_a = [1u8; 32];
+    let pool_b = [2u8; 32];
+
+    let (addr_a, _) =
+        find_program_address(&[NullifierRecord::SEED, &pool_a, &nullifier], &program);
+    let (addr_b, _) =
+        find_program_address(&[NullifierRecord::SEED, &pool_b, &nullifier], &program);
+
+    // Same nullifier, different pool -> different PDA, so spending in A cannot
+    // claim B's account and B's twin note stays spendable.
+    assert_ne!(addr_a, addr_b, "pool must scope the nullifier PDA");
+
+    // Stable within a pool, so dedup still works.
+    let (again, _) =
+        find_program_address(&[NullifierRecord::SEED, &pool_a, &nullifier], &program);
+    assert_eq!(addr_a, again);
+}

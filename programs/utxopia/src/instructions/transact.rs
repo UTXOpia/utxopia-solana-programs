@@ -237,6 +237,7 @@ pub fn process_transact(
         accounts,
         5,
         &prefix.nullifiers[..n_inputs],
+        pool_state_info.address(),
         payer,
         &rent,
         NullifierOperationType::PrivateTransfer as u8,

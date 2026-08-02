@@ -319,6 +319,7 @@ pub fn create_nullifier_records(
     accounts: &[AccountInfo],
     start_index: usize,
     nullifiers: &[&[u8; 32]],
+    pool_state: &Pubkey,
     payer: &AccountInfo,
     rent: &Rent,
     operation_type: u8,
@@ -330,7 +331,13 @@ pub fn create_nullifier_records(
         let nullifier_info = &accounts[start_index + i];
         validate_account_writable(nullifier_info)?;
 
-        let nullifier_seeds: &[&[u8]] = &[NullifierRecord::SEED, nullifier.as_ref()];
+        // Pool-scoped: a nullifier is a function of the spender's key and the
+        // note's leaf index, not of the pool, so the same seed spending into two
+        // pools produces the same nullifier. Without the pool in the seeds those
+        // share one global PDA, and spending in one pool permanently bricks the
+        // twin note in the other with NullifierAlreadyUsed.
+        let nullifier_seeds: &[&[u8]] =
+            &[NullifierRecord::SEED, pool_state.as_ref(), nullifier.as_ref()];
         let (expected_pda, bump) = find_program_address(nullifier_seeds, program_id);
         if nullifier_info.address() != &expected_pda {
             return Err(ProgramError::InvalidSeeds);
@@ -344,7 +351,12 @@ pub fn create_nullifier_records(
         }
 
         let bump_bytes = [bump];
-        let signer_seeds: &[&[u8]] = &[NullifierRecord::SEED, nullifier.as_ref(), &bump_bytes];
+        let signer_seeds: &[&[u8]] = &[
+            NullifierRecord::SEED,
+            pool_state.as_ref(),
+            nullifier.as_ref(),
+            &bump_bytes,
+        ];
         create_pda_account(
             payer,
             nullifier_info,
