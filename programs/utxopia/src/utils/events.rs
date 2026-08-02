@@ -65,14 +65,12 @@ const EVENT_SHIELD_META: u8 = 0x11;
 /// Event discriminator: sender memo (Phase 2 — outgoing visibility for the
 /// sender's own viewing key). Encrypted with XChaCha20-Poly1305 AEAD using
 /// an `ovk = SHA-256(viewingPrivKey || "utxopia.ovk.v1")` outgoing viewing
-/// key. AAD = commitment || leaf_index_le, so the Poly1305 tag binds the
-/// memo to its tree leaf (regulator-grade tamper detection).
-///
-/// Layout:
-///   disc(1) + nonce(24) + ciphertext_and_tag(56) + commitment(32) + leaf_index(4)
-///   = 117 bytes
-pub const EVENT_SENDER_MEMO: u8 = 0x12;
-
+// Event discriminator 0x12 (SENDER_MEMO) was outgoing-view metadata appended to
+// `transact`. Removed with the instruction-side code: the memo bytes sat outside
+// the proof-bound region, so a relayer could strip or replace them without
+// invalidating the proof. Reintroducing it means committing the payload and an
+// explicit presence flag to the bound params, not just re-adding the emitter.
+//
 // Event discriminators 0x13 (ASSOCIATION_ROOT_UPDATED) and 0x14 (POI_ATTESTED)
 // were previously PoI machinery. Removed alongside the on-chain PoI instructions.
 
@@ -359,26 +357,6 @@ pub fn emit_shield_meta(gross_amount: u64, fee: u64, token_id: &[u8; 32]) {
     let gross = gross_amount.to_le_bytes();
     let f = fee.to_le_bytes();
     log_data(&[&disc, &gross, &f, token_id]);
-}
-
-/// Emit a sender memo (Phase 2 — outgoing visibility for the sender's own viewing key).
-///
-/// Encrypted with XChaCha20-Poly1305 AEAD using `ovk` derived from the sender's
-/// viewing private key. The Poly1305 tag is included in `ciphertext_and_tag`
-/// (last 16 bytes); AAD = `commitment || leaf_index_le` so the tag binds the
-/// memo to its tree leaf.
-///
-/// Layout: disc(1) + nonce(24) + ciphertext_and_tag(56) + commitment(32) + leaf_index(4)
-///         = 117 bytes
-pub fn emit_sender_memo(
-    nonce: &[u8; 24],
-    ciphertext_and_tag: &[u8; 56],
-    commitment: &[u8; 32],
-    leaf_index: u32,
-) {
-    let disc = [EVENT_SENDER_MEMO];
-    let li = leaf_index.to_le_bytes();
-    log_data(&[&disc, nonce, ciphertext_and_tag, commitment, &li]);
 }
 
 /// Emit auditor ciphertext for a permissioned-pool deposit.
