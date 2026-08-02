@@ -8,7 +8,7 @@
 //! The program reads and validates each UTXO, sums their amounts trustlessly,
 //! marks them as Reserved, and writes total_input_sats to the RedemptionRequest.
 
-use crate::pinocchio_compat::{AccountInfo, ProgramError, Pubkey};
+use crate::pinocchio_compat::{find_program_address, AccountInfo, ProgramError, Pubkey};
 use pinocchio::{
     sysvars::{clock::Clock, Sysvar},
     ProgramResult,
@@ -136,6 +136,25 @@ pub fn process_mark_processing(
         // Must be Unspent
         if utxo.get_status() != UtxoStatus::Unspent {
             return Err(UTXOpiaError::UtxoNotUnspent.into());
+        }
+
+        // The record must be this pool's. Everything below binds the UTXO to
+        // one redemption, and nothing else establishes that the coin was ever
+        // this pool's to reserve — so without this a redemption can reserve a
+        // sibling pool's bitcoin, and the spend only fails later, out at the
+        // bitcoin layer, as a signature that will not verify.
+        {
+            let vout_le = utxo.vout().to_le_bytes();
+            let expected_seeds: &[&[u8]] = &[
+                UtxoRecord::SEED,
+                pool_state_info.address().as_ref(),
+                &utxo.txid,
+                &vout_le,
+            ];
+            let (expected_utxo_pda, _) = find_program_address(expected_seeds, program_id);
+            if utxo_info.address() != &expected_utxo_pda {
+                return Err(UTXOpiaError::InvalidUtxo.into());
+            }
         }
 
         let amount = utxo.amount_sats();

@@ -588,7 +588,12 @@ pub fn process_complete_redemption(
         {
             // Create change UTXO PDA
             let vout_le = change_vout.to_le_bytes();
-            let utxo_seeds: &[&[u8]] = &[UtxoRecord::SEED, &ix_data.btc_txid, &vout_le];
+            let utxo_seeds: &[&[u8]] = &[
+                UtxoRecord::SEED,
+                pool_state_info.address().as_ref(),
+                &ix_data.btc_txid,
+                &vout_le,
+            ];
             let (expected_utxo_pda, utxo_bump) = find_program_address(utxo_seeds, program_id);
 
             if change_utxo_info.address() != &expected_utxo_pda {
@@ -601,6 +606,7 @@ pub fn process_complete_redemption(
             let utxo_bump_bytes = [utxo_bump];
             let utxo_signer_seeds: &[&[u8]] = &[
                 UtxoRecord::SEED,
+                pool_state_info.address().as_ref(),
                 &ix_data.btc_txid,
                 &vout_le,
                 &utxo_bump_bytes,

@@ -10,6 +10,27 @@ fn test_utxo_record_seed() {
     assert_eq!(UtxoRecord::SEED, b"utxo");
 }
 
+/// The seed prefix alone no longer addresses a record: callers must pass the
+/// owning pool between the prefix and the outpoint. Two pools deriving with the
+/// same outpoint must land on different addresses, which is what stops one
+/// pool's redemption from reserving the other's bitcoin.
+#[test]
+fn the_pool_is_part_of_the_utxo_address() {
+    use crate::pinocchio_compat::{find_program_address, Pubkey};
+    let program = Pubkey::from([9u8; 32]);
+    let txid = [4u8; 32];
+    let vout = 1u32.to_le_bytes();
+    let pool_a = [1u8; 32];
+    let pool_b = [2u8; 32];
+
+    let (addr_a, _) =
+        find_program_address(&[UtxoRecord::SEED, &pool_a, &txid, &vout], &program);
+    let (addr_b, _) =
+        find_program_address(&[UtxoRecord::SEED, &pool_b, &txid, &vout], &program);
+
+    assert_ne!(addr_a, addr_b);
+}
+
 #[test]
 fn test_utxo_record_discriminator() {
     assert_eq!(UTXO_RECORD_DISCRIMINATOR, 0x09);
