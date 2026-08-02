@@ -20,6 +20,7 @@
 pub mod commitment_tree;
 pub mod completion_receipt;
 pub mod deposit_receipt;
+pub mod dwallet_binding;
 pub mod exit_destination;
 pub mod nullifier;
 pub mod policy_approval;
@@ -35,6 +36,7 @@ pub mod vk_registry;
 pub use commitment_tree::*;
 pub use completion_receipt::*;
 pub use deposit_receipt::*;
+pub use dwallet_binding::*;
 pub use exit_destination::*;
 pub use nullifier::*;
 pub use policy_approval::*;

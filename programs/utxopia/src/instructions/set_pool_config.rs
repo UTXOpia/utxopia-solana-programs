@@ -19,6 +19,12 @@
 //! 1. pool_config      (writable, PDA)
 //! 2. authority        (signer)
 //! 3. system_program   (read)
+//! 4. dwallet_binding  (writable, PDA) — claims the dWallet for this pool
+//!
+//! The binding account is required, not optional. An enforcement that callers
+//! can decline to pass is not an enforcement, and the state it prevents — two
+//! pools quietly sharing one Taproot address — is unrecoverable once deposits
+//! have landed on both sides of it.
 
 use crate::pinocchio_compat::{find_program_address, AccountInfo, ProgramError, Pubkey};
 use pinocchio::{
@@ -27,7 +33,7 @@ use pinocchio::{
 };
 
 use crate::error::UTXOpiaError;
-use crate::state::{PoolConfig, PoolState, POOL_CONFIG_DISCRIMINATOR};
+use crate::state::{DwalletBinding, PoolConfig, PoolState, POOL_CONFIG_DISCRIMINATOR};
 use crate::utils::{
     create_pda_account, validate_account_writable, validate_program_owner, validate_system_program,
 };
@@ -37,7 +43,7 @@ pub fn process_set_pool_config(
     accounts: &[AccountInfo],
     data: &[u8],
 ) -> ProgramResult {
-    if accounts.len() < 4 {
+    if accounts.len() < 5 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
@@ -45,6 +51,7 @@ pub fn process_set_pool_config(
     let pool_config_info = &accounts[1];
     let authority = &accounts[2];
     let system_program = &accounts[3];
+    let dwallet_binding_info = &accounts[4];
 
     // Validate signer
     if !authority.is_signer() {
@@ -53,6 +60,7 @@ pub fn process_set_pool_config(
 
     validate_program_owner(pool_state_info, program_id)?;
     validate_account_writable(pool_config_info)?;
+    validate_account_writable(dwallet_binding_info)?;
     validate_system_program(system_program)?;
 
     // Validate authority matches pool
@@ -104,6 +112,45 @@ pub fn process_set_pool_config(
     let (expected_pda, config_bump) = find_program_address(config_seeds, program_id);
     if pool_config_info.address() != &expected_pda {
         return Err(ProgramError::InvalidSeeds);
+    }
+
+    // Claim the dWallet for this pool. Keyed by the dWallet, so a second pool
+    // reaching for the same custody key lands on an account that already
+    // exists and is refused here — before any bitcoin is addressed to a script
+    // two pools would both believe is theirs.
+    //
+    // Re-running this instruction for the same pool is allowed: the binding is
+    // only rejected when it names someone else. Otherwise recreating a closed
+    // PoolConfig — the one supported way to correct a field in a write-once
+    // account — would be blocked by the pool's own prior claim.
+    let binding_seeds: &[&[u8]] = &[DwalletBinding::SEED, &ika_dwallet];
+    let (expected_binding, binding_bump) = find_program_address(binding_seeds, program_id);
+    if dwallet_binding_info.address() != &expected_binding {
+        return Err(ProgramError::InvalidSeeds);
+    }
+    if dwallet_binding_info.data_len() == 0 {
+        let rent = Rent::get()?;
+        let bump_bytes = [binding_bump];
+        let signer_seeds: &[&[u8]] = &[DwalletBinding::SEED, &ika_dwallet, &bump_bytes];
+        create_pda_account(
+            authority,
+            dwallet_binding_info,
+            program_id,
+            rent.minimum_balance(DwalletBinding::LEN),
+            DwalletBinding::LEN as u64,
+            signer_seeds,
+        )?;
+        let mut binding_data = dwallet_binding_info.try_borrow_mut()?;
+        let mut pool = [0u8; 32];
+        pool.copy_from_slice(pool_state_info.address().as_ref());
+        DwalletBinding::init(&mut binding_data, &pool)?;
+    } else {
+        validate_program_owner(dwallet_binding_info, program_id)?;
+        let binding_data = dwallet_binding_info.try_borrow()?;
+        if DwalletBinding::pool_state(&binding_data)?.as_ref() != pool_state_info.address().as_ref()
+        {
+            return Err(UTXOpiaError::DwalletAlreadyBound.into());
+        }
     }
 
     // Create PDA if it doesn't exist yet

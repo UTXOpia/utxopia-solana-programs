@@ -225,6 +225,9 @@ pub enum UTXOpiaError {
 
     #[error("This action has no ragequit path and requires a policy approval")]
     RagequitNotAvailable = 6098,
+
+    #[error("This Ika dWallet is already the custody key of another pool")]
+    DwalletAlreadyBound = 6099,
 }
 
 impl From<UTXOpiaError> for ProgramError {

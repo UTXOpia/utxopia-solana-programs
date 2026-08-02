@@ -669,7 +669,14 @@ fn complete_deposit_inner(
     // shared output to revert and understated the tracked BTC (audit batched-sweep finding).
     {
         let vout_le = sweep_vout.to_le_bytes();
-        let utxo_seeds: &[&[u8]] = &[UtxoRecord::SEED, &ix_data.sweep_txid, &vout_le];
+        // Pool-scoped: the address itself says which pool owns this coin, so a
+        // record cannot be presented to a pool that never received it.
+        let utxo_seeds: &[&[u8]] = &[
+            UtxoRecord::SEED,
+            pool_state_info.address().as_ref(),
+            &ix_data.sweep_txid,
+            &vout_le,
+        ];
         let (expected_utxo_pda, utxo_bump) = find_program_address(utxo_seeds, program_id);
         if utxo_record_info.address() != &expected_utxo_pda {
             return Err(ProgramError::InvalidSeeds);
@@ -685,6 +692,7 @@ fn complete_deposit_inner(
             let utxo_bump_bytes = [utxo_bump];
             let utxo_signer_seeds: &[&[u8]] = &[
                 UtxoRecord::SEED,
+                pool_state_info.address().as_ref(),
                 &ix_data.sweep_txid,
                 &vout_le,
                 &utxo_bump_bytes,

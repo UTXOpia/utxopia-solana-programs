@@ -1,7 +1,15 @@
 //! UTXO record account (zero-copy)
 //!
 //! Tracks pool BTC UTXOs on-chain for trustless withdrawal/miner-fee accounting.
-//! PDA seeds = ["utxo", txid(32), vout_le(4)], so each UTXO has a unique address.
+//! PDA seeds = ["utxo", pool_state(32), txid(32), vout_le(4)].
+//!
+//! The pool is part of the address on purpose. One program hosts several pools,
+//! and if they ever share a custody key they share a Taproot address and so a
+//! single UTXO set; a record keyed by outpoint alone is then equally valid for
+//! either of them, and the reservation check further down only binds a UTXO to
+//! a redemption, never to a pool. Putting the pool in the seeds makes "this
+//! coin is ours" something the runtime checks rather than something the caller
+//! asserts.
 //!
 //! Lifecycle:
 //! 1. Created by complete_deposit (Unspent) when a direct Ika-vault BTC deposit lands
