@@ -87,8 +87,13 @@ current client-facing account layouts and instruction builder changes.
 # Install deps
 bun install
 
-# Build
-cargo build-sbf
+# Build — ALWAYS name the target network. A bare `cargo build-sbf` compiles the
+# localnet ChadBuffer and BTC light-client program ids, and a program built that
+# way rejects every real buffer with `Invalid account owner` (~424 CU, before any
+# proof work), which breaks every relayed JoinSplit.
+bun run build:devnet-regtest   # devnet Solana + regtest BTC — what app.utxopia.com runs
+bun run build:devnet           # plain devnet
+bun run build:localnet         # SHA256 instead of Poseidon; local validator only
 
 # Test locally
 solana-test-validator &
