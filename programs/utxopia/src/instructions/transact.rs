@@ -217,7 +217,7 @@ pub fn process_transact(
         )?;
     }
 
-    verify_vk_merkle_and_proof(
+    let source_tree_index = verify_vk_merkle_and_proof(
         program_id,
         pool_state_info,
         vk_registry_info,
@@ -237,7 +237,8 @@ pub fn process_transact(
         accounts,
         5,
         &prefix.nullifiers[..n_inputs],
-        pool_state_info.address(),
+        pool_state_info,
+        source_tree_index,
         payer,
         &rent,
         NullifierOperationType::PrivateTransfer as u8,

@@ -85,3 +85,51 @@ fn nullifier_pda_is_pool_scoped() {
         find_program_address(&[NullifierRecord::SEED, &pool_a, &nullifier], &program);
     assert_eq!(addr_a, again);
 }
+
+/// The rotation hazard this scoping exists for, stated as an address test.
+///
+/// A nullifier is Poseidon(nullifyingKey, leafIndex) and leaf indices restart at
+/// 0 in every new tree, so one key holding leaf N in two trees produces a single
+/// nullifier value for two distinct notes. If both mapped to one PDA, spending
+/// either would strand the other for good.
+mod nullifier_pda_is_scoped_per_tree {
+    use crate::pinocchio_compat::{find_program_address, Pubkey};
+    use crate::state::NullifierRecord;
+
+    const PROGRAM_BYTES: [u8; 32] = [7u8; 32];
+    const POOL: [u8; 32] = [9u8; 32];
+    const NULLIFIER: [u8; 32] = [42u8; 32];
+
+    fn pda_for(tree_index: u32) -> Pubkey {
+        let idx = tree_index.to_le_bytes();
+        let seeds: &[&[u8]] = if tree_index == 0 {
+            &[NullifierRecord::SEED, &POOL, &NULLIFIER]
+        } else {
+            &[NullifierRecord::SEED, &POOL, &idx, &NULLIFIER]
+        };
+        find_program_address(seeds, &Pubkey::from(PROGRAM_BYTES)).0
+    }
+
+    /// Tree 0 must keep deriving exactly what it always did — every nullifier on
+    /// chain today lives under those seeds, and moving them would make each
+    /// already-spent note spendable again.
+    #[test]
+    fn tree_zero_keeps_the_legacy_address() {
+        let legacy = find_program_address(
+            &[NullifierRecord::SEED, &POOL, &NULLIFIER],
+            &Pubkey::from(PROGRAM_BYTES),
+        )
+        .0;
+        assert_eq!(pda_for(0), legacy);
+    }
+
+    #[test]
+    fn the_same_nullifier_in_different_trees_gets_different_addresses() {
+        let t0 = pda_for(0);
+        let t1 = pda_for(1);
+        let t2 = pda_for(2);
+        assert_ne!(t0, t1, "tree 1 must not collide with tree 0");
+        assert_ne!(t1, t2, "each rotation needs its own namespace");
+        assert_ne!(t0, t2);
+    }
+}

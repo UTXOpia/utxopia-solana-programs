@@ -348,7 +348,7 @@ pub fn process_unshield(
         }
     }
 
-    verify_vk_merkle_and_proof(
+    let source_tree_index = verify_vk_merkle_and_proof(
         program_id,
         pool_state_info,
         vk_registry_info,
@@ -382,7 +382,8 @@ pub fn process_unshield(
         accounts,
         nullifier_base,
         &prefix.nullifiers[..n_inputs],
-        pool_state_info.address(),
+        pool_state_info,
+        source_tree_index,
         user,
         &rent,
         NullifierOperationType::FullWithdrawal as u8,

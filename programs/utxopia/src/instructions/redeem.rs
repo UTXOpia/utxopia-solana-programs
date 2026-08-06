@@ -353,7 +353,7 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
         return Err(UTXOpiaError::InsufficientFunds.into());
     }
 
-    verify_vk_merkle_and_proof(
+    let source_tree_index = verify_vk_merkle_and_proof(
         program_id,
         pool_state_info,
         vk_registry_info,
@@ -386,7 +386,8 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
         accounts,
         FIXED_ACCOUNTS,
         &prefix.nullifiers[..n_inputs],
-        pool_state_info.address(),
+        pool_state_info,
+        source_tree_index,
         user,
         &rent,
         NullifierOperationType::FullWithdrawal as u8,

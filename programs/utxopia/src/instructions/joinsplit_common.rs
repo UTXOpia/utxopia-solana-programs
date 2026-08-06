@@ -3,7 +3,7 @@ use pinocchio::{sysvars::rent::Rent, ProgramResult};
 
 use crate::error::UTXOpiaError;
 use crate::state::{
-    CommitmentTree, NullifierRecord, VkRegistry, COMMITMENT_TREE_DISCRIMINATOR,
+    CommitmentTree, NullifierRecord, PoolState, VkRegistry, COMMITMENT_TREE_DISCRIMINATOR,
     NULLIFIER_RECORD_DISCRIMINATOR,
 };
 use crate::utils::groth16::GROTH16_PROOF_SIZE;
@@ -236,7 +236,13 @@ pub fn verify_vk_merkle_and_proof(
     source_tree_info: Option<&AccountInfo>,
     header: JoinSplitHeader,
     prefix: &JoinSplitPrefix<'_>,
-) -> ProgramResult {
+) -> Result<u32, ProgramError> {
+    // Index of the tree the spent notes actually live in. Returned so the caller
+    // can scope their nullifier PDAs to it: leaf indices restart at 0 in every
+    // new tree and a nullifier is Poseidon(nullifyingKey, leafIndex), so the same
+    // key holding leaf N in two trees derives one nullifier for two distinct
+    // notes. Unscoped, spending either would permanently strand the other.
+    let source_tree_index;
     {
         // The note may live in the active tree OR — after a tree rotation — in a frozen previous
         // tree. Validate the proof's merkle_root against the active tree first; if it does not
@@ -247,7 +253,9 @@ pub fn verify_vk_merkle_and_proof(
             let tree = CommitmentTree::from_bytes(&tree_data)?;
             tree.is_valid_root(prefix.merkle_root)
         };
-        if !active_root_ok {
+        if active_root_ok {
+            source_tree_index = active_index;
+        } else {
             let frozen_ok = match source_tree_info {
                 Some(src) => {
                     validate_frozen_tree(
@@ -263,6 +271,11 @@ pub fn verify_vk_merkle_and_proof(
             if !frozen_ok {
                 return Err(UTXOpiaError::InvalidMerkleProof.into());
             }
+            // Safe to read: validate_frozen_tree proved this is a commitment tree
+            // PDA of this pool whose root the proof was built against.
+            let src = source_tree_info.ok_or(UTXOpiaError::InvalidMerkleProof)?;
+            let tree_data = src.try_borrow()?;
+            source_tree_index = CommitmentTree::from_bytes(&tree_data)?.tree_index();
         }
     }
 
@@ -310,7 +323,9 @@ pub fn verify_vk_merkle_and_proof(
         &public_inputs[..pi_len],
         vk.get_delta_g2(),
         ic,
-    )
+    )?;
+
+    Ok(source_tree_index)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -319,12 +334,21 @@ pub fn create_nullifier_records(
     accounts: &[AccountInfo],
     start_index: usize,
     nullifiers: &[&[u8; 32]],
-    pool_state: &Pubkey,
+    pool_state_info: &AccountInfo,
+    source_tree_index: u32,
     payer: &AccountInfo,
     rent: &Rent,
     operation_type: u8,
     instruction_disc: u8,
 ) -> ProgramResult {
+    let pool_state = pool_state_info.address();
+    // Tree 0 keeps the original seeds. Every nullifier ever recorded lives under
+    // them, and re-deriving would leave those PDAs unreachable — making every
+    // already-spent note spendable again. Trees created by a rotation get their
+    // own namespace instead, which is what stops leaf-index reuse across trees
+    // from stranding notes. Nothing needs migrating and no extra account is
+    // passed; see the module docs on `verify_vk_merkle_and_proof`.
+    let tree_index_bytes = source_tree_index.to_le_bytes();
     let mut null_hashes: [&[u8; 32]; MAX_JOINSPLIT_SIZE] = [ZERO_REF; MAX_JOINSPLIT_SIZE];
 
     for (i, nullifier) in nullifiers.iter().enumerate() {
@@ -335,9 +359,20 @@ pub fn create_nullifier_records(
         // note's leaf index, not of the pool, so the same seed spending into two
         // pools produces the same nullifier. Without the pool in the seeds those
         // share one global PDA, and spending in one pool permanently bricks the
-        // twin note in the other with NullifierAlreadyUsed.
-        let nullifier_seeds: &[&[u8]] =
-            &[NullifierRecord::SEED, pool_state.as_ref(), nullifier.as_ref()];
+        // twin note in the other with NullifierAlreadyUsed. Tree index is in the
+        // seeds for the same reason, one level down: leaf indices restart at 0
+        // after a rotation, so the same key derives one nullifier for a note in
+        // each tree.
+        let nullifier_seeds: &[&[u8]] = if source_tree_index == 0 {
+            &[NullifierRecord::SEED, pool_state.as_ref(), nullifier.as_ref()]
+        } else {
+            &[
+                NullifierRecord::SEED,
+                pool_state.as_ref(),
+                &tree_index_bytes,
+                nullifier.as_ref(),
+            ]
+        };
         let (expected_pda, bump) = find_program_address(nullifier_seeds, program_id);
         if nullifier_info.address() != &expected_pda {
             return Err(ProgramError::InvalidSeeds);
@@ -351,12 +386,22 @@ pub fn create_nullifier_records(
         }
 
         let bump_bytes = [bump];
-        let signer_seeds: &[&[u8]] = &[
-            NullifierRecord::SEED,
-            pool_state.as_ref(),
-            nullifier.as_ref(),
-            &bump_bytes,
-        ];
+        let signer_seeds: &[&[u8]] = if source_tree_index == 0 {
+            &[
+                NullifierRecord::SEED,
+                pool_state.as_ref(),
+                nullifier.as_ref(),
+                &bump_bytes,
+            ]
+        } else {
+            &[
+                NullifierRecord::SEED,
+                pool_state.as_ref(),
+                &tree_index_bytes,
+                nullifier.as_ref(),
+                &bump_bytes,
+            ]
+        };
         create_pda_account(
             payer,
             nullifier_info,
@@ -379,6 +424,15 @@ pub fn create_nullifier_records(
         operation_type,
         instruction_disc,
     );
+
+    // Bump the pool's nullifier total here rather than in each spend instruction:
+    // this is the one place every spend path creates nullifier records, so a new
+    // path cannot forget it. Every caller's pool_state borrows are block-scoped
+    // and released before this point.
+    {
+        let mut pool_data = pool_state_info.try_borrow_mut()?;
+        PoolState::from_bytes_mut(&mut pool_data)?.add_nullifiers(nullifiers.len() as u32);
+    }
     Ok(())
 }
 

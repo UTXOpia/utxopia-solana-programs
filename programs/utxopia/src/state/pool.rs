@@ -108,8 +108,15 @@ pub struct PoolState {
     /// Auditor viewing public key (e.g. for encrypted-memo decryption). Zero = not set.
     auditor_viewing_pubkey: [u8; 32],
 
-    /// Reserved for future use
-    _reserved: [u8; 4],
+    /// Number of nullifier records this pool has ever created (u32 LE).
+    ///
+    /// Carved from the former `_reserved`, like `utxo_count_hi` before it, so the
+    /// account size is unchanged and legacy pools decode as 0 without migration.
+    /// That also means a pool predating this field under-reports: consumers must
+    /// read it as a LOWER BOUND. An index holding fewer nullifiers than this has
+    /// definitely lost some; holding more only means the pool is older than the
+    /// counter.
+    nullifier_count: [u8; 4],
 }
 
 impl PoolState {
@@ -281,6 +288,10 @@ impl PoolState {
         u32::from_le_bytes(self.active_tree_index)
     }
 
+    pub fn nullifier_count(&self) -> u32 {
+        u32::from_le_bytes(self.nullifier_count)
+    }
+
     // Setters
     pub fn set_paused(&mut self, paused: bool) {
         if paused {
@@ -393,6 +404,13 @@ impl PoolState {
 
     pub fn set_active_tree_index(&mut self, value: u32) {
         self.active_tree_index = value.to_le_bytes();
+    }
+
+    /// Saturating on purpose: this counter exists for off-chain reconciliation,
+    /// so it must never be able to abort a spend the way a wrapping or checked
+    /// increment could (audit f34 is the same lesson on `utxo_count`).
+    pub fn add_nullifiers(&mut self, n: u32) {
+        self.nullifier_count = self.nullifier_count().saturating_add(n).to_le_bytes();
     }
 
     /// Clear all pending timelock fields
@@ -515,5 +533,45 @@ impl PoolState {
                 .ok_or(ProgramError::ArithmeticOverflow)?,
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The live devnet pools are 332 bytes. `nullifier_count` was carved from the
+    /// former `_reserved`, so the size must not have moved — if it does, every
+    /// existing PoolState needs a migration and the reconciler's byte offsets
+    /// (backend/src/event_indexer/reconciler.rs) silently read the wrong fields.
+    #[test]
+    fn layout_is_unchanged_by_the_nullifier_counter() {
+        assert_eq!(PoolState::LEN, 332);
+        assert_eq!(
+            core::mem::offset_of!(PoolState, nullifier_count),
+            PoolState::LEN - 4,
+            "nullifier_count must stay in the trailing reserved bytes"
+        );
+    }
+
+    /// Legacy pools have zeroes there, which must decode as "no spends counted"
+    /// rather than as garbage — that is what makes the field migration-free.
+    #[test]
+    fn legacy_zero_bytes_decode_as_zero() {
+        let mut buf = [0u8; PoolState::LEN];
+        buf[0] = POOL_STATE_DISCRIMINATOR;
+        let pool = PoolState::from_bytes(&buf).expect("decodes");
+        assert_eq!(pool.nullifier_count(), 0);
+    }
+
+    #[test]
+    fn add_nullifiers_saturates_instead_of_overflowing() {
+        let mut buf = [0u8; PoolState::LEN];
+        buf[0] = POOL_STATE_DISCRIMINATOR;
+        let pool = PoolState::from_bytes_mut(&mut buf).expect("decodes");
+        pool.add_nullifiers(2);
+        assert_eq!(pool.nullifier_count(), 2);
+        pool.add_nullifiers(u32::MAX);
+        assert_eq!(pool.nullifier_count(), u32::MAX, "must clamp, never wrap");
     }
 }
