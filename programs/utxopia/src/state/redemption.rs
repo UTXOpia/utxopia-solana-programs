@@ -21,7 +21,7 @@ pub enum RedemptionStatus {
 
 /// Redemption request - pending BTC withdrawal (zero-copy layout)
 ///
-/// Layout (138 bytes):
+/// Layout (178 bytes):
 /// - discriminator:     1 byte
 /// - status:            1 byte
 /// - btc_script_len:    1 byte
@@ -295,5 +295,19 @@ mod tests {
         let redemption = RedemptionRequest::init(&mut data).unwrap();
         redemption.set_reserved_count(2);
         assert!(redemption.mark_input_signing_approved(2).is_err());
+    }
+}
+
+#[cfg(test)]
+mod size_tests {
+    use super::RedemptionRequest;
+
+    #[test]
+    fn len_is_pinned() {
+        // Off-chain readers filter these accounts by dataSize, so a struct change is a silent
+        // break for them, not a compile error: @utxopia/sdk sat on 138 (this struct before
+        // reserved_count/approved_inputs/inputs_commitment were added) and matched nothing.
+        // If this fails, update the SDK's REDEMPTION_REQUEST_SIZE in the same change.
+        assert_eq!(RedemptionRequest::LEN, 178);
     }
 }
