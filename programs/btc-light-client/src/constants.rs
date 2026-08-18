@@ -32,3 +32,21 @@ pub(crate) const NETWORK_MAINNET: u8 = 0;
 pub(crate) const NETWORK_TESTNET3: u8 = 1;
 pub(crate) const NETWORK_TESTNET4: u8 = 2;
 pub(crate) const NETWORK_REGTEST: u8 = 3;
+
+/// Whether this build is allowed to track `network` at all.
+///
+/// `network` selects how much of Bitcoin consensus the client enforces — regtest retargets
+/// nothing and has no meaningful work — so it is effectively a "verify / do not verify" switch
+/// held by whoever called `initialize` first. A mainnet binary has no legitimate reason to track
+/// regtest, and refusing it here means the switch cannot be flipped in production even by the
+/// authority. Testnet3 was never supported.
+pub(crate) fn network_allowed_in_build(network: u8) -> bool {
+    match network {
+        NETWORK_MAINNET | NETWORK_TESTNET4 => true,
+        NETWORK_REGTEST => !cfg!(feature = "mainnet"),
+        // Testnet3 has a defined id but no retarget handling in `required_bits_for_next_block`,
+        // so accepting it would mean running with difficulty unchecked.
+        NETWORK_TESTNET3 => false,
+        _ => false,
+    }
+}

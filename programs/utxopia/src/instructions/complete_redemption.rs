@@ -433,6 +433,9 @@ pub fn process_complete_redemption(
     // Verify sufficient confirmations
     {
         let lc_data = light_client_info.try_borrow()?;
+        // A regtest light client checks no proof-of-work at all, so its SPV proofs are free.
+        crate::state::assert_light_client_network(&lc_data)
+            .map_err(|_| UTXOpiaError::RedemptionSpvFailed)?;
         // Reject proofs from a prior chain instance: after a light-client reinitialization the
         // singleton PDA still passes the canonical check, but stale proofs carry an older epoch.
         if vt_epoch != crate::state::light_client_reinit_epoch(&lc_data)? {

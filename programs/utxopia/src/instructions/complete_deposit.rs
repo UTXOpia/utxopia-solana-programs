@@ -425,6 +425,9 @@ fn complete_deposit_inner(
     // Verify sufficient confirmations via light client tip height
     {
         let lc_data = light_client_info.try_borrow()?;
+        // A regtest light client checks no proof-of-work at all, so its SPV proofs are free.
+        crate::state::assert_light_client_network(&lc_data)
+            .map_err(|_| UTXOpiaError::InvalidSpvProof)?;
         // Reject proofs minted under a prior light-client chain instance (see reinitialize).
         if vt_epoch != crate::state::light_client_reinit_epoch(&lc_data)? {
             return Err(UTXOpiaError::InvalidSpvProof.into());

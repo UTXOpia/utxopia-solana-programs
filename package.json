@@ -7,7 +7,7 @@
     "build:devnet": "cargo build-sbf --features devnet",
     "build:devnet-regtest": "cargo build-sbf --features devnet-regtest",
     "build:localnet": "cargo build-sbf --features localnet",
-    "build:mainnet": "cargo build-sbf",
+    "build:mainnet": "cargo build-sbf --features mainnet",
     "check:scripts": "tsc -p tsconfig.scripts.json --noEmit",
     "test": "cargo test",
     "test:unit": "cargo test && bun test tests/unit",

@@ -70,9 +70,9 @@ pub mod init_vk_registry;
 pub mod joinsplit_common;
 pub mod rotate_tree;
 
-// Dev-only state reset (devnet-regtest builds only)
+// Dev-only force-close (devnet-regtest builds only)
 #[cfg(feature = "devnet-regtest")]
-pub mod devnet_reset;
+pub mod devnet_close;
 
 // Re-exports
 pub use admin_auditor::*;
@@ -83,7 +83,7 @@ pub use claim_fees::*;
 pub use complete_deposit::*;
 pub use complete_redemption::*;
 #[cfg(feature = "devnet-regtest")]
-pub use devnet_reset::*;
+pub use devnet_close::*;
 pub use exit_destination::*;
 pub use init_vk_registry::*;
 pub use initialize::*;

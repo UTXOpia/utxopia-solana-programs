@@ -34,6 +34,7 @@ devnet-test-notes.json
 # Test validator data
 test-ledger/
 
-# Lock files
-bun.lock
-Cargo.lock
+# Lock files are COMMITTED here, deliberately. This crate builds a deployed on-chain binary, not
+# a library: an uncommitted lock means the bytecode a reviewer builds need not be the bytecode
+# that was deployed, which defeats `solana-verify` and any reproducible-build claim. It is also
+# what lets CI run `--frozen-lockfile` / `--locked`.

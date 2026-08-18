@@ -328,15 +328,22 @@ pub fn process_extend_blockchain(
             .checked_add(1)
             .ok_or(ProgramError::ArithmeticOverflow)?;
 
-        // PoW and difficulty checks for production Bitcoin networks.
+        // Proof-of-work is enforced on every network, regtest included. Chainwork is derived
+        // from `bits`, so skipping this let a regtest client claim ~2^255 work from a single
+        // header with `bits = 0x03000001` and instantly become canonical. Requiring the hash to
+        // actually meet the target it claims caps the work at the work performed, which is the
+        // property the whole SPV bridge rests on. Regtest blocks from bitcoind already satisfy
+        // this — they are mined against regtest's (trivial) pow_limit — so nothing legitimate
+        // regresses; only the free-chainwork path closes.
+        let target = target_from_bits(bits);
+        if !hash_meets_target(&block_hash, &target) {
+            return Err(ProgramError::InvalidArgument);
+        }
+
+        // Retargeting is mainnet/testnet4 only — regtest never adjusts difficulty.
         if network == crate::constants::NETWORK_MAINNET
             || network == crate::constants::NETWORK_TESTNET4
         {
-            let target = target_from_bits(bits);
-            if !hash_meets_target(&block_hash, &target) {
-                return Err(ProgramError::InvalidArgument);
-            }
-
             // Difficulty params MUST be seeded for production networks. An unseeded (0)
             // value previously made required_bits_for_next_block return 0, which disabled
             // the bits check entirely and let an attacker grind a low-difficulty chain.

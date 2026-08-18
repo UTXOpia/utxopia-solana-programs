@@ -121,6 +121,32 @@ pub fn light_client_tip_height(data: &[u8]) -> Result<u64, ProgramError> {
     Ok(u64::from_le_bytes(data[136..144].try_into().unwrap()))
 }
 
+/// Bitcoin network the light client tracks (`BitcoinLightClient.network`, offset 3).
+/// 0 = mainnet, 1 = testnet3, 2 = testnet4, 3 = regtest.
+#[cfg(feature = "mainnet")]
+const NETWORK_MAINNET: u8 = 0;
+
+/// Reject a light client that is not tracking the network this build is for.
+///
+/// The whole bridge rests on "a `VerifiedTransaction` PDA exists, therefore real Bitcoin work
+/// backs it" — but every consensus rule in btc-light-client (PoW, difficulty, median-time-past)
+/// is gated on that one `network` byte, and nothing on this side used to look at it. A light
+/// client pointed at regtest satisfies the same PDA derivation while checking nothing, so a
+/// mainnet build must refuse to read one. Cheap: one byte, once per SPV consumer.
+pub fn assert_light_client_network(data: &[u8]) -> Result<(), ProgramError> {
+    if data.len() < LIGHT_CLIENT_MIN_LEN {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    if data[0] != BTC_LIGHT_CLIENT_DISCRIMINATOR {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    #[cfg(feature = "mainnet")]
+    if data[3] != NETWORK_MAINNET {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    Ok(())
+}
+
 /// Minimum size of BitcoinLightClient account for reading the reinit epoch (offset 176..180).
 const LIGHT_CLIENT_EPOCH_MIN_LEN: usize = 180;
 

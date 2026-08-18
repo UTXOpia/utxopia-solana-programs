@@ -25,6 +25,16 @@
 //!                              Withdraw → ZK Proof → Burn from Pool → BTC
 //! ```
 
+// `mainnet` is a positive assertion, not the absence of a flag — a build that forgets every
+// feature is otherwise indistinguishable from a production one. Combining it with a test-network
+// flavour is always a packaging mistake (it would chain devnet program ids, or swap Poseidon for
+// SHA256), so make it a build failure rather than something to catch in review.
+#[cfg(all(
+    feature = "mainnet",
+    any(feature = "devnet", feature = "localnet", feature = "devnet-regtest")
+))]
+compile_error!("feature `mainnet` is mutually exclusive with `devnet`/`localnet`/`devnet-regtest`");
+
 use crate::pinocchio_compat::{AccountInfo, ProgramError, Pubkey};
 #[cfg(not(feature = "no-entrypoint"))]
 use pinocchio::entrypoint;
@@ -99,8 +109,8 @@ pub mod instruction {
     pub const SET_AUDITOR_FROZEN: u8 = 28;
     pub const SET_AUDITOR_VIEWING_PUBKEY: u8 = 29;
 
-    // Dev-only state reset (30) — handler is compiled in only under `devnet-regtest`
-    pub const DEVNET_RESET: u8 = 30;
+    // 30 was DEVNET_RESET (close pool_state + commitment_tree). Removed — DEVNET_CLOSE does
+    // the same thing with an account list instead of a fixed pair. Do not reuse the byte.
     // Dev-only force-close of stale program-owned accounts (31) — devnet-regtest only
     pub const DEVNET_CLOSE: u8 = 31;
 
@@ -225,9 +235,7 @@ pub fn process_instruction(
         instruction::SET_AUDITOR_VIEWING_PUBKEY => {
             instructions::process_set_auditor_viewing_pubkey(program_id, accounts, data)
         }
-        // Dev-only state reset (30) — devnet-regtest builds only
-        #[cfg(feature = "devnet-regtest")]
-        instruction::DEVNET_RESET => instructions::process_devnet_reset(program_id, accounts, data),
+        // Dev-only force-close (31) — devnet-regtest builds only
         #[cfg(feature = "devnet-regtest")]
         instruction::DEVNET_CLOSE => instructions::process_devnet_close(program_id, accounts, data),
         // MagicBlock ER/PER lifecycle helpers (32-33)

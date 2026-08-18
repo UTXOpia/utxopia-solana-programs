@@ -41,10 +41,13 @@ hex-literal = "0.4"
 light-poseidon = "0.2"
 ark-bn254 = "0.4"
 sha3 = "0.10"
+# Host-side SHA-256. Must be a real dependency, not dev-only: `sha256()` used to fall back to an
+# XOR stub on non-test host builds, which silently turned txid/merkle checks into nonsense for
+# anything reusing this crate as a library outside `cargo test`.
+sha2 = "0.10"
 
 [dev-dependencies]
 libsecp256k1 = "0.7"
-sha2 = "0.10"
 
 [lints.rust]
 # Solana programs use target_os = "solana" which is not a standard cfg value

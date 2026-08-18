@@ -89,20 +89,15 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
         }
     }
 
-    #[cfg(all(not(target_os = "solana"), test))]
+    // Real SHA-256 on every host build, matching `keccak256` below. This used to be `test`-only,
+    // with an XOR stub standing in otherwise — a stub that still returns 32 plausible-looking
+    // bytes, so txid and merkle verification would quietly "pass" against garbage in any host
+    // build that was not a test.
+    #[cfg(not(target_os = "solana"))]
     {
         use sha2::{Digest, Sha256};
         let hash = Sha256::digest(data);
         result.copy_from_slice(&hash);
-    }
-
-    #[cfg(all(not(target_os = "solana"), not(test)))]
-    {
-        // Fallback XOR hash for non-test, non-Solana builds (e.g. cargo check)
-        for (i, byte) in data.iter().enumerate() {
-            result[i % 32] ^= byte;
-            result[(i + 1) % 32] = result[(i + 1) % 32].wrapping_add(*byte);
-        }
     }
 
     result
@@ -170,6 +165,9 @@ fn segwit_body_end(raw_tx: &[u8]) -> Option<usize> {
     offset += 2;
 
     let (input_count, vi) = read_varint(raw_tx.get(offset..)?).ok()?;
+    if input_count == 0 {
+        return None; // not consensus-valid; see the note in TransactionView::parse
+    }
     offset += vi;
     for _ in 0..input_count {
         offset += 36; // prev outpoint
@@ -288,6 +286,12 @@ impl<'a> ParsedTransaction<'a> {
 
         // Input count (varint)
         let (input_count, varint_size) = read_varint(&raw_tx[offset..])?;
+        // No consensus-valid transaction has zero inputs; rust-bitcoin rejects these and so must
+        // we, or a 0-input blob parses cleanly and can be presented as a "transaction" whose
+        // txid nothing else constrains. See `parse_rejects_zero_input_transaction`.
+        if input_count == 0 {
+            return Err(ProgramError::InvalidInstructionData);
+        }
         offset += varint_size;
 
         // Remember where inputs start
@@ -535,6 +539,32 @@ fn read_varint(data: &[u8]) -> Result<(u64, usize), ProgramError> {
 #[cfg(test)]
 mod txid_tests {
     use super::*;
+
+    #[test]
+    fn parse_rejects_zero_input_transaction() {
+        // version(4) | vin_count = 0 | vout_count = 0 | locktime(4). Structurally well-formed
+        // and consensus-invalid; rust-bitcoin rejects it, so this parser must too.
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&1u32.to_le_bytes());
+        raw.push(0); // vin_count
+        raw.push(0); // vout_count
+        raw.extend_from_slice(&0u32.to_le_bytes());
+
+        assert!(ParsedTransaction::parse(&raw).is_err());
+    }
+
+    #[test]
+    fn sha256_is_a_real_digest_on_host_builds() {
+        // Guards the removed XOR stub: it was order-insensitive per 32-byte lane, so these two
+        // inputs collided under it while differing under SHA-256.
+        assert_ne!(sha256(&[1u8, 2]), sha256(&[2u8, 1]));
+        // NIST vector for "abc".
+        assert_eq!(
+            sha256(b"abc")[..4],
+            [0xba, 0x78, 0x16, 0xbf],
+            "sha256 must be a genuine digest on host builds"
+        );
+    }
 
     #[test]
     fn hashes_six_non_contiguous_parts_without_a_fixed_descriptor_limit() {

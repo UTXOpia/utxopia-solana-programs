@@ -11,7 +11,7 @@ use pinocchio_system::instructions::{Allocate, Assign, CreateAccount, Transfer};
 use crate::constants::{
     BLOCK_HEADER_DISCRIMINATOR, BLOCK_HEADER_SEED, BTC_LIGHT_CLIENT_DISCRIMINATOR,
     HEIGHT_INDEX_DISCRIMINATOR, HEIGHT_INDEX_SEED, LIGHT_CLIENT_SEED, NETWORK_MAINNET,
-    NETWORK_REGTEST, NETWORK_TESTNET4, REQUIRED_CONFIRMATIONS,
+    NETWORK_TESTNET4, REQUIRED_CONFIRMATIONS,
 };
 use crate::state::{BitcoinLightClient, BlockHeader, HeightIndex};
 
@@ -59,7 +59,7 @@ pub fn process_initialize(
     let mut start_block_hash = [0u8; 32];
     start_block_hash.copy_from_slice(&data[8..40]);
     let network = data[40];
-    if network != NETWORK_MAINNET && network != NETWORK_TESTNET4 && network != NETWORK_REGTEST {
+    if !crate::constants::network_allowed_in_build(network) {
         return Err(ProgramError::InvalidInstructionData);
     }
 

@@ -383,6 +383,49 @@ pub fn close_account_securely(
     Ok(())
 }
 
+/// Parse the upgrade authority out of a `BPFLoaderUpgradeable` ProgramData account.
+///
+/// Layout: `u32` enum tag (3 = ProgramData) + `u64` deploy slot + `Option<Pubkey>` authority
+/// (1-byte tag + 32 bytes). A finalized program has tag 0 and no authority — every caller here
+/// treats that as "nobody is authorized", which is what makes `set-upgrade-authority --final`
+/// a permanent freeze of the admin-only instructions.
+fn programdata_upgrade_authority(data: &[u8]) -> Result<&[u8], ProgramError> {
+    if data.len() < 45 || data[0..4] != [3, 0, 0, 0] || data[12] != 1 {
+        return Err(UTXOpiaError::Unauthorized.into());
+    }
+    Ok(&data[13..45])
+}
+
+/// Require `signer` to be this program's upgrade authority.
+///
+/// The only global admin identity a pool-less resource can have. Whoever holds it can already
+/// redeploy the program and rewrite every rule, so gating on it adds no new trust — but it stops
+/// a caller-supplied `pool_state` (which anyone can create, since `INITIALIZE` is permissionless)
+/// or a bare `is_signer()` check from standing in for "the protocol admin".
+pub fn validate_upgrade_authority(
+    program_id: &Pubkey,
+    program_data: &AccountInfo,
+    signer: &AccountInfo,
+) -> ProgramResult {
+    use crate::constants::BPF_LOADER_UPGRADEABLE_ID;
+    use crate::pinocchio_compat::find_program_address;
+
+    if !signer.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    let loader = Pubkey::new_from_array(BPF_LOADER_UPGRADEABLE_ID);
+    let (expected, _) = find_program_address(&[program_id.as_ref()], &loader);
+    if program_data.address() != &expected || !program_data.owned_by(&loader) {
+        return Err(ProgramError::InvalidArgument);
+    }
+
+    let data = program_data.try_borrow()?;
+    if programdata_upgrade_authority(&data)? != signer.address().as_ref() {
+        return Err(UTXOpiaError::Unauthorized.into());
+    }
+    Ok(())
+}
+
 /// Validate a mint-namespaced pool: ["pool_state", zkbtc_mint].
 pub fn validate_pool_state_pda(
     pool_account: &AccountInfo,

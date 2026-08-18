@@ -409,17 +409,11 @@ pub fn compute_merkle_root(
     Ok(current)
 }
 
-/// Zero value for empty Merkle tree nodes at each level
-/// These are precomputed: zero[0] = H(0,0), zero[1] = H(zero[0], zero[0]), etc.
-pub const ZERO_HASHES: [[u8; 32]; 20] = [
-    // Level 0: Hash of two zero leaves
-    [0u8; 32],
-    // Levels 1-19: Each level is hash of previous level with itself
-    // In production, these should be precomputed with actual Poseidon2
-    [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32],
-    [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32], [0u8; 32],
-    [0u8; 32], [0u8; 32], [0u8; 32],
-];
+// A placeholder all-zero `ZERO_HASHES` lived here and was never wired up. The real, Poseidon-
+// derived ladder is `state::commitment_tree::ZERO_HASHES`. Two same-named constants where the
+// unused one is all zeros is a live trap: one `use crate::utils::crypto::ZERO_HASHES` and every
+// empty subtree hashes to zero, making forged membership proofs trivial. Deleted rather than
+// fixed — there is no second caller that needs its own copy.
 
 #[cfg(test)]
 #[path = "crypto_tests.rs"]
