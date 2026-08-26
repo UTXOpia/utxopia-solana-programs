@@ -171,7 +171,7 @@ pub fn process_init_vk_registry(
         }
     } else {
         let rent = Rent::get()?;
-        let lamports = rent.minimum_balance(VkRegistry::SIZE);
+        let lamports = rent.try_minimum_balance(VkRegistry::SIZE)?;
 
         let bump_bytes = [bump];
         let signer_seeds: &[&[u8]] = &[

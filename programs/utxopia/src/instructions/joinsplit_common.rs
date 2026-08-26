@@ -406,7 +406,7 @@ pub fn create_nullifier_records(
             payer,
             nullifier_info,
             program_id,
-            rent.minimum_balance(NullifierRecord::LEN),
+            rent.try_minimum_balance(NullifierRecord::LEN)?,
             NullifierRecord::LEN as u64,
             signer_seeds,
         )?;

@@ -98,6 +98,9 @@ impl BitcoinLightClient {
         u32::from_le_bytes(self._reserved[0..4].try_into().unwrap())
     }
 
+    /// Only the reinitialize instruction writes this, and that instruction is not
+    /// compiled into mainnet builds.
+    #[cfg(not(feature = "mainnet"))]
     pub fn set_reinit_epoch(&mut self, value: u32) {
         self._reserved[0..4].copy_from_slice(&value.to_le_bytes());
     }

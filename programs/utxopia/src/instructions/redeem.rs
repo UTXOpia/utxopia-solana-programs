@@ -466,7 +466,7 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
             user,
             redemption_info,
             program_id,
-            rent.minimum_balance(RedemptionRequest::LEN),
+            rent.try_minimum_balance(RedemptionRequest::LEN)?,
             RedemptionRequest::LEN as u64,
             redemption_signer_seeds,
         )?;

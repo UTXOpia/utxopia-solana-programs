@@ -384,7 +384,7 @@ fn complete_deposit_inner(
             authority,
             deposit_receipt_info,
             program_id,
-            rent.minimum_balance(DepositReceipt::LEN),
+            rent.try_minimum_balance(DepositReceipt::LEN)?,
             DepositReceipt::LEN as u64,
             signer_seeds,
         )?;
@@ -717,7 +717,7 @@ fn complete_deposit_inner(
                 authority,
                 utxo_record_info,
                 program_id,
-                rent.minimum_balance(UtxoRecord::LEN),
+                rent.try_minimum_balance(UtxoRecord::LEN)?,
                 UtxoRecord::LEN as u64,
                 utxo_signer_seeds,
             )?;

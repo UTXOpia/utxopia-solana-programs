@@ -97,7 +97,7 @@ pub fn process_rotate_tree(
 
     // Create new tree PDA
     let rent = Rent::get()?;
-    let tree_lamports = rent.minimum_balance(CommitmentTree::LEN);
+    let tree_lamports = rent.try_minimum_balance(CommitmentTree::LEN)?;
     let new_bump_bytes = [new_bump];
     let new_signer_seeds: &[&[u8]] = &[
         CommitmentTree::SEED_PREFIX,

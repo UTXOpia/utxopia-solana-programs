@@ -79,8 +79,6 @@ fn verify_groth16_proof(
         return Err(ProgramError::InvalidInstructionData);
     }
 
-    solana_program_log::log!("UTXOpia: groth16 verifying");
-
     // Parse proof components
     let pi_a: &[u8] = &proof_bytes[0..64]; // G1 (64 bytes)
     let pi_b: &[u8] = &proof_bytes[64..192]; // G2 (128 bytes)
@@ -120,8 +118,6 @@ fn verify_groth16_proof(
         vk_x.copy_from_slice(&sum);
     }
 
-    solana_program_log::log!("UTXOpia: groth16 pairing check");
-
     // Step 3: Build pairing input (4 pairs × 192 bytes = 768 bytes)
     // Pairing check: e(-A, B) * e(alpha, beta) * e(vk_x, gamma) * e(C, delta) == 1
     let mut pairing_input = [0u8; 4 * ALT_BN128_PAIRING_ELEMENT_LEN]; // 768 bytes
@@ -159,7 +155,6 @@ fn verify_groth16_proof(
         return Err(ProgramError::InvalidInstructionData);
     }
 
-    solana_program_log::log!("UTXOpia: groth16 proof verified");
     Ok(())
 }
 

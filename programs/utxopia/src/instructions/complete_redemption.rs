@@ -352,7 +352,7 @@ pub fn process_complete_redemption(
             authority,
             completion_receipt_info,
             program_id,
-            rent.minimum_balance(CompletionReceipt::LEN),
+            rent.try_minimum_balance(CompletionReceipt::LEN)?,
             CompletionReceipt::LEN as u64,
             signer_seeds,
         )?;
@@ -619,7 +619,7 @@ pub fn process_complete_redemption(
                 authority,
                 change_utxo_info,
                 program_id,
-                rent.minimum_balance(UtxoRecord::LEN),
+                rent.try_minimum_balance(UtxoRecord::LEN)?,
                 UtxoRecord::LEN as u64,
                 utxo_signer_seeds,
             )?;
