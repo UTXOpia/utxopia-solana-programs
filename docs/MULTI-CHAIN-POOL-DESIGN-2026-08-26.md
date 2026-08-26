@@ -98,26 +98,46 @@ sol_alt_bn128_*   sol_big_mod_exp   sol_curve_*
 So Equihash verification would run as pure BPF: 512 Blake2b-512 compressions per header, plus the
 2^9 index sort and XOR-collision checks.
 
-For scale, the most expensive thing this program does today is Groth16 verification, **measured at
-97,159 CU** (2026-08-25, mollusk-svm 0.15, sbpf v3; ~98% of that is fixed-price syscalls). A
-Blake2b compression is 12 rounds of 8 G-functions; 512 of them in interpreted BPF is a
-**rough estimate of 700k–1M+ CU** before the sort — i.e. at or over the 1.4M per-instruction limit,
-for a single header.
+**Measured 2026-08-26** (mollusk-svm 0.11, sbpf v3, `programs/equihash-bench`, cost isolated by
+differencing 101 compressions against 1 so the entrypoint and loop setup cancel):
 
-> **This estimate is not measured.** Before any of the work in §4 is scheduled, write the Blake2b
-> compression in BPF and benchmark 512 iterations under mollusk. That one number decides the
-> design. Everything below is contingent on it.
+```
+per BLAKE2b compression        5,380 CU
+Equihash-200,9  (~512)     2,754,560 CU
+transaction limit          1,400,000 CU     -> 197% of budget
+Groth16 verify (2026-08-25)   97,159 CU     -> 28.4x
+```
 
-### 3.3 Three ways out, none free
+So Equihash verification **does not fit in one transaction**. It is about 2x over. Note the limit
+is per *transaction*, not per instruction — splitting into several instructions inside one
+transaction shares the same 1.4M ceiling and buys nothing.
 
-| Option | Trust model | Cost |
+My pre-measurement estimate in the first draft of this note was 700k–1M CU. It was low by ~3x,
+which is the reason the measurement was made blocking rather than assumed.
+
+### 3.3 What the number allows
+
+| Option | Trust model | Verdict |
 |---|---|---|
-| **A. Skip Equihash.** Verify chain linkage, difficulty and a compiled-in checkpoint only. | Not PoW. Whoever relays first, bounded by checkpoints. | Cheap, and honest only if labelled as a checkpointed bridge |
-| **B. Prove PoW off-chain.** Relayer submits a Groth16 proof that the header's Equihash solution is valid. | Full PoW, if the circuit is right | ~97k CU to verify — **we already run this**. But an Equihash circuit is a very large build and its own trusted setup |
-| **C. Attested.** N-of-M relayer signatures over the header. | Federated | Small; a different product |
+| **A. Verification resumed across transactions.** Partial BLAKE2b state in a PDA; ~3 transactions per header. | **Full proof-of-work** | **Viable, and the recommendation** |
+| B. Prove Equihash off-chain with Groth16. | Full PoW | **Not viable — see below** |
+| C. Skip Equihash; chain linkage + difficulty + compiled-in checkpoint. | Checkpointed, not PoW | Cheap; honest only if labelled as such |
+| D. N-of-M relayer attestation. | Federated | Small; a different product |
 
-Option B is unusually attractive here *only* because the Groth16 verifier is already deployed and
-measured. It is still the largest single piece of work in this note.
+**A is the answer, and it was missing from the first draft.** 2.75M CU is roughly two
+transactions' worth, and Zcash blocks are ~75 seconds apart — three transactions per header is a
+trivial ongoing cost. The pattern already exists in this codebase: ChadBuffer stages oversized
+transaction data across calls for exactly this reason. A resumable Equihash verifier holds its
+BLAKE2b state and index cursor in a PDA and finishes on the third call. Moderate build, full
+Bitcoin-equivalent security, no new cryptography and no ceremony.
+
+**B is dead, and the first draft was wrong to call it attractive.** It looked cheap because the
+Groth16 verifier is already deployed at 97k CU — but that is the *verification* side. The circuit
+is the problem. BLAKE2b is 64-bit adds, XORs and rotations; over a prime field each 64-bit XOR
+costs a bit decomposition, so one compression is on the order of 10^5 constraints and 512 of them
+lands near **50 million**. That needs a ptau beyond any public ceremony, hundreds of GB of RAM and
+hours per proof, against a chain producing a block every 75 seconds. Proposing it was an error of
+not costing the prover side; recorded here so it is not re-proposed.
 
 ### 3.4 Two more ZEC differences worth pricing
 
@@ -135,10 +155,11 @@ measured. It is still the largest single piece of work in this note.
 
 Each phase is independently valuable; nothing here is all-or-nothing.
 
-**Phase 0 — measure Equihash (blocking).** Benchmark 512 Blake2b compressions in BPF. If it fits
-under ~400k CU, ZEC gets Bitcoin's security model. If not, choose A or B in §3.3 *before* building
-any abstraction, because A and B are not the same interface and abstracting over both is how you
-get a leaky one.
+**Phase 0 — measure Equihash. DONE, 2026-08-26.** 5,380 CU per compression, 2.75M for a header,
+197% of a transaction. Implementation and benchmark in `programs/equihash-bench` (workspace-
+excluded; delete once this note is settled). BLAKE2b is validated against RFC 7693 Appendix A.
+Answer: native verification is possible but must be **resumed across ~3 transactions**, so ZEC can
+have Bitcoin's trust model. Option A in §3.3.
 
 **Phase 1 — per-asset bridge accounting.** Move `total_btc_held`, `utxo_count`,
 `pending_redemptions` out of `PoolState` and into `TokenConfig`. Replace `pool.zkbtc_mint` with a
@@ -168,10 +189,16 @@ signing is P2PKH-shaped, so `sighash.rs` gains a variant rather than a rewrite).
 restriction that exists only because of a data-model limitation, and it is the prerequisite for
 everything else.
 
-**Do Phase 0 before promising ZEC to anyone.** The whole proposition — "one pool, several chains,
-same security model" — rests on whether Equihash fits in a Solana instruction. If it does not, ZEC
-is a *checkpointed* bridge next to a *proof-of-work* bridge in the same anonymity set, and that
-difference has to be surfaced to users rather than hidden behind a shared `token_id`.
+**ZEC can have the same trust model as BTC.** That was the open question and it is now closed:
+2.75M CU is expensive but not prohibitive, and resuming across three transactions costs a few
+thousand lamports per 75-second block. There is no need to put a checkpointed bridge and a
+proof-of-work bridge in the same anonymity set, which is the outcome the first draft was braced
+for. Phase 4 should build the resumable verifier rather than reach for options C or D.
+
+The one thing to size before committing: a resumable verifier means a PDA holding partial
+consensus state between transactions, and partial state that an attacker can also write to is its
+own risk surface. It needs the same treatment `extend_blockchain` got in F-BTC-03 — the
+continuation must be bound to the batch that started it, not merely "some state that exists".
 
 **One thing to keep in view.** audit_1 established that minting requires the pool authority's
 signature (`complete_deposit.rs:141,163` — `mint_zkbtc` has exactly one call site). So the light

@@ -7,7 +7,10 @@ members = [
 ]
 exclude = [
     "programs/chadbuffer",
-    "programs/svm-tests"
+    "programs/svm-tests",
+    # Throwaway CU spike for the multi-chain design note. Excluded so it cannot perturb the
+    # deployed crates' dependency resolution — delete the crate and this line together.
+    "programs/equihash-bench"
 ]
 
 [profile.release]

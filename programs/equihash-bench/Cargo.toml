@@ -1,0 +1,28 @@
+# Throwaway measurement spike for the multi-chain design note (docs/MULTI-CHAIN-POOL-DESIGN-*).
+# Workspace-excluded on purpose: it exists to answer one question — what does Blake2b cost in BPF
+# — and should be deleted once that number is recorded. Nothing production depends on it.
+[package]
+name = "equihash-bench"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "lib"]
+
+[features]
+no-entrypoint = []
+
+[dependencies]
+pinocchio = "0.9"
+
+[dev-dependencies]
+mollusk-svm = "=0.11.0"
+solana-account = "3.2"
+solana-instruction = "3.0"
+solana-pubkey = "4.0"
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1
