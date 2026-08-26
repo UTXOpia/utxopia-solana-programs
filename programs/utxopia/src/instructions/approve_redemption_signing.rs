@@ -164,6 +164,18 @@ pub fn process_approve_redemption_signing(
 
         check_redemption_signing(pool, redemption.amount_sats(), ix_data.miner_fee_sats)?;
 
+        // Pin the miner fee across every input of this redemption. The fee feeds the change
+        // output and therefore the TapSighash, so approving input 0 at fee A and input 1 at
+        // fee B has Ika sign two different transactions — neither broadcastable, while the
+        // completed bitset sets `signing_approved` and permanently blocks cancel_redemption
+        // (cancel_redemption.rs:115, checked before the timeout branch). The first approval
+        // stores the fee below; every later one must match it.
+        if redemption.has_any_input_approved()
+            && ix_data.miner_fee_sats != redemption.approval_miner_fee_sats()
+        {
+            return Err(UTXOpiaError::RedemptionFeeMismatch.into());
+        }
+
         let script = redemption.get_btc_script();
         let mut recipient_script = [0u8; MAX_BTC_SCRIPT_LEN];
         recipient_script[..script.len()].copy_from_slice(script);
@@ -403,6 +415,11 @@ pub fn process_approve_redemption_signing(
     {
         let mut redemption_data = redemption_info.try_borrow_mut()?;
         let redemption = RedemptionRequest::from_bytes_mut(&mut redemption_data)?;
+        // Store before marking: mark_input_signing_approved is what makes
+        // has_any_input_approved() true, so the order decides whether this is the first call.
+        if !redemption.has_any_input_approved() {
+            redemption.set_approval_miner_fee_sats(ix_data.miner_fee_sats)?;
+        }
         redemption.mark_input_signing_approved(ix_data.input_index)?;
     }
 

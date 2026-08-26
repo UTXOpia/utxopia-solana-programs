@@ -234,6 +234,9 @@ pub enum UTXOpiaError {
 
     #[error("Reserved UTXOs exceed what the redemption payout needs")]
     ExcessiveReservedInputs = 6101,
+
+    #[error("Miner fee differs from the one pinned by this redemption's first signing approval")]
+    RedemptionFeeMismatch = 6102,
 }
 
 impl From<UTXOpiaError> for ProgramError {

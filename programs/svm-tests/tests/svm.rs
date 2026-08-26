@@ -1076,10 +1076,34 @@ fn make_raw_header(parent_hash: &[u8; 32]) -> ([u8; 80], [u8; 32]) {
 ///
 /// The parent is placed at `parent_height`; the light-client's `finalized_height`
 /// is the `finalized` argument.
+/// What to supply for the mandatory parent-HeightIndex account (audit_1 F-BTC-03).
+#[derive(Clone, Copy, PartialEq)]
+enum ParentHi {
+    /// The real thing: HeightIndex[parent_height].block_hash == parent_hash.
+    Canonical,
+    /// Parent is NOT the canonical block at its height — what a fork block staged by an
+    /// earlier, non-canonical batch looks like. Must be rejected.
+    Mismatched,
+    /// The PDA exists as a bare system account — the only thing an attacker can actually pass
+    /// for a fork block, since the non-canonical branch never creates a HeightIndex.
+    Uninitialized,
+    /// Account omitted entirely — the pre-fix caller. Must now be NotEnoughAccountKeys.
+    Omitted,
+}
+
 fn extend_blockchain_call(
     pid: &Pubkey,
     parent_height: u64,
     finalized: u64,
+) -> (Instruction, Vec<(Pubkey, Account)>) {
+    extend_blockchain_call_with(pid, parent_height, finalized, ParentHi::Canonical)
+}
+
+fn extend_blockchain_call_with(
+    pid: &Pubkey,
+    parent_height: u64,
+    finalized: u64,
+    parent_hi: ParentHi,
 ) -> (Instruction, Vec<(Pubkey, Account)>) {
     let parent_hash = [0x42u8; 32]; // arbitrary deterministic value
     let (raw_header, new_block_hash) = make_raw_header(&parent_hash);
@@ -1100,7 +1124,7 @@ fn extend_blockchain_call(
     data.push(1u8); // num_headers = 1
     data.extend_from_slice(&raw_header);
 
-    let metas = vec![
+    let mut metas = vec![
         AccountMeta::new(light_client, false),
         AccountMeta::new(submitter, true),
         AccountMeta::new_readonly(system_key, false),
@@ -1108,6 +1132,12 @@ fn extend_blockchain_call(
         AccountMeta::new(block_pda, false),
         AccountMeta::new(hi_pda, false),
     ];
+    // Mandatory trailing account at index expected_accounts + num_ancestors = 6 + 0.
+    let (parent_hi_pda, _) =
+        Pubkey::find_program_address(&[b"height_index", &parent_height.to_le_bytes()], pid);
+    if parent_hi != ParentHi::Omitted {
+        metas.push(AccountMeta::new_readonly(parent_hi_pda, false));
+    }
     let ix = Instruction::new_with_bytes(*pid, &data, metas);
 
     // tip_height of the LC doesn't affect the fork-point gate; set it equal to
@@ -1115,7 +1145,7 @@ fn extend_blockchain_call(
     let lc_data = lc_blob_for_extend(parent_height, finalized);
     let parent_bh_data = parent_block_header_blob(&parent_hash, parent_height);
 
-    let accounts = vec![
+    let mut accounts = vec![
         (light_client, acct(10_000_000_000, lc_data, *pid)),
         (submitter, acct(10_000_000_000, vec![], SYSTEM_ID)),
         (system_key, system_acct),
@@ -1124,6 +1154,24 @@ fn extend_blockchain_call(
         (block_pda, acct(0, vec![], SYSTEM_ID)),
         (hi_pda, acct(0, vec![], SYSTEM_ID)),
     ];
+    match parent_hi {
+        ParentHi::Canonical => accounts.push((
+            parent_hi_pda,
+            acct(1_000_000, height_index_blob(&parent_hash, parent_height), *pid),
+        )),
+        ParentHi::Mismatched => accounts.push((
+            parent_hi_pda,
+            acct(
+                1_000_000,
+                height_index_blob(&[0x99u8; 32], parent_height),
+                *pid,
+            ),
+        )),
+        ParentHi::Uninitialized => {
+            accounts.push((parent_hi_pda, acct(0, vec![], SYSTEM_ID)))
+        }
+        ParentHi::Omitted => {}
+    }
 
     (ix, accounts)
 }
@@ -1154,6 +1202,46 @@ fn extend_blockchain_rejects_fork_below_finality() {
         ),
         "must return InvalidArgument (fork-point gate), got {:?}",
         res.program_result
+    );
+}
+
+/// audit_1 F-BTC-03: the parent-HeightIndex account is MANDATORY.
+///
+/// It used to be enforced only `if accounts.len() > expected_accounts + num_ancestors`, i.e.
+/// only when the caller volunteered it — so an attacker staging a multi-batch fork just left
+/// it out. These three cases pin the three ways that can now go.
+#[test]
+fn extend_blockchain_requires_parent_height_index() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "btc_light_client");
+
+    // 1. Omitted — the pre-fix caller. Rejected before any state is read.
+    let (ix, accounts) = extend_blockchain_call_with(&pid, 10, 10, ParentHi::Omitted);
+    assert!(
+        matches!(
+            mollusk.process_instruction(&ix, &accounts).program_result,
+            ProgramResult::Failure(ProgramError::NotEnoughAccountKeys)
+        ),
+        "omitting the parent HeightIndex must not silently skip the canonicality check"
+    );
+
+    // 2. Uninitialized — what an attacker can actually pass for a fork block staged by an
+    //    earlier non-canonical batch, since that branch never creates a HeightIndex.
+    let (ix, accounts) = extend_blockchain_call_with(&pid, 10, 10, ParentHi::Uninitialized);
+    assert!(
+        mollusk.process_instruction(&ix, &accounts).program_result.is_err(),
+        "an uninitialized parent HeightIndex must be rejected"
+    );
+
+    // 3. Present but naming a different block — the parent is not canonical at its height.
+    let (ix, accounts) = extend_blockchain_call_with(&pid, 10, 10, ParentHi::Mismatched);
+    assert!(
+        matches!(
+            mollusk.process_instruction(&ix, &accounts).program_result,
+            ProgramResult::Failure(ProgramError::InvalidAccountData)
+        ),
+        "a parent that is not the canonical block at its height must be rejected"
     );
 }
 

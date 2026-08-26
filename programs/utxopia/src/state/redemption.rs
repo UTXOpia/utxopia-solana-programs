@@ -36,7 +36,7 @@ pub enum RedemptionStatus {
 /// - token_id:          32 bytes (the redeemed token, recorded at redeem; cancel re-mints the same token)
 /// - reserved_count:    1 byte  (number of UTXOs reserved at mark_processing; 0 until Processing)
 /// - approved_inputs:   4 bytes (u32 LE bitset; one bit per Ika-approved BTC input)
-/// - _padding2:         3 bytes (alignment/reserve)
+/// - approval_miner_fee: 3 bytes (u24 LE; miner fee pinned by the FIRST signing approval)
 /// - inputs_commitment: 32 bytes (sha256 over canonical-ordered reserved inputs; binds the BTC
 ///                                spend's input set so approve_redemption_signing can reconstruct
 ///                                the exact sighash from trusted state)
@@ -95,8 +95,20 @@ pub struct RedemptionRequest {
     /// and be cancelled safely.
     approved_inputs: [u8; 4],
 
-    /// Alignment / future reserve.
-    _padding2: [u8; 3],
+    /// Miner fee in satoshis, u24 LE, pinned by the FIRST approve_redemption_signing call.
+    ///
+    /// The fee is a caller-supplied scalar that feeds the change output and therefore the
+    /// TapSighash. Left unpinned, each input of a multi-input redemption could be approved
+    /// under a different fee, so the Ika approvals would cover mutually incompatible
+    /// transactions and no valid BTC spend could ever be assembled — while the full bitset
+    /// sets `signing_approved`, which permanently blocks `cancel_redemption`. The reserved
+    /// UTXOs would be unspendable through every path in the program.
+    ///
+    /// Three bytes is deliberate, not a squeeze: `MAX_MINER_FEE_SATS` is 50_000 and
+    /// `check_redemption_signing` rejects anything above it, so u24 (16_777_215) has ~300x
+    /// headroom. Reusing the old `_padding2` keeps `LEN` at 178, which matters because
+    /// off-chain readers filter these accounts by dataSize — see `len_is_pinned` below.
+    approval_miner_fee: [u8; 3],
 
     /// sha256 over the canonical-ordered reserved input set
     /// (for each input in canonical order: txid(32) || vout(4 LE) || amount(8 LE)).
@@ -195,6 +207,17 @@ impl RedemptionRequest {
         input_index < 32 && (u32::from_le_bytes(self.approved_inputs) & (1u32 << input_index)) != 0
     }
 
+    /// True once any input has been approved — i.e. the miner fee is already pinned.
+    pub fn has_any_input_approved(&self) -> bool {
+        u32::from_le_bytes(self.approved_inputs) != 0
+    }
+
+    /// Miner fee pinned by the first approval. Meaningless unless `has_any_input_approved()`.
+    pub fn approval_miner_fee_sats(&self) -> u64 {
+        let [a, b, c] = self.approval_miner_fee;
+        u64::from(u32::from_le_bytes([a, b, c, 0]))
+    }
+
     // Setters
     pub fn set_status(&mut self, status: RedemptionStatus) {
         self.status = status as u8;
@@ -226,6 +249,19 @@ impl RedemptionRequest {
             (1u32 << self.reserved_count) - 1
         };
         u32::from_le_bytes(self.approved_inputs) & required == required
+    }
+
+    /// Pin the miner fee. Callers must only invoke this on the first approval.
+    /// Errors rather than truncating if the value exceeds u24 — unreachable while
+    /// `check_redemption_signing` caps the fee at `MAX_MINER_FEE_SATS`, but the store is
+    /// lossy and a silent wrap here would unpin the very thing this field exists to pin.
+    pub fn set_approval_miner_fee_sats(&mut self, value: u64) -> Result<(), ProgramError> {
+        if value > 0x00ff_ffff {
+            return Err(ProgramError::InvalidArgument);
+        }
+        let b = (value as u32).to_le_bytes();
+        self.approval_miner_fee = [b[0], b[1], b[2]];
+        Ok(())
     }
 
     pub fn set_request_id(&mut self, value: u64) {
@@ -309,5 +345,33 @@ mod size_tests {
         // reserved_count/approved_inputs/inputs_commitment were added) and matched nothing.
         // If this fails, update the SDK's REDEMPTION_REQUEST_SIZE in the same change.
         assert_eq!(RedemptionRequest::LEN, 178);
+    }
+
+    /// The pinned miner fee reuses the old `_padding2`, so prove the u24 store is lossless
+    /// across the whole range the fee cap admits, and that it refuses to truncate above it.
+    #[test]
+    fn approval_miner_fee_round_trips_and_refuses_truncation() {
+        use crate::utils::policy::MAX_MINER_FEE_SATS;
+        let mut buf = [0u8; RedemptionRequest::LEN];
+        buf[0] = super::REDEMPTION_REQUEST_DISCRIMINATOR;
+        let r = RedemptionRequest::from_bytes_mut(&mut buf).unwrap();
+
+        // Unset reads as 0, and nothing is pinned until an input is approved.
+        assert_eq!(r.approval_miner_fee_sats(), 0);
+        assert!(!r.has_any_input_approved());
+
+        for v in [0u64, 1, 330, MAX_MINER_FEE_SATS, 0x00ff_ffff] {
+            r.set_approval_miner_fee_sats(v).unwrap();
+            assert_eq!(r.approval_miner_fee_sats(), v, "round-trip failed for {v}");
+        }
+
+        // One past u24 must error, not wrap to 0.
+        assert!(r.set_approval_miner_fee_sats(0x0100_0000).is_err());
+        assert_eq!(r.approval_miner_fee_sats(), 0x00ff_ffff);
+
+        // Writing the fee must not disturb the neighbouring bitset or commitment.
+        assert_eq!(r.reserved_count(), 0);
+        assert!(!r.has_any_input_approved());
+        assert_eq!(r.inputs_commitment(), &[0u8; 32]);
     }
 }
