@@ -36,6 +36,18 @@ pub const BTC_LIGHT_CLIENT_PROGRAM_ID: [u8; 32] = [
     0x89, 0xe8, 0x73, 0x4e, 0x07, 0x71, 0x59, 0x93, 0xb3, 0x9c, 0xc3, 0xad, 0x89, 0x36, 0x61, 0x67,
 ];
 
+// There is no mainnet BTC light client deployment yet (config.json's mainnet ids are empty),
+// and `mainnet` implies neither `localnet` nor `devnet-regtest` — so before this guard a
+// `--features mainnet` build fell through to the devnet arm below and silently validated every
+// SPV proof against the DEVNET light client. It fails closed (the PDA pin in verified_tx_reader
+// rejects the account, which does not exist on mainnet), but only after deploy. Fail at build
+// time instead: deploy the light client, then paste its id into a `mainnet` arm here.
+#[cfg(feature = "mainnet")]
+compile_error!(
+    "no mainnet BTC_LIGHT_CLIENT_PROGRAM_ID is configured — deploy btc-light-client to mainnet \
+     and add a #[cfg(feature = \"mainnet\")] arm before building for mainnet"
+);
+
 /// BTC Relay program ID — devnet (Ho6UTeF8yFnRdCK15tSZtcJozvkDABJZWYxkgGyWAfyq)
 #[cfg(not(any(feature = "localnet", feature = "devnet-regtest")))]
 pub const BTC_LIGHT_CLIENT_PROGRAM_ID: [u8; 32] = [
