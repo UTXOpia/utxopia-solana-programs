@@ -180,6 +180,45 @@ lands near **50 million**. That needs a ptau beyond any public ceremony, hundred
 hours per proof, against a chain producing a block every 75 seconds. Proposing it was an error of
 not costing the prover side; recorded here so it is not re-proposed.
 
+### 3.4 What the relay actually costs
+
+Fee parameters read from the live testnet4 open pool (`FezM7ksB…`): `deposit_fee_bps = 20`,
+`withdrawal_fee_bps = 20`, `service_fee_base = 2,000` sats. So a round trip earns **0.4% plus a
+flat 2,000 sats**.
+
+Relay cost, at 2 transactions per ZEC header against BTC's batch-of-10:
+
+| CU price (µlamports/CU) | ZEC SOL/yr | BTC SOL/yr | ratio |
+|---|---|---|---|
+| 0 (base fee only) | 4.2 | 0.03 | 160x |
+| 100 | 4.3 | 0.03 | 163x |
+| 1,000 | 5.0 | 0.03 | 188x |
+| 10,000 (heavy congestion) | 12.6 | 0.03 | 400x |
+
+**4–13 SOL/year is small in absolute terms**, and priority fees barely move it — the 5,000-lamport
+base fee dominates because the transaction count, not the compute, is what you are paying for.
+
+Two things that number hides:
+
+**It is 160–400x the Bitcoin relay.** BTC costs 0.03 SOL/year because 144 daily headers batch ten
+to a transaction at ~100k CU. ZEC cannot batch at all: one header does not fit in one transaction,
+let alone ten. The relay goes from *ten headers per transaction* to *half a header per
+transaction*, a 20x structural swing before any of the per-block frequency difference. Adding ZEC
+multiplies the bridge's fixed operating cost by two to three orders of magnitude.
+
+**Cost is per unit time; revenue is per unit volume.** Headers must be relayed continuously or the
+light client falls behind and verifies nothing, so the 4.2 SOL floor is paid on a week with zero
+users exactly as on a busy one. At 0.4% that floor needs roughly **2,000 SOL-equivalent of annual
+round-trip volume** to break even — about 5.5 SOL/day. Easy if the bridge is used; a permanent
+drain if it is not.
+
+There is also a currency mismatch worth naming: **costs are denominated in SOL, revenue in the
+bridged asset.** A SOL rally against ZEC raises the break-even volume without anything about the
+protocol changing.
+
+A 1.4M CU transaction is 2.9% of a Solana block's 48M CU budget, and ZEC needs two of them every
+75 seconds. That is a visible footprint even where it is not an expensive one.
+
 ### 3.4 Two more ZEC differences worth pricing
 
 - **Retargeting.** Zcash adjusts difficulty **every block** (DigiShield-style), not every 2016.
@@ -231,8 +270,8 @@ restriction that exists only because of a data-model limitation, and it is the p
 everything else.
 
 **ZEC can have the same trust model as BTC.** That was the open question and it is now closed:
-2.75M CU is expensive but not prohibitive, and resuming across two transactions costs a few
-thousand lamports per 75-second block. There is no need to put a checkpointed bridge and a
+2.75M CU is expensive but not prohibitive, and resuming across two transactions costs 4-13 SOL/year, which §3.4
+breaks down. There is no need to put a checkpointed bridge and a
 proof-of-work bridge in the same anonymity set, which is the outcome the first draft was braced
 for. Phase 4 should build the resumable verifier rather than reach for options C or D.
 
