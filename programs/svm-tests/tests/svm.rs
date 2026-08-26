@@ -37,6 +37,12 @@ const SYSTEM_ID: Pubkey = Pubkey::new_from_array([0u8; 32]);
 
 /// utxopia's compiled-in BTC_LIGHT_CLIENT_PROGRAM_ID for the Devnet-regtest
 /// artifact exercised by this suite.
+///
+/// NOTE: this pins the whole suite to a `cargo build-sbf --features devnet-regtest`
+/// artifact. Build with any other feature and `--features devnet` selects a different
+/// BTC_LIGHT_CLIENT_PROGRAM_ID, so every complete_deposit/complete_redemption test fails
+/// at the owner check with a misleading InvalidAccountOwner long before its real assertion.
+/// Run this suite via `bun run test:svm`, which builds the right artifact first.
 const BTC_LC_OWNER: [u8; 32] = [
     0x72, 0x4d, 0xf9, 0x1e, 0xc8, 0xc4, 0x80, 0x2c, 0x6a, 0x7c, 0x00, 0x7a, 0x03, 0x44, 0x91, 0x2c,
     0x89, 0xe8, 0x73, 0x4e, 0x07, 0x71, 0x59, 0x93, 0xb3, 0x9c, 0xc3, 0xad, 0x89, 0x36, 0x61, 0x67,
@@ -1050,8 +1056,8 @@ fn make_raw_header(parent_hash: &[u8; 32]) -> ([u8; 80], [u8; 32]) {
     raw[4..36].copy_from_slice(parent_hash);
     // merkle_root (bytes 36..68): all zero
     // timestamp (bytes 68..72): 0 → passes clock check
-    // bits (bytes 72..76): 0x1d00ffff — gives positive chainwork for regtest
-    let bits: u32 = 0x1d00_ffff;
+    // bits (bytes 72..76): 0x207fffff — regtest pow_limit.
+    let bits: u32 = 0x207f_ffff;
     raw[72..76].copy_from_slice(&bits.to_le_bytes());
     // nonce (bytes 76..80): 0
     let block_hash = double_sha256(&raw);

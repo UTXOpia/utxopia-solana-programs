@@ -12,6 +12,7 @@
     "test": "cargo test",
     "test:unit": "cargo test && bun test tests/unit",
     "test:integration": "bun test tests/**/*.test.ts",
+    "test:svm": "cargo build-sbf --features devnet-regtest && cargo test --manifest-path programs/svm-tests/Cargo.toml",
     "test:localnet": "bun scripts/e2e-localnet.ts",
     "test:regtest": "bun scripts/regtest-flow.ts",
     "relay:deposit": "bun scripts/relay-deposit.ts",
