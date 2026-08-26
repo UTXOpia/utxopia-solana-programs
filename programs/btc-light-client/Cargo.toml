@@ -13,6 +13,12 @@ default = []
 # Production build: compiles out the `reinitialize` admin instruction, which can otherwise
 # rewrite the chain head. MUST be set for mainnet deployments.
 mainnet = []
+# Network assertions. These gate nothing on their own — they exist so an on-chain build is
+# forced to state which network it is for (see the compile_error in lib.rs), which is what
+# stops a bare `cargo build-sbf` artifact from reaching mainnet with `reinitialize` live.
+devnet = []
+localnet = []
+devnet-regtest = ["devnet"]
 
 [dependencies]
 pinocchio = "0.9"

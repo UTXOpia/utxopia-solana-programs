@@ -97,13 +97,14 @@ pub fn process_mark_processing(
     let reservation_key =
         crate::utils::validation::redemption_reservation_key(redemption_info.address());
     // Re-validate Pending status here; Phase 3 transitions it to Processing.
-    {
+    let (redemption_amount_sats, redemption_service_fee) = {
         let redemption_data = redemption_info.try_borrow()?;
         let redemption = RedemptionRequest::from_bytes(&redemption_data)?;
         if redemption.get_status() != RedemptionStatus::Pending {
             return Err(UTXOpiaError::InvalidRedemptionState.into());
         }
-    }
+        (redemption.amount_sats(), redemption.service_fee())
+    };
 
     // --- Phase 1: Validate and read UTXO amounts, mark as Reserved ---
     let mut total_input_sats: u64 = 0;
@@ -173,6 +174,38 @@ pub fn process_mark_processing(
         // Mark as Reserved and bind to this specific redemption (by unique PDA-derived key).
         utxo.set_status(UtxoStatus::Reserved);
         utxo.set_reserved_for_request_id(reservation_key);
+    }
+
+    // Reject redundant inputs. The reserved set was caller-chosen and previously bounded only
+    // by MAX_UTXOS_PER_MARK, so a requester could reserve every UTXO in the pool for a dust
+    // redemption, cancel after the timeout for a full refund, and repeat — freezing redemption
+    // capacity at no cost. UTXOs are indivisible, so we cannot cap the total directly; instead
+    // require that no single input is superfluous, i.e. dropping the smallest one leaves the
+    // reservation unable to fund the payout. `required` uses the most generous admissible miner
+    // fee so this never rejects a reservation approve_redemption_signing would have accepted.
+    {
+        let send_amount = redemption_amount_sats
+            .checked_sub(redemption_service_fee)
+            .ok_or(ProgramError::InvalidArgument)?;
+        let max_miner_fee =
+            core::cmp::min(crate::utils::policy::MAX_MINER_FEE_SATS, redemption_service_fee);
+        let required = send_amount
+            .checked_add(max_miner_fee)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
+
+        // Fail early rather than leaving approve_redemption_signing to underflow.
+        if total_input_sats < required {
+            return Err(UTXOpiaError::InsufficientReservedInputs.into());
+        }
+
+        let smallest = utxo_amounts[..utxo_count]
+            .iter()
+            .copied()
+            .min()
+            .ok_or(ProgramError::InvalidInstructionData)?;
+        if total_input_sats.saturating_sub(smallest) >= required {
+            return Err(UTXOpiaError::ExcessiveReservedInputs.into());
+        }
     }
 
     // Commit to the canonical-ordered reserved input set. approve_redemption_signing

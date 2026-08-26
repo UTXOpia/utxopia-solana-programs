@@ -8,6 +8,29 @@ mod instructions;
 mod state;
 mod utils;
 
+// A deployable artifact must name its network. Without this, a bare `cargo build-sbf`
+// ships `process_reinitialize` — which rewrites the chain head — into whatever cluster
+// the operator happens to deploy to, and `network_allowed_in_build` simultaneously
+// accepts NETWORK_REGTEST. Scoped to the SBF target so host `cargo test` is unaffected.
+#[cfg(all(
+    target_os = "solana",
+    not(any(
+        feature = "mainnet",
+        feature = "devnet",
+        feature = "localnet",
+        feature = "devnet-regtest"
+    ))
+))]
+compile_error!(
+    "on-chain build must name its network: --features mainnet|devnet|devnet-regtest|localnet"
+);
+
+#[cfg(all(
+    feature = "mainnet",
+    any(feature = "devnet", feature = "localnet", feature = "devnet-regtest")
+))]
+compile_error!("feature `mainnet` is mutually exclusive with `devnet`/`localnet`/`devnet-regtest`");
+
 use pinocchio::{
     account_info::AccountInfo, entrypoint, program_error::ProgramError, pubkey::Pubkey,
     ProgramResult,

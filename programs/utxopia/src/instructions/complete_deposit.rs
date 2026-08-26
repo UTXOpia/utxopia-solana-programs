@@ -690,6 +690,18 @@ fn complete_deposit_inner(
             !d.is_empty() && d[0] == UTXO_RECORD_DISCRIMINATOR
         };
 
+        // Direct mode has no sweep: the SPV-verified tx IS the deposit, so its pool output
+        // cannot legitimately have been credited by an earlier completion. Sweep mode DOES
+        // re-use an existing record (several deposits consolidating into one pool output),
+        // which is why the receipt is keyed on `deposit_txid` rather than on the output.
+        // That asymmetry is exploitable: the same pool output can be completed twice —
+        // once as sweep(D -> S) keyed on D, then again as direct(S) keyed on S — minting
+        // `pool_output_value` both times against a single real deposit. The receipt PDAs
+        // differ so the dedup check above cannot see it; the output identity can.
+        if direct_to_pool && already_recorded {
+            return Err(UTXOpiaError::DuplicateDeposit.into());
+        }
+
         if !already_recorded {
             let rent = Rent::get()?;
             let utxo_bump_bytes = [utxo_bump];

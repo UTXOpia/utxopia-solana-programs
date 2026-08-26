@@ -35,6 +35,25 @@
 ))]
 compile_error!("feature `mainnet` is mutually exclusive with `devnet`/`localnet`/`devnet-regtest`");
 
+// ...and the other half of that assertion: a deployable artifact must NAME its network.
+// A bare `cargo build-sbf` produced a binary that silently took every default arm —
+// CHAIN_ID 103, the devnet BTC light client, the localnet ChadBuffer, and (in
+// verified_tx_reader) no network check at all — while being byte-indistinguishable in
+// intent from a production build. Scoped to the SBF target so host `cargo test`/`check`,
+// which legitimately build featureless, are unaffected.
+#[cfg(all(
+    target_os = "solana",
+    not(any(
+        feature = "mainnet",
+        feature = "devnet",
+        feature = "localnet",
+        feature = "devnet-regtest"
+    ))
+))]
+compile_error!(
+    "on-chain build must name its network: --features mainnet|devnet|devnet-regtest|localnet"
+);
+
 use crate::pinocchio_compat::{AccountInfo, ProgramError, Pubkey};
 #[cfg(not(feature = "no-entrypoint"))]
 use pinocchio::entrypoint;

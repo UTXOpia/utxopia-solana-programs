@@ -228,6 +228,12 @@ pub enum UTXOpiaError {
 
     #[error("This Ika dWallet is already the custody key of another pool")]
     DwalletAlreadyBound = 6099,
+
+    #[error("Reserved UTXOs do not cover the redemption payout")]
+    InsufficientReservedInputs = 6100,
+
+    #[error("Reserved UTXOs exceed what the redemption payout needs")]
+    ExcessiveReservedInputs = 6101,
 }
 
 impl From<UTXOpiaError> for ProgramError {

@@ -17,8 +17,8 @@ use crate::state::{
 };
 use crate::utils::crypto::compute_commitment;
 use crate::utils::{
-    close_account_securely, validate_account_writable, validate_program_owner,
-    validate_redemption_pda,
+    close_account_securely, validate_account_writable, validate_active_tree_pda,
+    validate_program_owner, validate_redemption_pda,
 };
 
 /// Upper bound on reserved UTXOs released by a single cancel (matches mark_processing).
@@ -97,6 +97,22 @@ pub fn process_cancel_redemption(
     validate_account_writable(pool_state_info)?;
     validate_account_writable(redemption_info)?;
     validate_account_writable(commitment_tree_info)?;
+
+    // Pin the tree to THIS pool's active tree. Without it `commitment_tree` is only
+    // checked for program ownership, so the re-minted note lands in whatever tree the
+    // caller passes — including another pool's, whose ledgers are never credited.
+    // Every sibling leaf-writer (shield/transact/unshield/redeem/complete_deposit)
+    // already does this; this instruction was the sole omission.
+    {
+        let pool_data = pool_state_info.try_borrow()?;
+        let pool = PoolState::from_bytes(&pool_data)?;
+        validate_active_tree_pda(
+            commitment_tree_info,
+            pool_state_info,
+            program_id,
+            pool.active_tree_index(),
+        )?;
+    }
 
     // Validate requester and status; capture amount, token_id, request_id, and whether the
     // request was Processing (only Processing redemptions reserved UTXOs that must be released).
