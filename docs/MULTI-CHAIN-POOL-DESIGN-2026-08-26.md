@@ -112,6 +112,23 @@ So Equihash verification **does not fit in one transaction**. It is about 2x ove
 is per *transaction*, not per instruction — splitting into several instructions inside one
 transaction shares the same 1.4M ceiling and buys nothing.
 
+**The whole cost is the missing syscall.** The same 128-byte block, hashed by each syscall Solana
+does expose, measured the same way:
+
+```
+sol_sha256        164 CU
+sol_keccak256     164 CU
+sol_blake3        164 CU
+BLAKE2b in BPF  5,380 CU        33x
+```
+
+They are flat-priced native code; BLAKE2b is interpreted. If BLAKE2b existed as a syscall priced
+like its siblings, Equihash-200,9 would cost **83,968 CU — 6% of a transaction**, less than the
+Groth16 verify this program already runs, and none of §3.3 would be a question at all.
+
+`sol_blake3` is not a substitute: the hash function is part of Zcash consensus, so it has to be
+BLAKE2b. There is no version of this where a different available hash works.
+
 My pre-measurement estimate in the first draft of this note was 700k–1M CU. It was low by ~3x,
 which is the reason the measurement was made blocking rather than assumed.
 
