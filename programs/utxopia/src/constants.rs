@@ -48,10 +48,28 @@ compile_error!(
      and add a #[cfg(feature = \"mainnet\")] arm before building for mainnet"
 );
 
-/// BTC Relay program ID — devnet (Ho6UTeF8yFnRdCK15tSZtcJozvkDABJZWYxkgGyWAfyq)
-#[cfg(not(any(feature = "localnet", feature = "devnet-regtest")))]
+/// BTC Light Client — devnet (4LZbktiNsiVAe2bwPCTPNgqiWWgZNUj4T3bDx8GZmehv)
+/// Solana devnet + Bitcoin testnet4. Deployed 2026-08-26; tracks TESTNET4 headers
+/// (network_byte=2). The previous pair (utxopia G1bj9Vw9…, LC C8JoSKzo…) was closed
+/// on chain, so this is a fresh deployment, not an upgrade of it.
+/// `devnet-regtest = ["devnet"]`, so this arm has to exclude it explicitly or
+/// both would define the constant — the same guard the localnet arm carries.
+#[cfg(all(feature = "devnet", not(feature = "devnet-regtest")))]
 pub const BTC_LIGHT_CLIENT_PROGRAM_ID: [u8; 32] = [
-    // Live devnet btc-light-client: C8JoSKzondM7X1ESwrBSodGMrXWtEWNmawXyjh9zEWJZ
+    0x31, 0x95, 0xf4, 0xcc, 0x87, 0xb0, 0x1d, 0x1b, 0x40, 0x51, 0xcc, 0xc5, 0x81, 0x2f, 0xda, 0xaa,
+    0xb8, 0x1b, 0x75, 0xfa, 0x37, 0xb9, 0x09, 0x2d, 0x55, 0xc2, 0x95, 0xd9, 0xd2, 0x08, 0x29, 0xf9,
+];
+
+/// BTC Light Client — no-feature default build only (`cargo check`, host tests).
+/// The value is the retired devnet id C8JoSKzondM7X1ESwrBSodGMrXWtEWNmawXyjh9zEWJZ,
+/// closed on chain: nothing deployable reaches this arm. `mainnet` is stopped by
+/// the compile_error above, and every named network has its own arm.
+///
+/// Until 2026-08-26 this arm was `not(any(localnet, devnet-regtest))`, so one
+/// value served both devnet and the default build. Deploying testnet4 split
+/// devnet out; what is left is the placeholder nobody deploys.
+#[cfg(not(any(feature = "localnet", feature = "devnet-regtest", feature = "devnet")))]
+pub const BTC_LIGHT_CLIENT_PROGRAM_ID: [u8; 32] = [
     0xa5, 0x4f, 0xbf, 0xc4, 0x89, 0x7f, 0xa5, 0x53, 0x1c, 0x76, 0xa4, 0x82, 0xba, 0xce, 0x0f, 0x72,
     0x9d, 0x18, 0x8b, 0xc4, 0x4e, 0x4d, 0xdb, 0xe9, 0xf2, 0x1d, 0x69, 0x81, 0xa2, 0x08, 0x41, 0xa6,
 ];
