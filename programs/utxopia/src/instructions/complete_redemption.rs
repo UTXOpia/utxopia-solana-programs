@@ -430,6 +430,21 @@ pub fn process_complete_redemption(
     };
     crate::state::assert_canonical_light_client(light_client_info.address(), &btc_lc_id)?;
 
+    // Same as complete_deposit: a VerifiedTransaction is a permanent record of a proof that was
+    // valid once, and `tip` only grows, so the confirmation count cannot detect a reorg that
+    // orphaned the block. Require live proof the block is still canonical (audit_1 F-BTC-04).
+    {
+        let vt_data = verified_tx_info.try_borrow()?;
+        let vt = VerifiedTransactionView::from_bytes(&vt_data)?;
+        crate::state::assert_block_still_canonical(
+            accounts,
+            block_height,
+            vt.block_hash(),
+            &btc_lc_id,
+        )
+        .map_err(|_| UTXOpiaError::RedemptionSpvFailed)?;
+    }
+
     // Verify sufficient confirmations
     {
         let lc_data = light_client_info.try_borrow()?;

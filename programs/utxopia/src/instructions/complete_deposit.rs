@@ -422,6 +422,22 @@ fn complete_deposit_inner(
     };
     crate::state::assert_canonical_light_client(light_client_info.address(), &btc_lc_id)?;
 
+    // The VerifiedTransaction proves a merkle proof was valid once; it is never invalidated.
+    // Require live proof that its block is STILL canonical at that height, or a reorg that
+    // orphaned the block leaves a proof that mints against a transaction no longer in the
+    // chain (audit_1 F-BTC-04). Located by address, so it can be appended in any position.
+    {
+        let vt_data = verified_tx_info.try_borrow()?;
+        let vt = VerifiedTransactionView::from_bytes(&vt_data)?;
+        crate::state::assert_block_still_canonical(
+            accounts,
+            ix_data.block_height,
+            vt.block_hash(),
+            &btc_lc_id,
+        )
+        .map_err(|_| UTXOpiaError::InvalidSpvProof)?;
+    }
+
     // Verify sufficient confirmations via light client tip height
     {
         let lc_data = light_client_info.try_borrow()?;

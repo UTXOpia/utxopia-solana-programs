@@ -60,6 +60,7 @@ const TOKEN_2022: [u8; 32] = [
 ];
 
 const INVALID_PDA: u32 = 6085; // UTXOpiaError::InvalidPDA
+const INVALID_SPV_PROOF: u32 = 6019; // UTXOpiaError::InvalidSpvProof
 
 fn so_dir() -> String {
     format!("{}/../../target/deploy", env!("CARGO_MANIFEST_DIR"))
@@ -211,6 +212,151 @@ fn complete_deposit_accepts_canonical_token_config() {
         !is_custom(&res.program_result, INVALID_PDA),
         "canonical token_config must pass the binding gate, got InvalidPDA"
     );
+}
+
+/// audit_1 F-BTC-04 — drive complete_deposit far enough to reach the SPV block.
+///
+/// The older complete_deposit fixture stops at the vault gate (custom 6081), well before any
+/// SPV code runs, so the reorg check had no execution-level coverage. This builds real PDAs for
+/// pool state, commitment tree, token config, deposit receipt, VerifiedTransaction and light
+/// client so execution reaches `assert_block_still_canonical`.
+///
+/// `hi` chooses what to supply for the HeightIndex account the check looks up by address.
+#[derive(Clone, Copy, PartialEq)]
+enum HeightIdx {
+    /// Names the same block the VerifiedTransaction does — still canonical.
+    Canonical,
+    /// Names a different block at that height — the reorg case.
+    Reorged,
+    /// Not passed at all. Must be an error, not a skipped check.
+    Omitted,
+}
+
+const CT_DISC: u8 = 0x05;
+const TC_DISC: u8 = 0x0B;
+const VT_DISC: u8 = 0x08;
+
+fn complete_deposit_spv_call(pid: &Pubkey, hi: HeightIdx) -> (Instruction, Vec<(Pubkey, Account)>) {
+    let token_2022 = Pubkey::new_from_array(TOKEN_2022);
+    let btc_lc = Pubkey::new_from_array(BTC_LC_OWNER);
+
+    // ix_data is 80 zero bytes, so sweep_txid = [0;32], deposit_txid = [0;32], block_height = 0.
+    let txid = [0u8; 32];
+    let block_hash = [0x55u8; 32];
+    let other_hash = [0x66u8; 32];
+    let height: u64 = 0;
+
+    let zkbtc_mint = Pubkey::new_unique();
+    let (pool_state, pool_bump) =
+        Pubkey::find_program_address(&[b"pool_state", zkbtc_mint.as_ref()], pid);
+    let (commitment_tree, _) = Pubkey::find_program_address(
+        &[b"commitment_tree", pool_state.as_ref(), &0u32.to_le_bytes()],
+        pid,
+    );
+    let (token_config, _) = Pubkey::find_program_address(
+        &[b"token_config", pool_state.as_ref(), zkbtc_mint.as_ref()],
+        pid,
+    );
+    let (deposit_receipt, _) = Pubkey::find_program_address(&[b"deposit_receipt", &txid], pid);
+    let (verified_tx, _) =
+        Pubkey::find_program_address(&[b"verified_tx", &block_hash, &txid], &btc_lc);
+    let (light_client, _) = Pubkey::find_program_address(&[b"btc_light_client"], &btc_lc);
+    let (height_index, _) =
+        Pubkey::find_program_address(&[b"height_index", &height.to_le_bytes()], &btc_lc);
+
+    let authority = Pubkey::new_unique();
+    let pool_vault = Pubkey::new_unique();
+    let tx_buffer = Pubkey::new_unique();
+    let deposit_tx_buffer = Pubkey::new_unique();
+    let utxo_record = Pubkey::new_unique();
+    let pool_config = Pubkey::new_unique();
+    let (system_key, system_acct) = keyed_account_for_system_program();
+
+    let mut metas = vec![
+        AccountMeta::new(pool_state, false),
+        AccountMeta::new_readonly(verified_tx, false),
+        AccountMeta::new_readonly(light_client, false),
+        AccountMeta::new(commitment_tree, false),
+        AccountMeta::new_readonly(tx_buffer, false),
+        AccountMeta::new(authority, true),
+        AccountMeta::new_readonly(system_key, false),
+        AccountMeta::new(zkbtc_mint, false),
+        AccountMeta::new(pool_vault, false),
+        AccountMeta::new_readonly(token_2022, false),
+        AccountMeta::new_readonly(deposit_tx_buffer, false),
+        AccountMeta::new(deposit_receipt, false),
+        AccountMeta::new(utxo_record, false),
+        AccountMeta::new(token_config, false),
+        AccountMeta::new_readonly(pool_config, false),
+    ];
+    if hi != HeightIdx::Omitted {
+        // Appended, not slotted at a fixed index — the check locates it by address.
+        metas.push(AccountMeta::new_readonly(height_index, false));
+    }
+
+    let mut data = vec![11u8];
+    data.extend_from_slice(&[0u8; 80]);
+    let ix = Instruction::new_with_bytes(*pid, &data, metas);
+
+    // PoolState: disc(0) bump(1) flags(2) _pad(3) authority(4..36) zkbtc_mint(36..68)
+    // pool_vault(68..100); max_deposit(180..188) must be non-zero or the later amount check
+    // would reject — it runs after the SPV block, but keep the fixture honest.
+    let mut pool = vec![0u8; POOL_LEN];
+    pool[0] = POOL_DISC;
+    pool[1] = pool_bump;
+    pool[4..36].copy_from_slice(authority.as_ref());
+    pool[36..68].copy_from_slice(zkbtc_mint.as_ref());
+    pool[68..100].copy_from_slice(pool_vault.as_ref());
+    pool[180..188].copy_from_slice(&u64::MAX.to_le_bytes());
+
+    // TokenConfig: disc(0) bump(1) mint(2..34) token_id(34..66) vault(66..98)
+    // decimals(98) enabled(99) ... max_deposit(116..124)
+    let mut tc = vec![0u8; 164];
+    tc[0] = TC_DISC;
+    tc[2..34].copy_from_slice(zkbtc_mint.as_ref());
+    tc[66..98].copy_from_slice(pool_vault.as_ref());
+    tc[99] = 1; // enabled
+    tc[116..124].copy_from_slice(&u64::MAX.to_le_bytes());
+
+    // VerifiedTransaction: disc(0) bump(1) _pad(2..4) block_height(4..8) block_hash(8..40)
+    // txid(40..72) verified_at(72..80) tx_index(80..84) reinit_epoch(84..88)
+    let mut vt = vec![0u8; 120];
+    vt[0] = VT_DISC;
+    vt[4..8].copy_from_slice(&(height as u32).to_le_bytes());
+    vt[8..40].copy_from_slice(&block_hash);
+    vt[40..72].copy_from_slice(&txid);
+
+    let mut ct = vec![0u8; 64];
+    ct[0] = CT_DISC;
+
+    let mut accounts = vec![
+        (pool_state, acct(1_000_000, pool, *pid)),
+        (verified_tx, acct(1_000_000, vt, btc_lc)),
+        (light_client, acct(1_000_000, lc_blob_for_extend(100, 100), btc_lc)),
+        (commitment_tree, acct(1_000_000, ct, *pid)),
+        (tx_buffer, acct(1, vec![], SYSTEM_ID)),
+        (authority, acct(10_000_000_000, vec![], SYSTEM_ID)),
+        (system_key, system_acct),
+        (zkbtc_mint, acct(1, vec![0u8; 8], token_2022)),
+        (pool_vault, acct(1, vec![0u8; 8], token_2022)),
+        (token_2022, acct(1, vec![], SYSTEM_ID)),
+        (deposit_tx_buffer, acct(1, vec![], SYSTEM_ID)),
+        (deposit_receipt, acct(0, vec![], SYSTEM_ID)),
+        (utxo_record, acct(0, vec![], SYSTEM_ID)),
+        (token_config, acct(1_000_000, tc, *pid)),
+        (pool_config, acct(1, vec![], *pid)),
+    ];
+    match hi {
+        HeightIdx::Canonical => {
+            accounts.push((height_index, acct(1_000_000, height_index_blob(&block_hash, height), btc_lc)))
+        }
+        HeightIdx::Reorged => {
+            accounts.push((height_index, acct(1_000_000, height_index_blob(&other_hash, height), btc_lc)))
+        }
+        HeightIdx::Omitted => {}
+    }
+
+    (ix, accounts)
 }
 
 // ----------------------------------------------------------------------------
@@ -1694,6 +1840,51 @@ fn shield_permissioned_accepts_a_depositor_with_a_registered_exit() {
     assert!(
         !is_custom(&res.program_result, EXIT_DESTINATION_NOT_REGISTERED),
         "a registered depositor must clear the exit gate, got {:?}",
+        res.program_result
+    );
+}
+
+
+/// audit_1 F-BTC-04: a VerifiedTransaction is a permanent record of a proof that was valid
+/// once. `assert_canonical_verified_tx` re-derives the PDA from the block hash and txid stored
+/// inside that same account, so it cannot notice a reorg, and the confirmation count is computed
+/// against `tip`, which only grows. Without a live HeightIndex lookup, a deposit settles against
+/// a transaction that is no longer in the chain.
+///
+/// InvalidSpvProof (6019) is the check firing. The canonical case must get PAST it — it then
+/// fails at the ChadBuffer owner check with the builtin InvalidAccountOwner, which is a
+/// different error and proves execution moved on rather than tripping the same gate.
+#[test]
+fn complete_deposit_requires_the_block_to_still_be_canonical() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "utxopia");
+
+    // Reorged: the height index has moved on to a different block at that height.
+    let (ix, accounts) = complete_deposit_spv_call(&pid, HeightIdx::Reorged);
+    let res = mollusk.process_instruction(&ix, &accounts);
+    assert!(
+        is_custom(&res.program_result, INVALID_SPV_PROOF),
+        "a reorged-out block must be rejected, got {:?}",
+        res.program_result
+    );
+
+    // Omitted: an absent account must be an error, never a skipped check — that is exactly
+    // what made the F-BTC-03 fork-point gate bypassable.
+    let (ix, accounts) = complete_deposit_spv_call(&pid, HeightIdx::Omitted);
+    let res = mollusk.process_instruction(&ix, &accounts);
+    assert!(
+        is_custom(&res.program_result, INVALID_SPV_PROOF),
+        "omitting the HeightIndex must not silently skip the check, got {:?}",
+        res.program_result
+    );
+
+    // Canonical: passes, and stops somewhere else entirely.
+    let (ix, accounts) = complete_deposit_spv_call(&pid, HeightIdx::Canonical);
+    let res = mollusk.process_instruction(&ix, &accounts);
+    assert!(
+        !is_custom(&res.program_result, INVALID_SPV_PROOF),
+        "a still-canonical block must pass the check, got {:?}",
         res.program_result
     );
 }

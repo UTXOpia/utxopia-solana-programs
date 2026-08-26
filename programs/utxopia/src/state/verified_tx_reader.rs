@@ -3,7 +3,7 @@
 //! Lightweight module to read btc-light-client accounts from utxopia.
 //! No Borsh, just zero-copy byte reading.
 
-use crate::pinocchio_compat::{find_program_address, ProgramError, Pubkey};
+use crate::pinocchio_compat::{find_program_address, AccountInfo, ProgramError, Pubkey};
 
 /// Discriminator for VerifiedTransaction account (must match btc-light-client)
 pub const VERIFIED_TX_DISCRIMINATOR: u8 = 0x08;
@@ -177,4 +177,143 @@ pub fn assert_verified_tx_current_epoch(
         return Err(ProgramError::InvalidAccountData);
     }
     Ok(())
+}
+
+/// PDA seed for HeightIndex (must match btc-light-client)
+pub const HEIGHT_INDEX_SEED: &[u8] = b"height_index";
+
+/// Discriminator for HeightIndex account (must match btc-light-client)
+pub const HEIGHT_INDEX_DISCRIMINATOR: u8 = 0x09;
+
+/// HeightIndex layout: disc(1) + bump(1) + _padding(6) + block_hash(32) + height(8)
+const HEIGHT_INDEX_LEN: usize = 48;
+
+/// Require live proof that `block_hash` is *still* the canonical block at `block_height`.
+///
+/// A `VerifiedTransaction` PDA is a permanent record of a merkle proof that was valid when
+/// `verify_transaction` ran. Nothing ever invalidates one. `assert_canonical_verified_tx`
+/// re-derives the PDA from the block hash and txid stored *inside that same account*, so it
+/// proves the account was minted by the light client and nothing about whether the fact still
+/// holds; and the confirmation count is computed against `tip`, which only grows, so it is
+/// vacuous for a stale proof. After a reorg that orphans the block, both checks still pass and
+/// the deposit or redemption settles against a transaction that is no longer in the chain
+/// (audit_1 F-BTC-04).
+///
+/// `HeightIndex` is what btc-light-client's own `verify_transaction` treats as the canonicality
+/// oracle, so consulting it here puts the spend path on the same footing.
+///
+/// The account is located by address rather than by a fixed index: its PDA is fully determined
+/// by `block_height`, which comes from the PDA-pinned `VerifiedTransaction`, and the four entry
+/// points into these instructions have different trailing-account layouts. Callers append it
+/// anywhere. Absence is an error, never a skip — an optional check is not a check (that is what
+/// made F-BTC-03 bypassable).
+pub fn assert_block_still_canonical(
+    accounts: &[AccountInfo],
+    block_height: u64,
+    block_hash: &[u8; 32],
+    btc_lc_id: &Pubkey,
+) -> Result<(), ProgramError> {
+    let height_le = block_height.to_le_bytes();
+    let (expected, _) = find_program_address(&[HEIGHT_INDEX_SEED, &height_le], btc_lc_id);
+
+    let hi = accounts
+        .iter()
+        .find(|a| a.address().as_ref() == expected.as_ref())
+        .ok_or(ProgramError::NotEnoughAccountKeys)?;
+
+    if crate::pinocchio_compat::account_owner(hi) != btc_lc_id {
+        return Err(ProgramError::IllegalOwner);
+    }
+
+    let data = hi.try_borrow()?;
+    check_height_index_bytes(&data, &height_le, block_hash)
+}
+
+/// Byte-level half of [`assert_block_still_canonical`], split out so the layout can be tested
+/// on the host — offsets into a foreign program's account are where this goes wrong, and they
+/// cannot drift silently if a test pins them.
+pub fn check_height_index_bytes(
+    data: &[u8],
+    height_le: &[u8; 8],
+    block_hash: &[u8; 32],
+) -> Result<(), ProgramError> {
+    if data.len() < HEIGHT_INDEX_LEN || data[0] != HEIGHT_INDEX_DISCRIMINATOR {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    // Redundant with the seed, but the seed only proves the address; this proves the account
+    // agrees about which height it indexes.
+    if &data[40..48] != height_le {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    if data[8..40] != block_hash[..] {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod height_index_tests {
+    use super::*;
+
+    /// Mirrors btc-light-client's `HeightIndex`:
+    /// disc(1) + bump(1) + _padding(6) + block_hash(32) + height(8) = 48.
+    fn blob(disc: u8, block_hash: &[u8; 32], height: u64) -> [u8; 48] {
+        let mut d = [0u8; 48];
+        d[0] = disc;
+        d[1] = 254; // bump — must not be read as anything
+        d[8..40].copy_from_slice(block_hash);
+        d[40..48].copy_from_slice(&height.to_le_bytes());
+        d
+    }
+
+    #[test]
+    fn accepts_the_canonical_block_at_that_height() {
+        let hash = [0xABu8; 32];
+        let d = blob(HEIGHT_INDEX_DISCRIMINATOR, &hash, 149_843);
+        assert!(check_height_index_bytes(&d, &149_843u64.to_le_bytes(), &hash).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_reorged_block_at_the_same_height() {
+        // The exact F-BTC-04 shape: a VerifiedTransaction still names the orphan, while the
+        // height index has moved on to the block that actually won.
+        let orphan = [0xABu8; 32];
+        let winner = [0xCDu8; 32];
+        let d = blob(HEIGHT_INDEX_DISCRIMINATOR, &winner, 149_843);
+        assert!(check_height_index_bytes(&d, &149_843u64.to_le_bytes(), &orphan).is_err());
+        assert!(check_height_index_bytes(&d, &149_843u64.to_le_bytes(), &winner).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_height_index_for_a_different_height() {
+        let hash = [0xABu8; 32];
+        let d = blob(HEIGHT_INDEX_DISCRIMINATOR, &hash, 149_843);
+        assert!(check_height_index_bytes(&d, &149_844u64.to_le_bytes(), &hash).is_err());
+    }
+
+    #[test]
+    fn rejects_wrong_discriminator_and_short_data() {
+        let hash = [0xABu8; 32];
+        let h = 149_843u64.to_le_bytes();
+        // 0x07 is BlockHeader, 0x08 VerifiedTransaction — both are btc-light-client-owned, so
+        // the owner check upstream does not separate them. Only the discriminator does.
+        for wrong in [0x00u8, 0x06, 0x07, 0x08] {
+            let d = blob(wrong, &hash, 149_843);
+            assert!(check_height_index_bytes(&d, &h, &hash).is_err(), "disc {wrong:#04x}");
+        }
+        let d = blob(HEIGHT_INDEX_DISCRIMINATOR, &hash, 149_843);
+        assert!(check_height_index_bytes(&d[..47], &h, &hash).is_err());
+    }
+
+    /// If HeightIndex ever grows, the fields we read must not move. Pins the offsets against
+    /// the layout comment rather than against our own constructor.
+    #[test]
+    fn offsets_match_the_btc_light_client_layout() {
+        let hash = [0x11u8; 32];
+        let d = blob(HEIGHT_INDEX_DISCRIMINATOR, &hash, 0x0203_0405_0607_0809);
+        assert_eq!(d[0], HEIGHT_INDEX_DISCRIMINATOR);
+        assert_eq!(&d[8..40], &hash[..]);
+        assert_eq!(u64::from_le_bytes(d[40..48].try_into().unwrap()), 0x0203_0405_0607_0809);
+        assert_eq!(HEIGHT_INDEX_LEN, 48);
+    }
 }
