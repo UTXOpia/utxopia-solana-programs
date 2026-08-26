@@ -39,6 +39,7 @@ fn blake2b_compression_cost() {
     let (sha, _, _) = per_of(1);
     let (keccak, _, _) = per_of(2);
     let (blake3, _, _) = per_of(3);
+    let (fast, _, _) = per_of(4);
 
     let equihash_hashes = 512u64;
     let projected = per * equihash_hashes;
@@ -60,7 +61,14 @@ fn blake2b_compression_cost() {
     println!("    sol_sha256         {sha:>10} CU");
     println!("    sol_keccak256      {keccak:>10} CU");
     println!("    sol_blake3         {blake3:>10} CU");
-    println!("    BLAKE2b in BPF     {per:>10} CU   <- no syscall exists");
+    println!("    BLAKE2b reference  {per:>10} CU   <- no syscall exists");
+    println!("    BLAKE2b optimised  {fast:>10} CU   <- same fn, state in registers");
+    println!();
+    let fast_projected = fast * equihash_hashes;
+    println!();
+    println!("    Optimised Equihash {fast_projected:>10} CU  ({:.1}% of budget, {:.1}x faster)",
+        fast_projected as f64 / LIMIT as f64 * 100.0, projected as f64 / fast_projected as f64);
+    println!("    fits in one tx?    {:>10}", if fast_projected < LIMIT { "YES" } else { "no" });
     println!();
     let hypothetical = blake3 * equihash_hashes;
     println!("    If BLAKE2b were a syscall priced like blake3:");

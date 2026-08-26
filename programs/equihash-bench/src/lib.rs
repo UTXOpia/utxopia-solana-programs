@@ -6,7 +6,7 @@
 //! whether ZEC can share Bitcoin's trust model or has to be a checkpointed bridge.
 //!
 //! Instruction data: mode(1) + u16 LE count.
-//!   0 = BLAKE2b compressions in BPF
+//!   0 = BLAKE2b compressions, reference    4 = same, register-resident (compress_fast)
 //!   1 = sol_sha256 calls        2 = sol_keccak256 calls        3 = sol_blake3 calls
 //! Modes 1-3 exist to price the same work as a syscall: they hash the same 128-byte block, so
 //! the difference against mode 0 is exactly what the missing BLAKE2b syscall costs.
@@ -44,6 +44,14 @@ fn process_instruction(_id: &Pubkey, _accounts: &[AccountInfo], data: &[u8]) -> 
             for i in 0..rounds {
                 block[0..2].copy_from_slice(&i.to_le_bytes());
                 blake2b::compress(&mut h, &block, i as u128, false);
+            }
+            out[0..8].copy_from_slice(&h[0].to_le_bytes());
+        }
+        4 => {
+            let mut h = [0u64; 8];
+            for i in 0..rounds {
+                block[0..2].copy_from_slice(&i.to_le_bytes());
+                blake2b::compress_fast(&mut h, &block, i as u128, false);
             }
             out[0..8].copy_from_slice(&h[0].to_le_bytes());
         }

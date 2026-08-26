@@ -129,6 +129,30 @@ Groth16 verify this program already runs, and none of §3.3 would be a question 
 `sol_blake3` is not a substitute: the hash function is part of Zcash consensus, so it has to be
 BLAKE2b. There is no version of this where a different available hash works.
 
+**No syscall helps inside the computation either.** sha256/keccak256/blake3 are whole hash
+functions, not round primitives you can call for a G-function; `big_mod_exp`, `alt_bn128_*`,
+`curve_*` and `poseidon` are unrelated operations. The compression is 64-bit adds, XORs and
+rotations, and none of that is exposed.
+
+**What optimisation does buy: 1.4x, and then nothing.**
+
+```
+reference (state in arrays)      5,380 CU
+state in named locals            3,889 CU     1.4x
++ unaligned 64-bit message loads 3,889 CU     no change
++ SIGMA folded to literal indices 3,889 CU    no change
+```
+
+Holding the sixteen working words in named locals instead of `v[a]` with runtime indices is worth
+28%. Everything after that is free: LLVM had already turned the 128 single-byte message loads into
+wide loads and already constant-folded the SIGMA lookups, so writing them explicitly changed the
+artifact not at all. Recorded because it is the obvious next thing to try and it does not work.
+
+3,889 CU is close to the floor. BPF has no rotate instruction, so each `rotate_right` is three
+instructions; one G-function is ~21 instructions minimum and there are 96 of them, putting the
+arithmetic alone at ~2,000 CU. Equihash lands at **1,991,168 CU — 142% of a transaction**, i.e.
+**two** transactions rather than the three the unoptimised number implied.
+
 My pre-measurement estimate in the first draft of this note was 700k–1M CU. It was low by ~3x,
 which is the reason the measurement was made blocking rather than assumed.
 
@@ -136,12 +160,12 @@ which is the reason the measurement was made blocking rather than assumed.
 
 | Option | Trust model | Verdict |
 |---|---|---|
-| **A. Verification resumed across transactions.** Partial BLAKE2b state in a PDA; ~3 transactions per header. | **Full proof-of-work** | **Viable, and the recommendation** |
+| **A. Verification resumed across transactions.** Partial BLAKE2b state in a PDA; 2 transactions per header. | **Full proof-of-work** | **Viable, and the recommendation** |
 | B. Prove Equihash off-chain with Groth16. | Full PoW | **Not viable — see below** |
 | C. Skip Equihash; chain linkage + difficulty + compiled-in checkpoint. | Checkpointed, not PoW | Cheap; honest only if labelled as such |
 | D. N-of-M relayer attestation. | Federated | Small; a different product |
 
-**A is the answer, and it was missing from the first draft.** 2.75M CU is roughly two
+**A is the answer, and it was missing from the first draft.** 2.0M CU after optimisation is two
 transactions' worth, and Zcash blocks are ~75 seconds apart — three transactions per header is a
 trivial ongoing cost. The pattern already exists in this codebase: ChadBuffer stages oversized
 transaction data across calls for exactly this reason. A resumable Equihash verifier holds its
@@ -175,7 +199,7 @@ Each phase is independently valuable; nothing here is all-or-nothing.
 **Phase 0 — measure Equihash. DONE, 2026-08-26.** 5,380 CU per compression, 2.75M for a header,
 197% of a transaction. Implementation and benchmark in `programs/equihash-bench` (workspace-
 excluded; delete once this note is settled). BLAKE2b is validated against RFC 7693 Appendix A.
-Answer: native verification is possible but must be **resumed across ~3 transactions**, so ZEC can
+Answer: native verification is possible but must be **resumed across 2 transactions**, so ZEC can
 have Bitcoin's trust model. Option A in §3.3.
 
 **Phase 1 — per-asset bridge accounting.** Move `total_btc_held`, `utxo_count`,
@@ -207,7 +231,7 @@ restriction that exists only because of a data-model limitation, and it is the p
 everything else.
 
 **ZEC can have the same trust model as BTC.** That was the open question and it is now closed:
-2.75M CU is expensive but not prohibitive, and resuming across three transactions costs a few
+2.75M CU is expensive but not prohibitive, and resuming across two transactions costs a few
 thousand lamports per 75-second block. There is no need to put a checkpointed bridge and a
 proof-of-work bridge in the same anonymity set, which is the outcome the first draft was braced
 for. Phase 4 should build the resumable verifier rather than reach for options C or D.
