@@ -123,8 +123,35 @@ pub fn light_client_tip_height(data: &[u8]) -> Result<u64, ProgramError> {
 
 /// Bitcoin network the light client tracks (`BitcoinLightClient.network`, offset 3).
 /// 0 = mainnet, 1 = testnet3, 2 = testnet4, 3 = regtest.
+///
+/// The network this build's light client MUST be tracking, or `None` for a featureless host
+/// build (`cargo test`/`check`) which never reads a real client — an SBF build with no network
+/// feature is already a `compile_error!` in `lib.rs`. `localnet + devnet` together match two
+/// arms and fail loudly as a duplicate definition, which is the same way the light-client
+/// program id behaves.
+///
+/// Verified against the deployed clients on 2026-08-28: the devnet client
+/// (`9MBq6FCqw1tSh7Vn7rJjWEz8pRcZ5R6mfEzgALiAJwM9`) reports 2, the devnet-regtest client
+/// (`F7w1wWioDcKjoQkgqFZBbSATB3mxReFRJSBEJTn3CopZ`) reports 3.
 #[cfg(feature = "mainnet")]
-const NETWORK_MAINNET: u8 = 0;
+const EXPECTED_NETWORK: Option<u8> = Some(0);
+#[cfg(all(
+    not(feature = "mainnet"),
+    feature = "devnet",
+    not(feature = "devnet-regtest")
+))]
+const EXPECTED_NETWORK: Option<u8> = Some(2);
+#[cfg(all(
+    not(feature = "mainnet"),
+    any(feature = "devnet-regtest", feature = "localnet")
+))]
+const EXPECTED_NETWORK: Option<u8> = Some(3);
+#[cfg(all(
+    not(feature = "mainnet"),
+    not(feature = "devnet"),
+    not(feature = "localnet")
+))]
+const EXPECTED_NETWORK: Option<u8> = None;
 
 /// Reject a light client that is not tracking the network this build is for.
 ///
@@ -132,7 +159,14 @@ const NETWORK_MAINNET: u8 = 0;
 /// backs it" — but every consensus rule in btc-light-client (PoW, difficulty, median-time-past)
 /// is gated on that one `network` byte, and nothing on this side used to look at it. A light
 /// client pointed at regtest satisfies the same PDA derivation while checking nothing, so a
-/// mainnet build must refuse to read one. Cheap: one byte, once per SPV consumer.
+/// build must refuse to read a client tracking anything but its own network. Cheap: one byte,
+/// once per SPV consumer.
+///
+/// This used to be gated on `#[cfg(feature = "mainnet")]`, which meant the devnet build — the
+/// one actually deployed — performed no check at all, while carrying `process_reinitialize`
+/// (compiled in for every non-mainnet flavour) that can rewrite `network` to regtest. A devnet
+/// light-client admin could therefore turn the whole SPV layer into "verify nothing" and this
+/// side would not notice (audit_2 N-6).
 pub fn assert_light_client_network(data: &[u8]) -> Result<(), ProgramError> {
     if data.len() < LIGHT_CLIENT_MIN_LEN {
         return Err(ProgramError::InvalidAccountData);
@@ -140,9 +174,10 @@ pub fn assert_light_client_network(data: &[u8]) -> Result<(), ProgramError> {
     if data[0] != BTC_LIGHT_CLIENT_DISCRIMINATOR {
         return Err(ProgramError::InvalidAccountData);
     }
-    #[cfg(feature = "mainnet")]
-    if data[3] != NETWORK_MAINNET {
-        return Err(ProgramError::InvalidAccountData);
+    if let Some(expected) = EXPECTED_NETWORK {
+        if data[3] != expected {
+            return Err(ProgramError::InvalidAccountData);
+        }
     }
     Ok(())
 }
