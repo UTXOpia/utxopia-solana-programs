@@ -334,6 +334,12 @@ pub fn process_verify_deposit(
         return Err(ProgramError::MissingRequiredSignature);
     }
 
+    // Exact length: disc 26 consumes a tail as auditor ciphertext and binds the whole payload
+    // into its policy request hash, but disc 25 has no tail and reads none, so trailing bytes
+    // here are silently discarded. `from_bytes` keeps `<` because disc 26 shares it.
+    if data.len() != VerifyDepositData::SIZE {
+        return Err(ProgramError::InvalidInstructionData);
+    }
     let ix_data = VerifyDepositData::from_bytes(data)?;
 
     // No sweep: the SPV-verified transaction IS the deposit, so there is no second
