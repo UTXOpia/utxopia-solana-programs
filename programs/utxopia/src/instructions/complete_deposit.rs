@@ -1132,83 +1132,84 @@ fn complete_deposit_inner(
             !d.is_empty() && d[0] == UTXO_RECORD_DISCRIMINATOR
         };
 
-        // Direct mode has no sweep: the SPV-verified tx IS the deposit, so its pool output
-        // cannot legitimately have been credited by an earlier completion. Sweep mode DOES
-        // re-use an existing record (several deposits consolidating into one pool output),
-        // which is why the receipt is keyed on `deposit_txid` rather than on the output.
-        // That asymmetry is exploitable: the same pool output can be completed twice —
-        // once as sweep(D -> S) keyed on D, then again as direct(S) keyed on S — minting
-        // `pool_output_value` both times against a single real deposit. The receipt PDAs
-        // differ so the dedup check above cannot see it; the output identity can.
-        // A tweak-bound deposit output is named by its own receipt, so it can
-        // never legitimately have been credited by an earlier completion either.
-        if (direct_to_pool || tweak_credited.is_some()) && already_recorded {
+        // A pool output may be credited exactly once, whichever mode names it. The receipt
+        // dedup above cannot see across modes — sweep mode keys on `deposit_txid`, direct and
+        // tweak modes on the output — so the output's own identity is what closes the gap:
+        // complete once as direct(S), again as sweep(D -> S), and the two receipts are
+        // different PDAs while `mint_zkbtc` below runs both times, issuing twice the custody
+        // value against one real deposit (audit_2 F-DEP-01).
+        //
+        // This used to be conditional on the *current* call being direct or tweak mode, to let
+        // sweep mode re-use a record for several deposits consolidating into one pool output.
+        // That allowance was already dead: the sweep branch rejects `input_count() != 1` (see
+        // above), so one sweep credits exactly one deposit and no two legitimate completions
+        // can ever name the same `(sweep_txid, sweep_vout)`. Being unconditional costs nothing
+        // and closes both orderings rather than only sweep-then-direct.
+        if already_recorded {
             return Err(UTXOpiaError::DuplicateDeposit.into());
         }
 
-        if !already_recorded {
-            let rent = Rent::get()?;
-            let utxo_bump_bytes = [utxo_bump];
-            let utxo_signer_seeds: &[&[u8]] = &[
-                UtxoRecord::SEED,
-                pool_state_info.address().as_ref(),
-                &ix_data.sweep_txid,
-                &vout_le,
-                &utxo_bump_bytes,
-            ];
+        let rent = Rent::get()?;
+        let utxo_bump_bytes = [utxo_bump];
+        let utxo_signer_seeds: &[&[u8]] = &[
+            UtxoRecord::SEED,
+            pool_state_info.address().as_ref(),
+            &ix_data.sweep_txid,
+            &vout_le,
+            &utxo_bump_bytes,
+        ];
 
-            // A tweak-bound deposit's UTXO sits at its own address, spendable only
-            // through the tapleaf. Redemption has to rebuild that leaf, and the
-            // commitment is the only half of it not already on chain — so it is
-            // stored here, at credit time, or it is lost. There is no fallback:
-            // the key path is a NUMS point.
-            let leaf_commitment = match binding {
-                DepositBinding::Tweak { .. } => {
-                    Some(tweak_commitment(&note_public_key, &ephemeral_pubkey))
-                }
-                DepositBinding::OpReturn => None,
-            };
-            let account_len = if leaf_commitment.is_some() {
-                UtxoRecord::LEN_WITH_LEAF
-            } else {
-                UtxoRecord::LEN
-            };
-
-            create_pda_account(
-                authority,
-                utxo_record_info,
-                program_id,
-                rent.try_minimum_balance(account_len)?,
-                account_len as u64,
-                utxo_signer_seeds,
-            )?;
-
-            {
-                let mut utxo_data = utxo_record_info.try_borrow_mut()?;
-                let utxo = UtxoRecord::init(&mut utxo_data)?;
-                utxo.set_txid(&ix_data.sweep_txid);
-                utxo.set_vout(sweep_vout);
-                utxo.set_amount_sats(pool_output_value);
-                // status defaults to Unspent (0)
-
-                if let Some(commitment) = leaf_commitment {
-                    UtxoRecord::set_leaf_commitment(&mut utxo_data, &commitment)?;
-                }
+        // A tweak-bound deposit's UTXO sits at its own address, spendable only
+        // through the tapleaf. Redemption has to rebuild that leaf, and the
+        // commitment is the only half of it not already on chain — so it is
+        // stored here, at credit time, or it is lost. There is no fallback:
+        // the key path is a NUMS point.
+        let leaf_commitment = match binding {
+            DepositBinding::Tweak { .. } => {
+                Some(tweak_commitment(&note_public_key, &ephemeral_pubkey))
             }
+            DepositBinding::OpReturn => None,
+        };
+        let account_len = if leaf_commitment.is_some() {
+            UtxoRecord::LEN_WITH_LEAF
+        } else {
+            UtxoRecord::LEN
+        };
 
-            // Track the spendable BTC exactly once for this pool output.
-            {
-                let mut pool_data = pool_state_info.try_borrow_mut()?;
-                let pool = PoolState::from_bytes_mut(&mut pool_data)?;
-                pool.add_utxo(pool_output_value)?;
+        create_pda_account(
+            authority,
+            utxo_record_info,
+            program_id,
+            rent.try_minimum_balance(account_len)?,
+            account_len as u64,
+            utxo_signer_seeds,
+        )?;
+
+        {
+            let mut utxo_data = utxo_record_info.try_borrow_mut()?;
+            let utxo = UtxoRecord::init(&mut utxo_data)?;
+            utxo.set_txid(&ix_data.sweep_txid);
+            utxo.set_vout(sweep_vout);
+            utxo.set_amount_sats(pool_output_value);
+            // status defaults to Unspent (0)
+
+            if let Some(commitment) = leaf_commitment {
+                UtxoRecord::set_leaf_commitment(&mut utxo_data, &commitment)?;
             }
-
-            crate::utils::events::emit_utxo_created(
-                &ix_data.sweep_txid,
-                sweep_vout,
-                pool_output_value,
-            );
         }
+
+        // Track the spendable BTC exactly once for this pool output.
+        {
+            let mut pool_data = pool_state_info.try_borrow_mut()?;
+            let pool = PoolState::from_bytes_mut(&mut pool_data)?;
+            pool.add_utxo(pool_output_value)?;
+        }
+
+        crate::utils::events::emit_utxo_created(
+            &ix_data.sweep_txid,
+            sweep_vout,
+            pool_output_value,
+        );
     }
 
     // Mint zkBTC into the pool vault for the FULL deposit (shielded liability + fee).
