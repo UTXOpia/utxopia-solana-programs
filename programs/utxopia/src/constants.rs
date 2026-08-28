@@ -42,11 +42,24 @@ pub const BTC_LIGHT_CLIENT_PROGRAM_ID: [u8; 32] = [
 // SPV proof against the DEVNET light client. It fails closed (the PDA pin in verified_tx_reader
 // rejects the account, which does not exist on mainnet), but only after deploy. Fail at build
 // time instead: deploy the light client, then paste its id into a `mainnet` arm here.
-#[cfg(feature = "mainnet")]
+// Scoped to the SBF target, for the same reason `lib.rs`'s network guard is: a *deployable*
+// mainnet artifact must not exist while this is unset, but a host `cargo check`/`test` must be
+// able to build one so the mainnet-only code paths are type-checked and exercised at all.
+// Without that, every `--features mainnet` conclusion in the audits is analytic — nothing has
+// ever compiled those branches, let alone run them.
+#[cfg(all(feature = "mainnet", target_os = "solana"))]
 compile_error!(
     "no mainnet BTC_LIGHT_CLIENT_PROGRAM_ID is configured — deploy btc-light-client to mainnet \
      and add a #[cfg(feature = \"mainnet\")] arm before building for mainnet"
 );
+
+/// Host-only placeholder so `--features mainnet` type-checks off-chain. Deliberately the zero
+/// address: it is not a valid deployed program, `assert_canonical_light_client` pins the light
+/// client PDA under it and would reject anything, and the SBF guard above means this value can
+/// never reach a deployable artifact. Replace it — and delete the guard — with the real id once
+/// btc-light-client is deployed to mainnet.
+#[cfg(all(feature = "mainnet", not(target_os = "solana")))]
+pub const BTC_LIGHT_CLIENT_PROGRAM_ID: [u8; 32] = [0u8; 32];
 
 /// BTC Light Client — devnet (4LZbktiNsiVAe2bwPCTPNgqiWWgZNUj4T3bDx8GZmehv)
 /// Solana devnet + Bitcoin testnet4. Deployed 2026-08-26; tracks TESTNET4 headers
@@ -62,13 +75,20 @@ pub const BTC_LIGHT_CLIENT_PROGRAM_ID: [u8; 32] = [
 
 /// BTC Light Client — no-feature default build only (`cargo check`, host tests).
 /// The value is the retired devnet id C8JoSKzondM7X1ESwrBSodGMrXWtEWNmawXyjh9zEWJZ,
-/// closed on chain: nothing deployable reaches this arm. `mainnet` is stopped by
-/// the compile_error above, and every named network has its own arm.
+/// closed on chain: nothing deployable reaches this arm. Every named network has its own arm,
+/// and `mainnet` is excluded explicitly — it used to be excluded implicitly by the
+/// compile_error above, but that is now scoped to the SBF target so host builds can
+/// type-check the mainnet paths, and without this both arms would define the constant.
 ///
 /// Until 2026-08-26 this arm was `not(any(localnet, devnet-regtest))`, so one
 /// value served both devnet and the default build. Deploying testnet4 split
 /// devnet out; what is left is the placeholder nobody deploys.
-#[cfg(not(any(feature = "localnet", feature = "devnet-regtest", feature = "devnet")))]
+#[cfg(not(any(
+    feature = "localnet",
+    feature = "devnet-regtest",
+    feature = "devnet",
+    feature = "mainnet"
+)))]
 pub const BTC_LIGHT_CLIENT_PROGRAM_ID: [u8; 32] = [
     0xa5, 0x4f, 0xbf, 0xc4, 0x89, 0x7f, 0xa5, 0x53, 0x1c, 0x76, 0xa4, 0x82, 0xba, 0xce, 0x0f, 0x72,
     0x9d, 0x18, 0x8b, 0xc4, 0x4e, 0x4d, 0xdb, 0xe9, 0xf2, 0x1d, 0x69, 0x81, 0xa2, 0x08, 0x41, 0xa6,
@@ -168,3 +188,18 @@ pub const NATIVE_SOL_2022_MINT: [u8; 32] = [
     0x83, 0x0d, 0xfc, 0x9f, 0xde, 0x5f, 0xe6, 0xb8, 0xaa, 0x7c, 0x04, 0xa4, 0x76, 0xe9, 0x1e, 0x8a,
     0xc6, 0xbb, 0x26, 0x4a, 0xad, 0x90, 0xfa, 0x19, 0xc9, 0xdf, 0x49, 0xd8, 0x5c, 0x3e, 0x5b, 0x5e,
 ];
+
+#[cfg(test)]
+mod chain_id_tests {
+    /// CHAIN_ID is a domain separator baked into every proof's bound_params_hash, so a mainnet
+    /// deployment built without `--features mainnet` binds proofs to the devnet domain — the
+    /// hazard the comment above warns about, previously unassertable because the mainnet
+    /// feature did not compile.
+    #[test]
+    fn chain_id_follows_the_build_flavour() {
+        #[cfg(feature = "mainnet")]
+        assert_eq!(super::CHAIN_ID, 101, "mainnet builds must bind Solana mainnet");
+        #[cfg(not(feature = "mainnet"))]
+        assert_eq!(super::CHAIN_ID, 103, "non-mainnet builds bind Solana devnet");
+    }
+}
