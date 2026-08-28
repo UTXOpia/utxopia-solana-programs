@@ -64,6 +64,13 @@ pub fn process_mark_processing(
     {
         let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
+        // Pause is the protocol-wide emergency stop (see the note in `redeem.rs`), and this
+        // instruction is how pool UTXOs get reserved. Without it a pause cannot stop the
+        // reservation-exhaustion path in audit_1 F-DR-03 — the one thing an operator would
+        // reach for while it is happening.
+        if pool.is_paused() {
+            return Err(UTXOpiaError::PoolPaused.into());
+        }
         let redemption_data = redemption_info.try_borrow()?;
         let redemption = RedemptionRequest::from_bytes(&redemption_data)?;
         crate::utils::policy::redemption_driver_is_allowed(

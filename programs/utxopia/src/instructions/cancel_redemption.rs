@@ -106,6 +106,12 @@ pub fn process_cancel_redemption(
     {
         let pool_data = pool_state_info.try_borrow()?;
         let pool = PoolState::from_bytes(&pool_data)?;
+        // The last instruction that mints without one. Pause deliberately halts exits too
+        // (`redeem.rs`), and cancel re-mints the full note, so leaving it open would let a
+        // paused pool keep issuing.
+        if pool.is_paused() {
+            return Err(UTXOpiaError::PoolPaused.into());
+        }
         validate_active_tree_pda(
             commitment_tree_info,
             pool_state_info,
