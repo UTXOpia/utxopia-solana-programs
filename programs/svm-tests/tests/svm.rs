@@ -1888,3 +1888,210 @@ fn complete_deposit_requires_the_block_to_still_be_canonical() {
         res.program_result
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// validate_upgrade_authority — the C-1 remediation guard.
+//
+// audit_1 closed C-1 (VK-registry cross-pool takeover) by gating every VK-registry
+// instruction on the program's own upgrade authority, and audit_1 F-BC-10 then flagged that
+// nothing in the repo asserts the guard rejects anything: `validation_tests.rs` covers only
+// `programdata_upgrade_authority`, the byte parse, and no SVM test drove disc 6/7/16. So the
+// parse was tested and the *authorization* was not.
+//
+// These drive disc 6 (`init_vk_registry`) through mollusk and pin all four rejection paths
+// plus a positive control. The control matters: with a correct authority the call fails
+// *later* and with a different code, which is what proves the negative tests fail at the
+// guard rather than somewhere earlier for an unrelated reason.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// BPFLoaderUpgradeab1e11111111111111111111111
+const BPF_LOADER_UPGRADEABLE: [u8; 32] = [
+    0x02, 0xa8, 0xf6, 0x91, 0x4e, 0x88, 0xa1, 0xb0, 0xe2, 0x10, 0x15, 0x3e, 0xf7, 0x63, 0xae, 0x2b,
+    0x00, 0xc2, 0xb9, 0x3d, 0x16, 0xc1, 0x24, 0xd2, 0xc0, 0x53, 0x7a, 0x10, 0x04, 0x80, 0x00, 0x00,
+];
+
+const VK_HASH_MISMATCH: u32 = 6105; // UTXOpiaError::VkHashMismatch
+
+/// `UpgradeableLoaderState::ProgramData`: u32 tag(3) | u64 slot | Option<Pubkey>(1 + 32).
+fn programdata_blob(authority: &[u8; 32]) -> Vec<u8> {
+    let mut d = 3u32.to_le_bytes().to_vec();
+    d.extend_from_slice(&7u64.to_le_bytes());
+    d.push(1); // Some(..)
+    d.extend_from_slice(authority);
+    d
+}
+
+/// disc 6 payload for JoinSplit(1,2): n_in | n_out | vk_hash(32) | delta_g2(128) | ic_len | ic.
+/// The vk_hash is deliberately bogus — every negative case rejects long before `set_vk` reads
+/// it, and the positive control *wants* to reach `set_vk` and be rejected there.
+fn init_vk_registry_data() -> Vec<u8> {
+    let ic_len: u8 = 6; // 2 + n_in + n_out + 1
+    let mut d = vec![6u8, 1, 2];
+    d.extend_from_slice(&[0xAAu8; 32]); // vk_hash
+    d.extend_from_slice(&[0x11u8; 128]); // delta_g2
+    d.push(ic_len);
+    for _ in 0..ic_len {
+        d.extend_from_slice(&[0x22u8; 64]);
+    }
+    d
+}
+
+struct UpgradeAuthCase {
+    /// Key that signs the instruction.
+    signer: Pubkey,
+    /// Whether it is actually marked as a signer.
+    is_signer: bool,
+    /// Authority recorded inside the ProgramData account.
+    stored_authority: [u8; 32],
+    /// Override the ProgramData address (defaults to the canonical PDA).
+    program_data_key: Option<Pubkey>,
+    /// Owner of the ProgramData account (defaults to the loader).
+    program_data_owner: Option<Pubkey>,
+}
+
+fn init_vk_registry_call(
+    pid: &Pubkey,
+    case: UpgradeAuthCase,
+) -> (Instruction, Vec<(Pubkey, Account)>) {
+    let loader = Pubkey::new_from_array(BPF_LOADER_UPGRADEABLE);
+    let (canonical_pd, _) = Pubkey::find_program_address(&[pid.as_ref()], &loader);
+    let pd_key = case.program_data_key.unwrap_or(canonical_pd);
+    let pd_owner = case.program_data_owner.unwrap_or(loader);
+    let (vk_registry, _) = Pubkey::find_program_address(&[b"vk_registry", &[1u8], &[2u8]], pid);
+
+    let (system_key, system_account) = keyed_account_for_system_program();
+
+    let metas = vec![
+        AccountMeta::new_readonly(pd_key, false),
+        AccountMeta::new(vk_registry, false),
+        AccountMeta::new(case.signer, case.is_signer),
+        AccountMeta::new_readonly(system_key, false),
+    ];
+    let ix = Instruction::new_with_bytes(*pid, &init_vk_registry_data(), metas);
+
+    let accounts = vec![
+        (
+            pd_key,
+            acct(1_000_000, programdata_blob(&case.stored_authority), pd_owner),
+        ),
+        (vk_registry, acct(0, vec![], SYSTEM_ID)),
+        (case.signer, acct(10_000_000_000, vec![], SYSTEM_ID)),
+        (system_key, system_account),
+    ];
+
+    (ix, accounts)
+}
+
+fn upgrade_auth_case(signer: Pubkey, stored_authority: [u8; 32]) -> UpgradeAuthCase {
+    UpgradeAuthCase {
+        signer,
+        is_signer: true,
+        stored_authority,
+        program_data_key: None,
+        program_data_owner: None,
+    }
+}
+
+/// Positive control: the real upgrade authority gets *past* the guard and dies later, at the
+/// vk_hash recomputation. Without this, every negative test below could be passing because
+/// the instruction never reaches `validate_upgrade_authority` at all.
+#[test]
+fn init_vk_registry_passes_the_guard_for_the_real_upgrade_authority() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "utxopia");
+
+    let authority = Pubkey::new_unique();
+    let (ix, accounts) = init_vk_registry_call(&pid, upgrade_auth_case(authority, authority.to_bytes()));
+    let res = mollusk.process_instruction(&ix, &accounts);
+
+    assert!(
+        is_custom(&res.program_result, VK_HASH_MISMATCH),
+        "the real upgrade authority must clear the guard and be stopped later by the vk_hash \
+         recomputation (6105), got {:?}",
+        res.program_result
+    );
+}
+
+#[test]
+fn init_vk_registry_rejects_a_signer_that_is_not_the_upgrade_authority() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "utxopia");
+
+    // Signs, is funded, and is simply not the key recorded in ProgramData.
+    let impersonator = Pubkey::new_unique();
+    let (ix, accounts) = init_vk_registry_call(&pid, upgrade_auth_case(impersonator, [0xAAu8; 32]));
+    let res = mollusk.process_instruction(&ix, &accounts);
+
+    assert!(
+        is_custom(&res.program_result, UNAUTHORIZED),
+        "a signer that is not the upgrade authority must be Unauthorized (6011), got {:?}",
+        res.program_result
+    );
+}
+
+#[test]
+fn init_vk_registry_rejects_the_authority_when_it_does_not_sign() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "utxopia");
+
+    // The correct key, present but unsigned — the guard must not accept presence for consent.
+    let authority = Pubkey::new_unique();
+    let mut case = upgrade_auth_case(authority, authority.to_bytes());
+    case.is_signer = false;
+    let (ix, accounts) = init_vk_registry_call(&pid, case);
+    let res = mollusk.process_instruction(&ix, &accounts);
+
+    assert_eq!(
+        res.program_result,
+        ProgramResult::Failure(ProgramError::MissingRequiredSignature),
+        "an unsigned upgrade authority must be MissingRequiredSignature, got {:?}",
+        res.program_result
+    );
+}
+
+#[test]
+fn init_vk_registry_rejects_a_substituted_program_data_account() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "utxopia");
+
+    // A loader-owned ProgramData blob naming the attacker, at an address that is not this
+    // program's PDA — i.e. some other program's ProgramData, or a forgery.
+    let attacker = Pubkey::new_unique();
+    let mut case = upgrade_auth_case(attacker, attacker.to_bytes());
+    case.program_data_key = Some(Pubkey::new_unique());
+    let (ix, accounts) = init_vk_registry_call(&pid, case);
+    let res = mollusk.process_instruction(&ix, &accounts);
+
+    assert_eq!(
+        res.program_result,
+        ProgramResult::Failure(ProgramError::InvalidArgument),
+        "ProgramData at a non-canonical address must be InvalidArgument, got {:?}",
+        res.program_result
+    );
+}
+
+#[test]
+fn init_vk_registry_rejects_program_data_not_owned_by_the_loader() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "utxopia");
+
+    // Right address, right contents, wrong owner: anyone can create a system-owned account and
+    // write these bytes, so the owner check is what makes the address meaningful.
+    let attacker = Pubkey::new_unique();
+    let mut case = upgrade_auth_case(attacker, attacker.to_bytes());
+    case.program_data_owner = Some(SYSTEM_ID);
+    let (ix, accounts) = init_vk_registry_call(&pid, case);
+    let res = mollusk.process_instruction(&ix, &accounts);
+
+    assert_eq!(
+        res.program_result,
+        ProgramResult::Failure(ProgramError::InvalidArgument),
+        "ProgramData not owned by the loader must be InvalidArgument, got {:?}",
+        res.program_result
+    );
+}
