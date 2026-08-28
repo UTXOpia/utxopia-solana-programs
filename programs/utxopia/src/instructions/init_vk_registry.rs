@@ -34,7 +34,9 @@ use crate::utils::{
 /// Layout:
 /// - n_inputs: u8 (JoinSplit N)
 /// - n_outputs: u8 (JoinSplit M)
-/// - vk_hash: [u8; 32] (Groth16 verification key hash)
+/// - vk_hash: [u8; 32] (Groth16 verification key hash; `set_vk` recomputes it from the
+///   material below and rejects the instruction on mismatch, so this is the submitter's
+///   claim about which key they are registering, not a value taken on trust)
 /// - delta_g2: [u8; 128]
 /// - ic_len: u8
 /// - ic: [[u8; 64]; ic_len]

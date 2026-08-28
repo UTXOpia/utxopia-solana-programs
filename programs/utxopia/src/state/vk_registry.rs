@@ -17,6 +17,36 @@ pub fn joinsplit_num_public_inputs(n_inputs: u8, n_outputs: u8) -> usize {
 /// IC contains one base point plus one point per public input.
 pub const MAX_IC_POINTS: usize = 1 + 2 + crate::constants::MAX_SAFE_JOINSPLIT_SIZE;
 
+/// The canonical VK identity: sha256 over alpha ‖ beta ‖ gamma ‖ delta ‖ IC, every field
+/// element a 32-byte big-endian integer **in snarkjs coordinate order**.
+///
+/// G2 points are stored here in the precompile's (imag, real) order, so each coordinate pair is
+/// fed back swapped to reproduce snarkjs's (real, imag). That ordering is not cosmetic: it is
+/// what the SDK's `computeVkHash` hashes out of the raw `*.vkey.json`, and the two preimages
+/// have to agree byte for byte or every registration is rejected.
+fn compute_vk_hash(delta_g2: &[u8; 128], ic: &[[u8; 64]]) -> [u8; 32] {
+    use crate::utils::groth16::common_vk::{ALPHA_G1, BETA_G2, GAMMA_G2};
+    // A slice of [u8; 64] is contiguous, so it flattens to bytes without a copy. Length is
+    // already bounded by the caller's MAX_IC_POINTS check.
+    let ic_bytes = unsafe { core::slice::from_raw_parts(ic.as_ptr() as *const u8, ic.len() * 64) };
+    crate::utils::sha256_parts([
+        &ALPHA_G1[..],
+        &BETA_G2[32..64],
+        &BETA_G2[..32],
+        &BETA_G2[96..],
+        &BETA_G2[64..96],
+        &GAMMA_G2[32..64],
+        &GAMMA_G2[..32],
+        &GAMMA_G2[96..],
+        &GAMMA_G2[64..96],
+        &delta_g2[32..64],
+        &delta_g2[..32],
+        &delta_g2[96..],
+        &delta_g2[64..96],
+        ic_bytes,
+    ])
+}
+
 /// On-chain verification key storage (Groth16)
 ///
 /// Layout (1060 bytes total):
@@ -132,6 +162,10 @@ impl VkRegistry {
     }
 
     /// Set Groth16 verification key material.
+    ///
+    /// `vk_hash` is not stored on trust: it is recomputed from `delta_g2` and `ic` and the
+    /// submitted value must match. Before this it was caller-supplied and read by nothing,
+    /// which made it decorative — a field that looks like an integrity check and is not one.
     pub fn set_vk(
         &mut self,
         vk_hash: &[u8; 32],
@@ -142,7 +176,11 @@ impl VkRegistry {
             return Err(ProgramError::InvalidInstructionData);
         }
 
-        self.vk_hash.copy_from_slice(vk_hash);
+        let computed = compute_vk_hash(delta_g2, ic);
+        if *vk_hash != computed {
+            return Err(crate::error::UTXOpiaError::VkHashMismatch.into());
+        }
+        self.vk_hash = computed;
         self.delta_g2.copy_from_slice(delta_g2);
         self.ic_len = ic.len() as u8;
         self.ic = [[0u8; 64]; MAX_IC_POINTS];

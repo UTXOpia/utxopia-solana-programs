@@ -237,6 +237,15 @@ pub enum UTXOpiaError {
 
     #[error("Miner fee differs from the one pinned by this redemption's first signing approval")]
     RedemptionFeeMismatch = 6102,
+
+    #[error("Groth16 public input is not reduced mod the BN254 scalar field")]
+    PublicInputNotInField = 6103,
+
+    #[error("Groth16 proof point is the identity")]
+    InvalidProofPoint = 6104,
+
+    #[error("Verification key hash does not match the submitted key material")]
+    VkHashMismatch = 6105,
 }
 
 impl From<UTXOpiaError> for ProgramError {

@@ -30,6 +30,9 @@ const BN254_FIELD_MODULUS: [u8; 32] = [
 
 /// Negate a G1 point: -P = (x, p - y)
 /// Input/output: 64 bytes [x_BE(32), y_BE(32)]
+///
+/// Precondition: `point` is not the identity. The identity would give the unreduced (0, p);
+/// the only caller rejects it first, so there is no branch for it on the hot path.
 #[inline(always)]
 fn negate_g1(point: &[u8; 64]) -> [u8; 64] {
     let mut result = [0u8; 64];
@@ -84,9 +87,17 @@ fn verify_groth16_proof(
     let pi_b: &[u8] = &proof_bytes[64..192]; // G2 (128 bytes)
     let pi_c: &[u8] = &proof_bytes[192..256]; // G1 (64 bytes)
 
-    // Step 1: Negate A
+    // Step 1: Negate A.
+    // A = O would make e(-A, B) == 1, dropping the proof's only binding to B. The syscall does
+    // reject it today — negating zero yields the unreduced (0, p), which fails to parse — but
+    // that is incidental to how `negate_g1` happens to work. Reject it here so the rejection is
+    // the program's decision and not the syscall's, and so `negate_g1` never sees the identity.
     let mut a_bytes = [0u8; 64];
     a_bytes.copy_from_slice(pi_a);
+    if a_bytes == [0u8; 64] {
+        solana_program_log::log!("UTXOpia: groth16 A is the identity");
+        return Err(crate::error::UTXOpiaError::InvalidProofPoint.into());
+    }
     let neg_a = negate_g1(&a_bytes);
 
     // Step 2: Compute vk_x = IC[0] + sum(public_input[i] * IC[i+1])
@@ -96,6 +107,16 @@ fn verify_groth16_proof(
     let mut add_input = [0u8; 128];
 
     for i in 0..num_inputs {
+        // The syscall multiplies by the raw 256-bit scalar without reducing it, and G1 has
+        // order r, so x and x + r yield the same point while remaining distinct as PDA seeds
+        // or tree leaves. `parse_joinsplit_prefix` already rejects non-canonical nullifiers
+        // and commitments, and the other two inputs are byte-compared against on-chain values;
+        // this makes the verifier itself total so a fourth caller cannot forget.
+        if !crate::utils::crypto::is_canonical_fr(public_inputs[i]) {
+            solana_program_log::log!("UTXOpia: groth16 input not in scalar field");
+            return Err(crate::error::UTXOpiaError::PublicInputNotInField.into());
+        }
+
         // Scalar multiplication: public_input[i] * IC[i+1]
         // Input: [G1_point(64) | scalar_BE(32)] (96 bytes)
         mul_input[..64].copy_from_slice(&ic[i + 1]);
@@ -164,7 +185,7 @@ fn verify_groth16_proof(
 // Only DELTA_G2 and IC differ per circuit.
 // =============================================================================
 
-mod common_vk {
+pub(crate) mod common_vk {
     /// VK alpha (G1 point, 64 bytes) — shared across all circuits
     pub const ALPHA_G1: [u8; 64] = [
         0x2d, 0x4d, 0x9a, 0xa7, 0xe3, 0x02, 0xd9, 0xdf, 0x41, 0x74, 0x9d, 0x55, 0x07, 0x94, 0x9d,
@@ -231,3 +252,7 @@ pub fn verify_groth16_joinsplit_proof(
 // =============================================================================
 // JoinSplit VKs are stored in VkRegistry PDA accounts.
 // =============================================================================
+
+#[cfg(test)]
+#[path = "groth16_tests.rs"]
+mod tests;
