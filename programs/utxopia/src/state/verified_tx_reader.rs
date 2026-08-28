@@ -286,6 +286,50 @@ pub fn check_height_index_bytes(
     Ok(())
 }
 
+/// The devnet-regtest arm is covered empirically: `programs/svm-tests` builds that flavour and
+/// `complete_deposit_requires_the_block_to_still_be_canonical` feeds a light client whose
+/// network byte is regtest, so a wrong arm fails it (verified by mutation). No SVM suite builds
+/// the other flavours, so pin them here instead — run under `--features devnet` etc.
+///
+/// This is not circular: the assertion reads the value the *source* cfg selected. If the source
+/// arms were wired so a devnet build picked regtest, this fails under `--features devnet`.
+#[cfg(test)]
+mod expected_network_tests {
+    use super::EXPECTED_NETWORK;
+
+    #[test]
+    fn expected_network_matches_the_build_flavour() {
+        #[cfg(all(
+            not(feature = "mainnet"),
+            feature = "devnet",
+            not(feature = "devnet-regtest")
+        ))]
+        assert_eq!(
+            EXPECTED_NETWORK,
+            Some(2),
+            "a --features devnet build talks to the testnet4 light client \
+             (9MBq6FCqw1tSh7Vn7rJjWEz8pRcZ5R6mfEzgALiAJwM9 reports 2)"
+        );
+
+        #[cfg(all(not(feature = "mainnet"), feature = "devnet-regtest"))]
+        assert_eq!(EXPECTED_NETWORK, Some(3), "devnet-regtest tracks regtest");
+
+        #[cfg(all(not(feature = "mainnet"), feature = "localnet"))]
+        assert_eq!(EXPECTED_NETWORK, Some(3), "localnet tracks regtest");
+
+        #[cfg(feature = "mainnet")]
+        assert_eq!(EXPECTED_NETWORK, Some(0), "mainnet tracks mainnet");
+
+        // A featureless host build reads no real light client and must not assert a network.
+        #[cfg(all(
+            not(feature = "mainnet"),
+            not(feature = "devnet"),
+            not(feature = "localnet")
+        ))]
+        assert_eq!(EXPECTED_NETWORK, None, "host builds must not pin a network");
+    }
+}
+
 #[cfg(test)]
 mod height_index_tests {
     use super::*;
