@@ -1112,12 +1112,11 @@ fn complete_deposit_inner(
     }
 
     // --- Record the pool BTC output as a spendable UtxoRecord ---
-    // The PDA is keyed by (sweep_txid, sweep_vout), so a batched/consolidating sweep that
-    // aggregates several deposits into ONE pool output maps every one of those completions to the
-    // same UtxoRecord. Create it idempotently — exactly once per pool output — and record the
-    // FULL `pool_output_value` (the real spendable BTC), not the per-claimant `amount_sats`.
-    // Crediting per-claimant value or creating unconditionally caused the second completion of a
-    // shared output to revert and understated the tracked BTC (audit batched-sweep finding).
+    // The PDA is keyed by (sweep_txid, sweep_vout), and the guard below now rejects any second
+    // completion naming an output that already has one. The idempotent creation this comment
+    // used to describe was for batched sweeps aggregating several deposits into ONE pool output;
+    // that shape is unreachable, because the sweep branch requires `input_count() == 1`. Record
+    // the FULL `pool_output_value` (the real spendable BTC), not the per-claimant `amount_sats`.
     {
         let vout_le = sweep_vout.to_le_bytes();
         // Pool-scoped: the address itself says which pool owns this coin, so a

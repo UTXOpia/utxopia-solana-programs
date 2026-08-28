@@ -243,6 +243,11 @@ pub fn process_complete_redemption(
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
+    // Deliberately NOT pause-gated, unlike every other value-moving instruction.
+    // By the time this runs the BTC has already been broadcast and confirmed; refusing
+    // to settle would strand the accounting rather than prevent anything. The stop is
+    // upstream — `approve_redemption_signing` is gated, so a paused pool signs nothing
+    // new, and `mark_processing` reserves nothing new (93c28ed).
     let pool_state_info = &accounts[0];
     let redemption_info = &accounts[1];
     let authority = &accounts[2];

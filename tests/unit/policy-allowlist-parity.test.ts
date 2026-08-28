@@ -49,24 +49,38 @@ function utxopiaAllowlist(disc: Map<string, number>): Set<number> {
   );
 }
 
-/** Actions actually passed to `consume_policy_approval`, read from the handlers. */
+/**
+ * Actions actually passed to `consume_policy_approval`, read from the handlers.
+ *
+ * Counts call sites first and asserts every one yielded an action. An earlier version bounded
+ * the search to 400 characters after the opening paren, which silently skipped the three sites
+ * whose argument lists are longer (transact, unshield, redeem) — a test against silent drift
+ * that was itself silently partial. Unbounded search plus a count check makes a miss loud.
+ */
 function consumingActions(): Map<string, number> {
   const disc = discriminants();
   const dir = join(ROOT, "programs/utxopia/src/instructions");
   const out = new Map<string, number>();
+  let callSites = 0;
+
   for (const file of readdirSync(dir).filter((f) => f.endsWith(".rs"))) {
     const src = readFileSync(join(dir, file), "utf8");
-    for (const m of src.matchAll(
-      /consume_policy_approval\(([\s\S]{0,400}?)\)\?;/g,
-    )) {
-      const a = m[1].match(/crate::instruction::([A-Z_]+)/);
-      if (!a) continue;
+    for (const m of src.matchAll(/consume_policy_approval\s*\(/g)) {
+      // Skip the definition itself.
+      if (/\bfn\s+$/.test(src.slice(Math.max(0, m.index! - 12), m.index!))) continue;
+      callSites++;
+      const a = src.slice(m.index!).match(/crate::instruction::([A-Z_]+)/);
+      if (!a) throw new Error(`${file}: consume_policy_approval call site with no action constant`);
       const v = disc.get(a[1]);
       if (v === undefined) throw new Error(`unknown instruction constant ${a[1]}`);
       out.set(a[1], v);
     }
   }
-  if (out.size === 0) throw new Error("no consume_policy_approval call sites found");
+
+  if (callSites === 0) throw new Error("no consume_policy_approval call sites found");
+  if (out.size !== callSites) {
+    throw new Error(`extracted ${out.size} actions from ${callSites} call sites — extraction is partial`);
+  }
   return out;
 }
 
