@@ -38,3 +38,6 @@ test-ledger/
 # a library: an uncommitted lock means the bytecode a reviewer builds need not be the bytecode
 # that was deployed, which defeats `solana-verify` and any reproducible-build claim. It is also
 # what lets CI run `--frozen-lockfile` / `--locked`.
+
+# Audit working files — reports live outside git by decision (2026-08-28).
+audit_*/
