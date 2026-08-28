@@ -6,7 +6,7 @@
 // makes the aliasing work, then drive the real entry point.
 use super::*;
 use crate::error::UTXOpiaError;
-use crate::utils::crypto::{is_canonical_fr, BN254_FR_MODULUS};
+use crate::utils::crypto::BN254_FR_MODULUS;
 
 /// G1 generator (1, 2), 64 bytes big-endian.
 const G1_GENERATOR: [u8; 64] = {
