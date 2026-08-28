@@ -22,7 +22,7 @@
     },
     "mainnet": {
       "UTXOpia": "",
-      "btc_light_client": ""
+      "btc_light_client": "FTELhuRjyagKYHSBnUHhtPSFf9r488toK7TeREg7fDmM"
     }
   },
   "defaultCluster": "devnet",

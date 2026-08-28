@@ -42,24 +42,27 @@ pub const BTC_LIGHT_CLIENT_PROGRAM_ID: [u8; 32] = [
 // SPV proof against the DEVNET light client. It fails closed (the PDA pin in verified_tx_reader
 // rejects the account, which does not exist on mainnet), but only after deploy. Fail at build
 // time instead: deploy the light client, then paste its id into a `mainnet` arm here.
-// Scoped to the SBF target, for the same reason `lib.rs`'s network guard is: a *deployable*
-// mainnet artifact must not exist while this is unset, but a host `cargo check`/`test` must be
-// able to build one so the mainnet-only code paths are type-checked and exercised at all.
-// Without that, every `--features mainnet` conclusion in the audits is analytic — nothing has
-// ever compiled those branches, let alone run them.
-#[cfg(all(feature = "mainnet", target_os = "solana"))]
-compile_error!(
-    "no mainnet BTC_LIGHT_CLIENT_PROGRAM_ID is configured — deploy btc-light-client to mainnet \
-     and add a #[cfg(feature = \"mainnet\")] arm before building for mainnet"
-);
-
-/// Host-only placeholder so `--features mainnet` type-checks off-chain. Deliberately the zero
-/// address: it is not a valid deployed program, `assert_canonical_light_client` pins the light
-/// client PDA under it and would reject anything, and the SBF guard above means this value can
-/// never reach a deployable artifact. Replace it — and delete the guard — with the real id once
-/// btc-light-client is deployed to mainnet.
-#[cfg(all(feature = "mainnet", not(target_os = "solana")))]
-pub const BTC_LIGHT_CLIENT_PROGRAM_ID: [u8; 32] = [0u8; 32];
+/// BTC Light Client — mainnet (FTELhuRjyagKYHSBnUHhtPSFf9r488toK7TeREg7fDmM)
+///
+/// RESERVED, NOT YET DEPLOYED. The address is claimed by a keypair generated 2026-08-29 and
+/// held outside this repo; the eventual deploy must target it with
+/// `--program-id <that keypair>` or this constant is wrong and every mainnet SPV proof fails.
+///
+/// Reserving the id rather than leaving a `compile_error!` here is what lets
+/// `--features mainnet` build at all. Before this, no mainnet-only branch in either program
+/// had ever been compiled — audit_1 recorded every `--features mainnet` conclusion as
+/// analytic, and audit_2 as unverifiable. An id that is real but unclaimed on chain keeps the
+/// artifact a pure function of (commit, features), which a build-time env var would not.
+///
+/// Until the light client is actually deployed there, a mainnet utxopia build is compilable
+/// and deployable but cannot verify a single deposit: `assert_canonical_light_client` pins the
+/// PDA under this id and the account will not exist. That is fail-closed, and deliberate —
+/// deploy the light client first.
+#[cfg(feature = "mainnet")]
+pub const BTC_LIGHT_CLIENT_PROGRAM_ID: [u8; 32] = [
+    0xd6, 0xbb, 0xcd, 0x22, 0x35, 0x3e, 0x80, 0x7f, 0x52, 0x9d, 0xb5, 0x96, 0xa4, 0xc7, 0x16, 0x42,
+    0x13, 0xdc, 0x6a, 0xd8, 0xee, 0x31, 0xa4, 0x45, 0x87, 0x8d, 0xcb, 0x77, 0xcc, 0xbd, 0x41, 0xac,
+];
 
 /// BTC Light Client — devnet (4LZbktiNsiVAe2bwPCTPNgqiWWgZNUj4T3bDx8GZmehv)
 /// Solana devnet + Bitcoin testnet4. Deployed 2026-08-26; tracks TESTNET4 headers

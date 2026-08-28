@@ -27,15 +27,21 @@ function toBase58(bytes: number[]): string {
   return out;
 }
 
-/** The `devnet` (not devnet-regtest, not localnet) arm of the baked constant. */
-function bakedDevnetId(): string {
+/** Decode one `#[cfg(...)]`-selected arm of the baked constant to base58. */
+function bakedId(cfgPattern: string, label: string): string {
   const src = read("programs/utxopia/src/constants.rs");
-  const arm = /#\[cfg\(all\(feature = "devnet", not\(feature = "devnet-regtest"\)\)\)\]\s*pub const BTC_LIGHT_CLIENT_PROGRAM_ID: \[u8; 32\] = \[([^\]]+)\]/.exec(src);
-  if (!arm) throw new Error("could not find the devnet BTC_LIGHT_CLIENT_PROGRAM_ID arm");
+  const arm = new RegExp(
+    `#\\[cfg\\(${cfgPattern}\\)\\]\\s*pub const BTC_LIGHT_CLIENT_PROGRAM_ID: \\[u8; 32\\] = \\[([^\\]]+)\\]`,
+  ).exec(src);
+  if (!arm) throw new Error(`could not find the ${label} BTC_LIGHT_CLIENT_PROGRAM_ID arm`);
   const bytes = arm[1].match(/0x[0-9a-f]{2}/g)!.map((h) => parseInt(h, 16));
   expect(bytes.length).toBe(32);
   return toBase58(bytes);
 }
+
+const bakedDevnetId = () =>
+  bakedId('all\\(feature = "devnet", not\\(feature = "devnet-regtest"\\)\\)', "devnet");
+const bakedMainnetId = () => bakedId('feature = "mainnet"', "mainnet");
 
 describe("devnet BTC light client program id", () => {
   const onchain = bakedDevnetId();
@@ -72,5 +78,25 @@ describe("devnet BTC light client program id", () => {
     const block = /export const DEVNET_CONFIG[\s\S]*?\n\};/.exec(sdk)![0];
     const id = /btcLightClientProgramId: address\("([1-9A-HJ-NP-Za-km-z]+)"\)/.exec(block)![1];
     expect(id).toBe(onchain);
+  });
+});
+
+/**
+ * The mainnet arm reserves an address whose keypair is held outside this repo and which is not
+ * deployed yet, so nothing on chain can contradict a typo in those 32 bytes — the usual
+ * "the SPV proof does not verify" symptom would only appear after a mainnet deploy. config.json
+ * carries the same id in base58; requiring the two to agree makes a transcription error fail
+ * here instead.
+ */
+describe("mainnet BTC light client program id", () => {
+  const onchain = bakedMainnetId();
+
+  it("is a plausible reserved address, not a placeholder", () => {
+    expect(onchain.length).toBeGreaterThanOrEqual(43);
+    expect(onchain).not.toBe("11111111111111111111111111111111");
+  });
+
+  it("matches the test-flow program registry", () => {
+    expect(JSON.parse(read("config.json")).programs.mainnet.btc_light_client).toBe(onchain);
   });
 });

@@ -41,3 +41,6 @@ test-ledger/
 
 # Audit working files — reports live outside git by decision (2026-08-28).
 audit_*/
+
+# Solana CLI default keypair name — not matched by *keypair*.json (audit_1 F-BC-13).
+id.json
