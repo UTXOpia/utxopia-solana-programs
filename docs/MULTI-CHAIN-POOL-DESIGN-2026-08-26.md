@@ -1,9 +1,30 @@
 # Multi-chain pools: BTC + ZEC
 
-**Status:** design note, nothing built.
+**Status:** ZEC **declined on cost, 2026-08-26.** Phase 1 still recommended and independent of it.
 **Question it answers:** can one pool bridge more than one chain, with assets kept apart by `token_id`?
-**Short answer:** the shielded half already does this. The bridging half does not, and ZEC's
-proof-of-work is the thing that decides whether it ever can at Bitcoin's security level.
+**Short answer:** the shielded half already does. The bridging half does not, and for ZEC the
+blocker turned out to be economics rather than feasibility.
+
+### Decision
+
+ZEC is **not being built**. It is technically viable — §3 establishes that Equihash verification
+resumed across two transactions gives Bitcoin-equivalent proof-of-work security — but §3.4 puts
+the standing relay cost at 4–13 SOL/year against Bitcoin's 0.03, a **160–400x** increase in fixed
+operating cost, paid continuously whether or not the bridge sees a single deposit. Break-even sits
+near 2,000 SOL-equivalent of annual round-trip volume. That is a bet on ZEC bridge demand, and the
+demand is not there to justify it.
+
+What would change the answer, in order of likelihood:
+
+1. **A BLAKE2b syscall.** Equihash drops to ~84k CU (§3.3), one header fits one transaction,
+   headers batch again, and the relay cost collapses toward Bitcoin's. This is the whole problem —
+   the cost is 33x the arithmetic purely because the primitive is not exposed.
+2. **Demonstrated demand** — enough bridged volume to clear break-even with margin.
+3. Accepting a checkpointed bridge (§3.3 option C) instead of proof-of-work, which is much cheaper
+   but a different trust model and would have to be labelled as one to users.
+
+The measurement crate `programs/equihash-bench` is kept for now: it is the evidence behind (1) and
+would be the starting point if a syscall ever lands. Delete it if that stops being plausible.
 
 ---
 
@@ -264,6 +285,8 @@ signing is P2PKH-shaped, so `sighash.rs` gains a variant rather than a rewrite).
 ---
 
 ## 5. Recommendation
+
+**Superseded in part by the decision at the top: ZEC is declined. Phase 1 stands.**
 
 **Do Phase 1 now, regardless of ZEC.** It is a real bug fix (F-AR-04), it removes a load-bearing
 restriction that exists only because of a data-model limitation, and it is the prerequisite for
