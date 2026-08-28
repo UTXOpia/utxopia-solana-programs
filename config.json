@@ -1,12 +1,13 @@
 {
   "programs": {
     "devnet": {
-      "UTXOpia": "G1bj9Vw9ipZ2Z7zKa9HrcHHPNqeWjg7uu51TsDr3ixUy",
-      "btc_light_client": "C8JoSKzondM7X1ESwrBSodGMrXWtEWNmawXyjh9zEWJZ"
+      "UTXOpia": "28z2AtKA6aFGrGCh4ns1rmp7vGpWuh6x3H7gXKBcfxur",
+      "btc_light_client": "4LZbktiNsiVAe2bwPCTPNgqiWWgZNUj4T3bDx8GZmehv",
+      "chadbuffer": "C5RpjtTMFXKVZCtXSzKXD4CDNTaWBg3dVeMfYvjZYHDF"
     },
     "devnet-regtest": {
-      "UTXOpia": "AZmRDFCBkTU4z9q6zYZ5DrBpSzDVGMJqgDxjpS7X9dsD",
-      "btc_light_client": "E3Q7dNDNw9W8oL1ghm62Ecau4zHBZ1W5zxrnNVaoRs6v",
+      "UTXOpia": "CvfSyACR8xemPdeJsB3D8Xh15rKUQ3b5c1PvnmABCBJp",
+      "btc_light_client": "8hCSNKf8ByqZdet2D4SDiZHDrB1u9ohkhqKKzr9i7vfQ",
       "chadbuffer": "C5RpjtTMFXKVZCtXSzKXD4CDNTaWBg3dVeMfYvjZYHDF"
     },
     "localnet": {

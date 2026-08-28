@@ -121,6 +121,13 @@ pub mod instruction {
     // Auditor-gated SPL shield for permissioned pools (23)
     pub const SHIELD_PERMISSIONED: u8 = 23;
 
+    // OP_RETURN-free deposit for public pools (25) — note keys ride in instruction
+    // data and are proven by the deposit address's tapleaf
+    pub const VERIFY_DEPOSIT: u8 = 25;
+
+    // Same binding, plus the permissioned pool's policy gate (26)
+    pub const VERIFY_DEPOSIT_PERMISSIONED: u8 = 26;
+
     // Ika pre-broadcast signing approval (27)
     pub const APPROVE_REDEMPTION_SIGNING: u8 = 27;
 
@@ -240,6 +247,14 @@ pub fn process_instruction(
             instructions::process_complete_deposit_permissioned(program_id, accounts, data)
         }
         // Auditor-gated SPL shield for permissioned pools (23)
+        instruction::VERIFY_DEPOSIT => {
+            instructions::process_verify_deposit(program_id, accounts, data)
+        }
+
+        instruction::VERIFY_DEPOSIT_PERMISSIONED => {
+            instructions::process_verify_deposit_permissioned(program_id, accounts, data)
+        }
+
         instruction::SHIELD_PERMISSIONED => {
             instructions::process_shield_permissioned(program_id, accounts, data)
         }

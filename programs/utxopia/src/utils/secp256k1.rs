@@ -181,6 +181,25 @@ pub fn verify_taproot_tweak(
     tweak: &[u8; 32],
     expected_output_key: &[u8; 32],
 ) -> Result<(), ProgramError> {
+    let derived = derive_taproot_output_key(internal_key, tweak)?;
+    if derived != *expected_output_key {
+        return Err(UTXOpiaError::TaprootVerificationFailed.into());
+    }
+    Ok(())
+}
+
+/// Compute `x(lift_x(internal_key) + tweak*G)` — the x-only output key BIP-341
+/// commits to.
+///
+/// Same ecrecover trick the verifier uses, returning the recovered key instead of
+/// comparing it. Needed when the program must reconstruct an output's
+/// scriptPubKey rather than check one it was handed: rebuilding a redemption's
+/// sighash requires the exact script of every input being spent, and a deposit
+/// input's script is a function of its tapleaf.
+pub fn derive_taproot_output_key(
+    internal_key: &[u8; 32],
+    tweak: &[u8; 32],
+) -> Result<[u8; 32], ProgramError> {
     let n = u256_from_be(&SECP256K1_N);
     let r = u256_from_be(internal_key);
     let t = u256_from_be(tweak);
@@ -239,17 +258,15 @@ pub fn verify_taproot_tweak(
 
     #[cfg(any(target_os = "solana", test))]
     {
-        // 5. Compare recovered x-coordinate with expected output key
-        if recovered[0..32] != *expected_output_key {
-            return Err(UTXOpiaError::TaprootVerificationFailed.into());
-        }
-
-        Ok(())
+        // 5. The recovered x-coordinate IS the tweaked output key.
+        let mut output_key = [0u8; 32];
+        output_key.copy_from_slice(&recovered[0..32]);
+        Ok(output_key)
     }
 
     #[cfg(all(not(target_os = "solana"), not(test)))]
     {
-        let _ = (&hash_bytes, &signature, &mut recovered, expected_output_key);
+        let _ = (&hash_bytes, &signature, &mut recovered);
         Err(ProgramError::InvalidArgument)
     }
 }

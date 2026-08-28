@@ -165,7 +165,306 @@ pub fn process_complete_deposit(
         }
     }
 
-    complete_deposit_inner(program_id, accounts, &ix_data, &[])
+    complete_deposit_inner(program_id, accounts, &ix_data, &[], &DepositBinding::OpReturn)
+}
+
+/// How a deposit's note keys are bound to the Bitcoin transaction.
+///
+/// Both variants end up proving the same thing — that the depositor, not the
+/// caller, chose the note key — they just read it from different places.
+pub enum DepositBinding {
+    /// disc 11/22: the deposit tx carries an OP_RETURN with the keys, and the
+    /// receipt is keyed on the txid alone.
+    OpReturn,
+    /// disc 25: the keys ride in instruction data, proven by the deposit
+    /// address's Taproot tweak. Nothing identifies the transaction as a UTXOpia
+    /// deposit on chain, so it can be funded by any wallet or exchange that can
+    /// send to a P2TR address. The receipt is keyed on (txid, vout) so each
+    /// output of one funding transaction is independently creditable.
+    Tweak {
+        ephemeral_pubkey: [u8; 32],
+        note_public_key: [u8; 32],
+        deposit_vout: u32,
+    },
+}
+
+impl DepositBinding {
+    fn deposit_vout(&self) -> Option<u32> {
+        match self {
+            Self::OpReturn => None,
+            Self::Tweak { deposit_vout, .. } => Some(*deposit_vout),
+        }
+    }
+}
+
+/// The per-deposit commitment a `Tweak`-bound deposit address is bound to.
+///
+/// Both keys are hashed in, not just the note key. Binding the note key alone
+/// would leave the ephemeral pubkey caller-chosen: the commitment (and so the
+/// funds) would still be correct, but a wrong ephemeral key makes the stealth
+/// announcement undecryptable and the recipient can never find their note.
+pub fn tweak_commitment(note_public_key: &[u8; 32], ephemeral_pubkey: &[u8; 32]) -> [u8; 32] {
+    crate::utils::bitcoin::sha256_parts([note_public_key.as_slice(), ephemeral_pubkey.as_slice()])
+}
+
+/// BIP-341's suggested NUMS point, used as the deposit address's internal key.
+///
+/// Nobody knows its discrete log, so the key path is unspendable and custody
+/// rests entirely on the script path below. That is deliberate: Ika's MPC cannot
+/// sign for a tweaked key (its own Bitcoin example says so and works around it
+/// the same way), so an address whose internal key were the dWallet key plus a
+/// per-deposit tweak would be unspendable by the very custodian meant to sweep
+/// it. Script-path binding keeps the deposit under Ika custody from the moment
+/// it confirms — no second key holds it in the meantime.
+pub const DEPOSIT_NUMS_INTERNAL_KEY: [u8; 32] = [
+    0x50, 0x92, 0x9b, 0x74, 0xc1, 0xa0, 0x49, 0x54, 0xb7, 0x8b, 0x4b, 0x60, 0x35, 0xe9, 0x7a, 0x5e,
+    0x07, 0x8a, 0x5a, 0x0f, 0x28, 0xec, 0x96, 0xd5, 0x47, 0xbf, 0xee, 0x9a, 0xce, 0x80, 0x3a, 0xc0,
+];
+
+/// Precomputed SHA256("TapLeaf") for BIP-341 tagged hashing.
+const TAPLEAF_TAG_HASH: [u8; 32] = [
+    0xae, 0xea, 0x8f, 0xdc, 0x42, 0x08, 0x98, 0x31, 0x05, 0x73, 0x4b, 0x58, 0x08, 0x1d, 0x1e, 0x26,
+    0x38, 0xd3, 0x5f, 0x1c, 0xb5, 0x40, 0x08, 0xd4, 0xd3, 0x57, 0xca, 0x03, 0xbe, 0x78, 0xe9, 0xee,
+];
+
+/// Tapscript leaf version (BIP-342).
+const TAPSCRIPT_LEAF_VERSION: u8 = 0xc0;
+
+/// The single tapleaf a `Tweak`-bound deposit address commits to:
+///
+/// ```text
+/// <commitment> OP_DROP <ika_xonly> OP_CHECKSIG
+/// ```
+///
+/// The commitment rides in the script purely to make the leaf — and therefore
+/// the address — unique per deposit; `OP_DROP` discards it at spend time. Only
+/// the dWallet key can satisfy the `OP_CHECKSIG`, and it signs untweaked.
+pub fn deposit_leaf_script(commitment: &[u8; 32], ika_xonly: &[u8; 32]) -> [u8; 68] {
+    let mut script = [0u8; 68];
+    script[0] = 0x20; // push 32 bytes
+    script[1..33].copy_from_slice(commitment);
+    script[33] = 0x75; // OP_DROP
+    script[34] = 0x20; // push 32 bytes
+    script[35..67].copy_from_slice(ika_xonly);
+    script[67] = 0xac; // OP_CHECKSIG
+    script
+}
+
+/// BIP-341 tapleaf hash for the script above.
+///
+/// `tagged_hash("TapLeaf", leaf_version || compact_size(len) || script)`. The
+/// script is a fixed 68 bytes, so the compact size is always a single byte.
+pub fn deposit_leaf_hash(commitment: &[u8; 32], ika_xonly: &[u8; 32]) -> [u8; 32] {
+    let script = deposit_leaf_script(commitment, ika_xonly);
+    crate::utils::bitcoin::sha256_parts([
+        &TAPLEAF_TAG_HASH,
+        &TAPLEAF_TAG_HASH,
+        &[TAPSCRIPT_LEAF_VERSION, script.len() as u8],
+        &script,
+    ])
+}
+
+/// Instruction data for `verify_deposit` (disc 25), 148 bytes fixed.
+///
+/// `CompleteDepositData` (80) || ephemeral_pubkey (32) || note_public_key (32)
+/// || deposit_vout (4, LE).
+pub struct VerifyDepositData {
+    pub base: CompleteDepositData,
+    pub ephemeral_pubkey: [u8; 32],
+    pub note_public_key: [u8; 32],
+    pub deposit_vout: u32,
+}
+
+impl VerifyDepositData {
+    pub const SIZE: usize = CompleteDepositData::HEADER_SIZE + 32 + 32 + 4;
+
+    pub fn from_bytes(data: &[u8]) -> Result<Self, ProgramError> {
+        if data.len() < Self::SIZE {
+            return Err(ProgramError::InvalidInstructionData);
+        }
+        let base = CompleteDepositData::from_bytes(data)?;
+        let mut ephemeral_pubkey = [0u8; 32];
+        ephemeral_pubkey.copy_from_slice(&data[80..112]);
+        let mut note_public_key = [0u8; 32];
+        note_public_key.copy_from_slice(&data[112..144]);
+        let deposit_vout = u32::from_le_bytes(data[144..148].try_into().unwrap());
+
+        Ok(Self {
+            base,
+            ephemeral_pubkey,
+            note_public_key,
+            deposit_vout,
+        })
+    }
+}
+
+/// OP_RETURN-free deposit for public pools (disc 25).
+///
+/// Same accounts and same trust model as `process_complete_deposit`; the note
+/// keys arrive in instruction data instead of in the deposit transaction, and
+/// are proven against the deposit output's Taproot tweak rather than read from
+/// an OP_RETURN. A caller cannot substitute its own keys: a different key pair
+/// derives a different address, which the funding transaction did not pay.
+///
+/// No sweep. The deposit output's tapleaf names the pool's own dWallet key, so
+/// the coins are under pool custody the moment the deposit confirms — moving them
+/// to `pool_script` would transfer them from that key to that same key. The
+/// SPV-verified transaction is therefore the deposit itself, and its credited
+/// output is recorded directly as a pool UTXO.
+///
+/// That drops a miner fee and an MPC signing round from every deposit, and makes
+/// the custody check cryptographic rather than a comparison against a configured
+/// script.
+///
+/// # Instruction data
+/// - `VerifyDepositData` (148 bytes, fixed)
+pub fn process_verify_deposit(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: &[u8],
+) -> ProgramResult {
+    if accounts.len() < 15 {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+
+    let pool_state_info = &accounts[0];
+    let authority = &accounts[5];
+
+    if !authority.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    let ix_data = VerifyDepositData::from_bytes(data)?;
+
+    // No sweep: the SPV-verified transaction IS the deposit, so there is no second
+    // transaction to read and `deposit_txid` must name the proven one. A caller
+    // supplying a separate deposit tx is describing the old two-step flow, which
+    // this instruction does not implement.
+    if ix_data.base.deposit_tx_size != 0
+        || ix_data.base.deposit_txid != ix_data.base.sweep_txid
+    {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+
+    validate_program_owner(pool_state_info, program_id)?;
+    {
+        let pool_data = pool_state_info.try_borrow()?;
+        let pool = PoolState::from_bytes(&pool_data)?;
+
+        if pool.permissioned() {
+            return Err(UTXOpiaError::NotPermissioned.into());
+        }
+
+        if pool.is_paused() {
+            return Err(UTXOpiaError::PoolPaused.into());
+        }
+
+        if authority.address().as_ref() != pool.authority {
+            return Err(UTXOpiaError::Unauthorized.into());
+        }
+    }
+
+    complete_deposit_inner(
+        program_id,
+        accounts,
+        &ix_data.base,
+        &[],
+        &DepositBinding::Tweak {
+            ephemeral_pubkey: ix_data.ephemeral_pubkey,
+            note_public_key: ix_data.note_public_key,
+            deposit_vout: ix_data.deposit_vout,
+        },
+    )
+}
+
+/// Policy-approved OP_RETURN-free deposit for permissioned pools (disc 26).
+///
+/// disc 25's binding with disc 22's gate. The tapleaf already tells the two pools
+/// apart — each carries its own Ika custody key, so an open-pool address simply
+/// does not verify against a permissioned pool's config — but distinguishing the
+/// pools is not the same as clearing the pool's policy. A permissioned pool
+/// exists *for* that gate, so it is enforced here exactly as disc 22 enforces it.
+///
+/// Accounts: the 15 of `process_verify_deposit`, plus
+/// 15. `[writable]` One-time PolicyApproval bound to this exact instruction.
+/// 16. `[]` PolicyApproval program.
+///
+/// Instruction data:
+///   `VerifyDepositData` (148 bytes) || auditor_ciphertext (variable, may be empty)
+pub fn process_verify_deposit_permissioned(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: &[u8],
+) -> ProgramResult {
+    if accounts.len() < 17 {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+
+    let pool_state_info = &accounts[0];
+    let authority = &accounts[5];
+
+    if !authority.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+
+    let ix_data = VerifyDepositData::from_bytes(data)?;
+    let auditor_ciphertext = &data[VerifyDepositData::SIZE..];
+
+    // Same no-sweep shape disc 25 requires: the SPV-verified transaction IS the
+    // deposit, so there is no second transaction and no separate txid.
+    if ix_data.base.deposit_tx_size != 0 || ix_data.base.deposit_txid != ix_data.base.sweep_txid {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+
+    validate_program_owner(pool_state_info, program_id)?;
+    let policy_authority = {
+        let pool_data = pool_state_info.try_borrow()?;
+        let pool = PoolState::from_bytes(&pool_data)?;
+
+        if pool.is_paused() {
+            return Err(UTXOpiaError::PoolPaused.into());
+        }
+
+        if authority.address().as_ref() != pool.authority {
+            return Err(UTXOpiaError::Unauthorized.into());
+        }
+
+        if pool.auditor_is_frozen() {
+            return Err(UTXOpiaError::AuditorFrozen.into());
+        }
+
+        // A public pool must use disc 25; routing it here would consume a policy
+        // approval it never needed.
+        if !pool.permissioned() {
+            return Err(UTXOpiaError::NotPermissioned.into());
+        }
+        *pool.auditor()
+    };
+
+    crate::instructions::consume_policy_approval(
+        program_id,
+        &accounts[15],
+        &accounts[16],
+        pool_state_info,
+        authority.address(),
+        &policy_authority,
+        crate::instruction::VERIFY_DEPOSIT_PERMISSIONED,
+        // Whole payload, as disc 22 does: nothing in a deposit ages, so the
+        // depositor can hold these exact bytes until the answer arrives.
+        &[data],
+    )?;
+
+    complete_deposit_inner(
+        program_id,
+        accounts,
+        &ix_data.base,
+        auditor_ciphertext,
+        &DepositBinding::Tweak {
+            ephemeral_pubkey: ix_data.ephemeral_pubkey,
+            note_public_key: ix_data.note_public_key,
+            deposit_vout: ix_data.deposit_vout,
+        },
+    )
 }
 
 /// Policy-approved deposit for permissioned pools (disc 22).
@@ -242,7 +541,13 @@ pub fn process_complete_deposit_permissioned(
         &[data],
     )?;
 
-    complete_deposit_inner(program_id, accounts, &ix_data, auditor_ciphertext)
+    complete_deposit_inner(
+        program_id,
+        accounts,
+        &ix_data,
+        auditor_ciphertext,
+        &DepositBinding::OpReturn,
+    )
 }
 
 /// Core deposit logic shared by both public and permissioned entry points.
@@ -258,6 +563,7 @@ fn complete_deposit_inner(
     accounts: &[AccountInfo],
     ix_data: &CompleteDepositData,
     auditor_ciphertext: &[u8],
+    binding: &DepositBinding,
 ) -> ProgramResult {
     let pool_state_info = &accounts[0];
     let verified_tx_info = &accounts[1];
@@ -361,7 +667,23 @@ fn complete_deposit_inner(
     // --- Deposit receipt dedup check ---
     // Derive deposit receipt PDA from deposit_txid and verify it doesn't already exist
     {
-        let receipt_seeds: &[&[u8]] = &[DepositReceipt::SEED, &ix_data.deposit_txid];
+        // Keying on the txid alone lets the first output of a funding transaction
+        // block every sibling. A tweak-bound deposit names its own output, so it
+        // gets a receipt per outpoint and one transaction can fund many depositors
+        // (an exchange batch withdrawal is exactly that shape).
+        let vout_le = binding.deposit_vout().map(|v| v.to_le_bytes());
+        let seeds_with_vout;
+        let seeds_txid_only;
+        let receipt_seeds: &[&[u8]] = match &vout_le {
+            Some(v) => {
+                seeds_with_vout = [DepositReceipt::SEED, &ix_data.deposit_txid[..], &v[..]];
+                &seeds_with_vout
+            }
+            None => {
+                seeds_txid_only = [DepositReceipt::SEED, &ix_data.deposit_txid[..]];
+                &seeds_txid_only
+            }
+        };
         let (expected_receipt_pda, receipt_bump) = find_program_address(receipt_seeds, program_id);
         if deposit_receipt_info.address() != &expected_receipt_pda {
             return Err(ProgramError::InvalidSeeds);
@@ -378,7 +700,27 @@ fn complete_deposit_inner(
         // Create deposit receipt PDA to prevent future duplicates
         let rent = Rent::get()?;
         let bump_bytes = [receipt_bump];
-        let signer_seeds: &[&[u8]] = &[DepositReceipt::SEED, &ix_data.deposit_txid, &bump_bytes];
+        let signer_with_vout;
+        let signer_txid_only;
+        let signer_seeds: &[&[u8]] = match &vout_le {
+            Some(v) => {
+                signer_with_vout = [
+                    DepositReceipt::SEED,
+                    &ix_data.deposit_txid[..],
+                    &v[..],
+                    &bump_bytes[..],
+                ];
+                &signer_with_vout
+            }
+            None => {
+                signer_txid_only = [
+                    DepositReceipt::SEED,
+                    &ix_data.deposit_txid[..],
+                    &bump_bytes[..],
+                ];
+                &signer_txid_only
+            }
+        };
 
         create_pda_account(
             authority,
@@ -517,17 +859,31 @@ fn complete_deposit_inner(
     let deposit_parsed =
         ParsedTransaction::parse(deposit_raw_tx).map_err(|_| UTXOpiaError::InvalidSpvProof)?;
 
-    // --- Extract note_public_key + ephemeral_pubkey from deposit TX OP_RETURN ---
-    let DepositOpReturn {
-        pool_tag,
-        ephemeral_pubkey,
-        note_public_key,
-    } = deposit_parsed
-        .find_deposit_op_return()
-        .ok_or(UTXOpiaError::InvalidStealthOpReturn)?;
-    if pool_tag != expected_pool_tag(program_id, pool_state_info.address(), zkbtc_mint.address()) {
-        return Err(UTXOpiaError::InvalidStealthOpReturn.into());
-    }
+    // --- Note keys: from the deposit TX's OP_RETURN, or from instruction data ---
+    // The tweak path needs no pool tag: the deposit address is derived from this
+    // pool's own Ika key, so an address for another pool simply will not verify.
+    let (ephemeral_pubkey, note_public_key) = match binding {
+        DepositBinding::OpReturn => {
+            let DepositOpReturn {
+                pool_tag,
+                ephemeral_pubkey,
+                note_public_key,
+            } = deposit_parsed
+                .find_deposit_op_return()
+                .ok_or(UTXOpiaError::InvalidStealthOpReturn)?;
+            if pool_tag
+                != expected_pool_tag(program_id, pool_state_info.address(), zkbtc_mint.address())
+            {
+                return Err(UTXOpiaError::InvalidStealthOpReturn.into());
+            }
+            (ephemeral_pubkey, note_public_key)
+        }
+        DepositBinding::Tweak {
+            ephemeral_pubkey,
+            note_public_key,
+            ..
+        } => (*ephemeral_pubkey, *note_public_key),
+    };
 
     let pool_config_info = &accounts[14];
     validate_pool_config_pda(pool_config_info, pool_state_info, program_id)?;
@@ -545,7 +901,55 @@ fn complete_deposit_inner(
     // A txid-only linkage is insufficient when the deposit transaction has
     // multiple outputs. Bind the sweep to the specific output that supplied the
     // user's original deposit value.
-    let original_deposit_output = if direct_to_pool {
+    //
+    // A tweak-bound deposit takes neither branch: it has no sweep. Its tapleaf
+    // names the pool's own dWallet key and nothing else can satisfy the leaf, so
+    // the coins are under pool custody the moment the deposit confirms. Moving
+    // them to `pool_script` would hand them from that key to that same key — a
+    // hop that buys no custody, costs a miner fee, and puts an MPC signing round
+    // on the busiest path in the system. It also makes the custody check
+    // cryptographic (provably spendable only by the configured key) instead of a
+    // string comparison against a configured script.
+    let tweak_credited: Option<(u64, u32)> = match binding {
+        DepositBinding::Tweak { deposit_vout, .. } => {
+            let internal_key = config.get_ika_dwallet_xonly_pubkey();
+            if *internal_key == [0u8; 32] {
+                return Err(UTXOpiaError::IkaCpiAccountsMissing.into());
+            }
+
+            // The caller names the output, so verify that exact one rather than
+            // searching. Two outputs of one transaction may legitimately pay two
+            // different depositors, each credited under its own receipt.
+            let output = sweep_parsed
+                .outputs()
+                .nth(*deposit_vout as usize)
+                .ok_or(UTXOpiaError::InvalidSpvProof)?;
+            let script = output.script_pubkey;
+            if output.value == 0 || script.len() != 34 || script[0] != 0x51 || script[1] != 0x20 {
+                return Err(UTXOpiaError::TaprootVerificationFailed.into());
+            }
+            let output_key: &[u8; 32] = script[2..34]
+                .try_into()
+                .map_err(|_| UTXOpiaError::TaprootVerificationFailed)?;
+
+            // Script-path binding, not a tweak of the dWallet key: the address is
+            // TapTweak(NUMS, tapleaf_hash), and the leaf names both this deposit's
+            // commitment and the pool's custody key. Substituting either changes
+            // the leaf, and so the address the funder would have had to pay.
+            //
+            // `verify_taproot_output_key` already computes TapTweak(a || b), so
+            // the merkle root goes in the slot a raw commitment would occupy.
+            let leaf_hash = deposit_leaf_hash(
+                &tweak_commitment(&note_public_key, &ephemeral_pubkey),
+                internal_key,
+            );
+            verify_taproot_output_key(&DEPOSIT_NUMS_INTERNAL_KEY, &leaf_hash, output_key)?;
+            Some((output.value, *deposit_vout))
+        }
+        DepositBinding::OpReturn => None,
+    };
+
+    let original_deposit_output = if direct_to_pool || tweak_credited.is_some() {
         None
     } else {
         // Batched consolidation cannot allocate one sweep miner fee across independently
@@ -554,48 +958,70 @@ fn complete_deposit_inner(
         if sweep_parsed.input_count() != 1 {
             return Err(UTXOpiaError::InvalidSpvProof.into());
         }
-        // Bind the selected output to the OP_RETURN note key. Selecting the first positive
+        // Bind the selected output to the note key. Selecting the first positive
         // output is unsafe because ordinary wallet change can precede the actual deposit.
         let internal_key = config.get_ika_dwallet_xonly_pubkey();
         if *internal_key == [0u8; 32] {
             return Err(UTXOpiaError::IkaCpiAccountsMissing.into());
         }
-        let mut matched_output = None;
-        for (vout, output) in deposit_parsed.outputs().enumerate() {
-            let script = output.script_pubkey;
-            if output.value == 0 || script.len() != 34 || script[0] != 0x51 || script[1] != 0x20 {
-                continue;
-            }
-            let output_key: &[u8; 32] = script[2..34]
-                .try_into()
-                .map_err(|_| UTXOpiaError::TaprootVerificationFailed)?;
-            if verify_taproot_output_key(internal_key, &note_public_key, output_key).is_ok() {
-                // Multiple outputs to the same derived address are ambiguous. Refuse instead of
-                // silently choosing one and crediting a value the depositor did not intend.
-                if matched_output.is_some() {
-                    return Err(UTXOpiaError::InvalidSpvProof.into());
+
+        let (output, deposit_vout) = match binding {
+            DepositBinding::OpReturn => {
+                let mut matched_output = None;
+                for (vout, output) in deposit_parsed.outputs().enumerate() {
+                    let script = output.script_pubkey;
+                    if output.value == 0
+                        || script.len() != 34
+                        || script[0] != 0x51
+                        || script[1] != 0x20
+                    {
+                        continue;
+                    }
+                    let output_key: &[u8; 32] = script[2..34]
+                        .try_into()
+                        .map_err(|_| UTXOpiaError::TaprootVerificationFailed)?;
+                    if verify_taproot_output_key(internal_key, &note_public_key, output_key).is_ok()
+                    {
+                        // Multiple outputs to the same derived address are ambiguous. Refuse
+                        // instead of silently choosing one and crediting a value the depositor
+                        // did not intend.
+                        if matched_output.is_some() {
+                            return Err(UTXOpiaError::InvalidSpvProof.into());
+                        }
+                        matched_output = Some((output, vout as u32));
+                    }
                 }
-                matched_output = Some((output, vout as u32));
+                matched_output.ok_or(UTXOpiaError::TaprootVerificationFailed)?
             }
-        }
-        let (output, deposit_vout) =
-            matched_output.ok_or(UTXOpiaError::TaprootVerificationFailed)?;
+            // Handled above — a tweak-bound deposit never reaches the sweep path.
+            DepositBinding::Tweak { .. } => {
+                return Err(ProgramError::InvalidInstructionData)
+            }
+        };
+
         if !sweep_parsed.find_input_with_prev_outpoint(&ix_data.deposit_txid, deposit_vout) {
             return Err(UTXOpiaError::InvalidSpvProof.into());
         }
         Some(output)
     };
 
-    // Extract pool output amount and vout. The credited output must match the
-    // configured pool script so the recorded UTXO is controlled by Ika custody.
-    if sweep_parsed.positive_output_count_by_script(pool_script) != 1 {
-        return Err(UTXOpiaError::InvalidSpvProof.into());
-    }
-    let (pool_output, sweep_vout) = sweep_parsed
-        .find_output_by_script(pool_script)
-        .ok_or(UTXOpiaError::InvalidSpvProof)?;
-    let pool_output_value = pool_output.value;
-    let original_deposit_sats = if direct_to_pool {
+    // Extract the credited output's amount and vout. For the OP_RETURN paths that
+    // means matching the configured pool script, so the recorded UTXO is known to
+    // be under Ika custody; the tweak path proved custody from the leaf above and
+    // credits the deposit output itself.
+    let (pool_output_value, sweep_vout) = match tweak_credited {
+        Some(credited) => credited,
+        None => {
+            if sweep_parsed.positive_output_count_by_script(pool_script) != 1 {
+                return Err(UTXOpiaError::InvalidSpvProof.into());
+            }
+            let (pool_output, vout) = sweep_parsed
+                .find_output_by_script(pool_script)
+                .ok_or(UTXOpiaError::InvalidSpvProof)?;
+            (pool_output.value, vout)
+        }
+    };
+    let original_deposit_sats = if direct_to_pool || tweak_credited.is_some() {
         // The SPV-verified transaction is the user deposit itself. The pool
         // output is the gross user deposit; other outputs may be wallet change.
         pool_output_value
@@ -714,7 +1140,9 @@ fn complete_deposit_inner(
         // once as sweep(D -> S) keyed on D, then again as direct(S) keyed on S — minting
         // `pool_output_value` both times against a single real deposit. The receipt PDAs
         // differ so the dedup check above cannot see it; the output identity can.
-        if direct_to_pool && already_recorded {
+        // A tweak-bound deposit output is named by its own receipt, so it can
+        // never legitimately have been credited by an earlier completion either.
+        if (direct_to_pool || tweak_credited.is_some()) && already_recorded {
             return Err(UTXOpiaError::DuplicateDeposit.into());
         }
 
@@ -729,12 +1157,29 @@ fn complete_deposit_inner(
                 &utxo_bump_bytes,
             ];
 
+            // A tweak-bound deposit's UTXO sits at its own address, spendable only
+            // through the tapleaf. Redemption has to rebuild that leaf, and the
+            // commitment is the only half of it not already on chain — so it is
+            // stored here, at credit time, or it is lost. There is no fallback:
+            // the key path is a NUMS point.
+            let leaf_commitment = match binding {
+                DepositBinding::Tweak { .. } => {
+                    Some(tweak_commitment(&note_public_key, &ephemeral_pubkey))
+                }
+                DepositBinding::OpReturn => None,
+            };
+            let account_len = if leaf_commitment.is_some() {
+                UtxoRecord::LEN_WITH_LEAF
+            } else {
+                UtxoRecord::LEN
+            };
+
             create_pda_account(
                 authority,
                 utxo_record_info,
                 program_id,
-                rent.try_minimum_balance(UtxoRecord::LEN)?,
-                UtxoRecord::LEN as u64,
+                rent.try_minimum_balance(account_len)?,
+                account_len as u64,
                 utxo_signer_seeds,
             )?;
 
@@ -745,6 +1190,10 @@ fn complete_deposit_inner(
                 utxo.set_vout(sweep_vout);
                 utxo.set_amount_sats(pool_output_value);
                 // status defaults to Unspent (0)
+
+                if let Some(commitment) = leaf_commitment {
+                    UtxoRecord::set_leaf_commitment(&mut utxo_data, &commitment)?;
+                }
             }
 
             // Track the spendable BTC exactly once for this pool output.
@@ -936,3 +1385,7 @@ mod tests {
         assert!(validate_btc_deposit_amount_and_fee(10, 1, 1_000, 1, 1_000, 0, 10).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "verify_deposit_tests.rs"]
+mod verify_deposit_tests;

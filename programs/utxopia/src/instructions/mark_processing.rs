@@ -116,6 +116,10 @@ pub fn process_mark_processing(
         txid: [0u8; 32],
         vout: 0,
         amount_sats: 0,
+        // The commitment is not part of what mark_processing commits to: the
+        // input set is identified by outpoint, and the leaf is re-read from the
+        // UTXO account at approval time.
+        leaf_commitment: None,
     }; MAX_UTXOS_PER_MARK];
 
     for i in 0..utxo_count {
@@ -164,6 +168,7 @@ pub fn process_mark_processing(
             txid: utxo.txid,
             vout: utxo.vout(),
             amount_sats: amount,
+            leaf_commitment: None,
         };
 
         // Sum amount
