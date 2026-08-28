@@ -166,7 +166,11 @@ fn initialize(program_id: &Address, accounts: &[AccountView], data: &[u8]) -> Pr
         return Err(ProgramError::InvalidAccountData);
     }
     let (_, auditor) = validate_pool(pool)?;
-    if !matches!(data[0], 13 | 14 | 15 | 22 | 23) {
+    // Keep in lockstep with utxopia's `is_permissioned_action`; the two lists are a
+    // cross-program duplicate and `policy-allowlist-parity.test.ts` fails if they drift.
+    // 13 transact · 14 unshield · 15 redeem · 22 complete_deposit_permissioned
+    // · 23 shield_permissioned · 26 verify_deposit_permissioned
+    if !matches!(data[0], 13 | 14 | 15 | 22 | 23 | 26) {
         return Err(ProgramError::InvalidInstructionData);
     }
     let expires = u64::from_le_bytes(data[1..9].try_into().unwrap());

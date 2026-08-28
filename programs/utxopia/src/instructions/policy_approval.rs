@@ -362,11 +362,16 @@ pub fn consume_policy_approval(
     )
 }
 
+/// Mirror of the allowlist in `utxopia-policy`'s `lib.rs`. Both must accept the same set:
+/// an action missing from either one can never obtain an approval, so the instruction is
+/// dead on arrival (fail-closed, but silently). `policy-allowlist-parity.test.ts` pins them
+/// together — the discriminator-parity test pins the numbers, not the membership.
 fn is_permissioned_action(action: u8) -> bool {
     matches!(
         action,
         crate::instruction::COMPLETE_DEPOSIT_PERMISSIONED
             | crate::instruction::SHIELD_PERMISSIONED
+            | crate::instruction::VERIFY_DEPOSIT_PERMISSIONED
             | crate::instruction::TRANSACT
             | crate::instruction::UNSHIELD
             | crate::instruction::REDEEM
