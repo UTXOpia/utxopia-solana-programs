@@ -37,6 +37,12 @@ const SYSTEM_ID: Pubkey = Pubkey::new_from_array([0u8; 32]);
 
 /// utxopia's compiled-in BTC_LIGHT_CLIENT_PROGRAM_ID for the Devnet-regtest
 /// artifact exercised by this suite.
+///
+/// NOTE: this pins the whole suite to a `cargo build-sbf --features devnet-regtest`
+/// artifact. Build with any other feature and `--features devnet` selects a different
+/// BTC_LIGHT_CLIENT_PROGRAM_ID, so every complete_deposit/complete_redemption test fails
+/// at the owner check with a misleading InvalidAccountOwner long before its real assertion.
+/// Run this suite via `bun run test:svm`, which builds the right artifact first.
 const BTC_LC_OWNER: [u8; 32] = [
     0x72, 0x4d, 0xf9, 0x1e, 0xc8, 0xc4, 0x80, 0x2c, 0x6a, 0x7c, 0x00, 0x7a, 0x03, 0x44, 0x91, 0x2c,
     0x89, 0xe8, 0x73, 0x4e, 0x07, 0x71, 0x59, 0x93, 0xb3, 0x9c, 0xc3, 0xad, 0x89, 0x36, 0x61, 0x67,
@@ -54,6 +60,7 @@ const TOKEN_2022: [u8; 32] = [
 ];
 
 const INVALID_PDA: u32 = 6085; // UTXOpiaError::InvalidPDA
+const INVALID_SPV_PROOF: u32 = 6019; // UTXOpiaError::InvalidSpvProof
 
 fn so_dir() -> String {
     format!("{}/../../target/deploy", env!("CARGO_MANIFEST_DIR"))
@@ -205,6 +212,151 @@ fn complete_deposit_accepts_canonical_token_config() {
         !is_custom(&res.program_result, INVALID_PDA),
         "canonical token_config must pass the binding gate, got InvalidPDA"
     );
+}
+
+/// audit_1 F-BTC-04 — drive complete_deposit far enough to reach the SPV block.
+///
+/// The older complete_deposit fixture stops at the vault gate (custom 6081), well before any
+/// SPV code runs, so the reorg check had no execution-level coverage. This builds real PDAs for
+/// pool state, commitment tree, token config, deposit receipt, VerifiedTransaction and light
+/// client so execution reaches `assert_block_still_canonical`.
+///
+/// `hi` chooses what to supply for the HeightIndex account the check looks up by address.
+#[derive(Clone, Copy, PartialEq)]
+enum HeightIdx {
+    /// Names the same block the VerifiedTransaction does — still canonical.
+    Canonical,
+    /// Names a different block at that height — the reorg case.
+    Reorged,
+    /// Not passed at all. Must be an error, not a skipped check.
+    Omitted,
+}
+
+const CT_DISC: u8 = 0x05;
+const TC_DISC: u8 = 0x0B;
+const VT_DISC: u8 = 0x08;
+
+fn complete_deposit_spv_call(pid: &Pubkey, hi: HeightIdx) -> (Instruction, Vec<(Pubkey, Account)>) {
+    let token_2022 = Pubkey::new_from_array(TOKEN_2022);
+    let btc_lc = Pubkey::new_from_array(BTC_LC_OWNER);
+
+    // ix_data is 80 zero bytes, so sweep_txid = [0;32], deposit_txid = [0;32], block_height = 0.
+    let txid = [0u8; 32];
+    let block_hash = [0x55u8; 32];
+    let other_hash = [0x66u8; 32];
+    let height: u64 = 0;
+
+    let zkbtc_mint = Pubkey::new_unique();
+    let (pool_state, pool_bump) =
+        Pubkey::find_program_address(&[b"pool_state", zkbtc_mint.as_ref()], pid);
+    let (commitment_tree, _) = Pubkey::find_program_address(
+        &[b"commitment_tree", pool_state.as_ref(), &0u32.to_le_bytes()],
+        pid,
+    );
+    let (token_config, _) = Pubkey::find_program_address(
+        &[b"token_config", pool_state.as_ref(), zkbtc_mint.as_ref()],
+        pid,
+    );
+    let (deposit_receipt, _) = Pubkey::find_program_address(&[b"deposit_receipt", &txid], pid);
+    let (verified_tx, _) =
+        Pubkey::find_program_address(&[b"verified_tx", &block_hash, &txid], &btc_lc);
+    let (light_client, _) = Pubkey::find_program_address(&[b"btc_light_client"], &btc_lc);
+    let (height_index, _) =
+        Pubkey::find_program_address(&[b"height_index", &height.to_le_bytes()], &btc_lc);
+
+    let authority = Pubkey::new_unique();
+    let pool_vault = Pubkey::new_unique();
+    let tx_buffer = Pubkey::new_unique();
+    let deposit_tx_buffer = Pubkey::new_unique();
+    let utxo_record = Pubkey::new_unique();
+    let pool_config = Pubkey::new_unique();
+    let (system_key, system_acct) = keyed_account_for_system_program();
+
+    let mut metas = vec![
+        AccountMeta::new(pool_state, false),
+        AccountMeta::new_readonly(verified_tx, false),
+        AccountMeta::new_readonly(light_client, false),
+        AccountMeta::new(commitment_tree, false),
+        AccountMeta::new_readonly(tx_buffer, false),
+        AccountMeta::new(authority, true),
+        AccountMeta::new_readonly(system_key, false),
+        AccountMeta::new(zkbtc_mint, false),
+        AccountMeta::new(pool_vault, false),
+        AccountMeta::new_readonly(token_2022, false),
+        AccountMeta::new_readonly(deposit_tx_buffer, false),
+        AccountMeta::new(deposit_receipt, false),
+        AccountMeta::new(utxo_record, false),
+        AccountMeta::new(token_config, false),
+        AccountMeta::new_readonly(pool_config, false),
+    ];
+    if hi != HeightIdx::Omitted {
+        // Appended, not slotted at a fixed index — the check locates it by address.
+        metas.push(AccountMeta::new_readonly(height_index, false));
+    }
+
+    let mut data = vec![11u8];
+    data.extend_from_slice(&[0u8; 80]);
+    let ix = Instruction::new_with_bytes(*pid, &data, metas);
+
+    // PoolState: disc(0) bump(1) flags(2) _pad(3) authority(4..36) zkbtc_mint(36..68)
+    // pool_vault(68..100); max_deposit(180..188) must be non-zero or the later amount check
+    // would reject — it runs after the SPV block, but keep the fixture honest.
+    let mut pool = vec![0u8; POOL_LEN];
+    pool[0] = POOL_DISC;
+    pool[1] = pool_bump;
+    pool[4..36].copy_from_slice(authority.as_ref());
+    pool[36..68].copy_from_slice(zkbtc_mint.as_ref());
+    pool[68..100].copy_from_slice(pool_vault.as_ref());
+    pool[180..188].copy_from_slice(&u64::MAX.to_le_bytes());
+
+    // TokenConfig: disc(0) bump(1) mint(2..34) token_id(34..66) vault(66..98)
+    // decimals(98) enabled(99) ... max_deposit(116..124)
+    let mut tc = vec![0u8; 164];
+    tc[0] = TC_DISC;
+    tc[2..34].copy_from_slice(zkbtc_mint.as_ref());
+    tc[66..98].copy_from_slice(pool_vault.as_ref());
+    tc[99] = 1; // enabled
+    tc[116..124].copy_from_slice(&u64::MAX.to_le_bytes());
+
+    // VerifiedTransaction: disc(0) bump(1) _pad(2..4) block_height(4..8) block_hash(8..40)
+    // txid(40..72) verified_at(72..80) tx_index(80..84) reinit_epoch(84..88)
+    let mut vt = vec![0u8; 120];
+    vt[0] = VT_DISC;
+    vt[4..8].copy_from_slice(&(height as u32).to_le_bytes());
+    vt[8..40].copy_from_slice(&block_hash);
+    vt[40..72].copy_from_slice(&txid);
+
+    let mut ct = vec![0u8; 64];
+    ct[0] = CT_DISC;
+
+    let mut accounts = vec![
+        (pool_state, acct(1_000_000, pool, *pid)),
+        (verified_tx, acct(1_000_000, vt, btc_lc)),
+        (light_client, acct(1_000_000, lc_blob_for_extend(100, 100), btc_lc)),
+        (commitment_tree, acct(1_000_000, ct, *pid)),
+        (tx_buffer, acct(1, vec![], SYSTEM_ID)),
+        (authority, acct(10_000_000_000, vec![], SYSTEM_ID)),
+        (system_key, system_acct),
+        (zkbtc_mint, acct(1, vec![0u8; 8], token_2022)),
+        (pool_vault, acct(1, vec![0u8; 8], token_2022)),
+        (token_2022, acct(1, vec![], SYSTEM_ID)),
+        (deposit_tx_buffer, acct(1, vec![], SYSTEM_ID)),
+        (deposit_receipt, acct(0, vec![], SYSTEM_ID)),
+        (utxo_record, acct(0, vec![], SYSTEM_ID)),
+        (token_config, acct(1_000_000, tc, *pid)),
+        (pool_config, acct(1, vec![], *pid)),
+    ];
+    match hi {
+        HeightIdx::Canonical => {
+            accounts.push((height_index, acct(1_000_000, height_index_blob(&block_hash, height), btc_lc)))
+        }
+        HeightIdx::Reorged => {
+            accounts.push((height_index, acct(1_000_000, height_index_blob(&other_hash, height), btc_lc)))
+        }
+        HeightIdx::Omitted => {}
+    }
+
+    (ix, accounts)
 }
 
 // ----------------------------------------------------------------------------
@@ -1050,8 +1202,8 @@ fn make_raw_header(parent_hash: &[u8; 32]) -> ([u8; 80], [u8; 32]) {
     raw[4..36].copy_from_slice(parent_hash);
     // merkle_root (bytes 36..68): all zero
     // timestamp (bytes 68..72): 0 → passes clock check
-    // bits (bytes 72..76): 0x1d00ffff — gives positive chainwork for regtest
-    let bits: u32 = 0x1d00_ffff;
+    // bits (bytes 72..76): 0x207fffff — regtest pow_limit.
+    let bits: u32 = 0x207f_ffff;
     raw[72..76].copy_from_slice(&bits.to_le_bytes());
     // nonce (bytes 76..80): 0
     let block_hash = double_sha256(&raw);
@@ -1070,10 +1222,34 @@ fn make_raw_header(parent_hash: &[u8; 32]) -> ([u8; 80], [u8; 32]) {
 ///
 /// The parent is placed at `parent_height`; the light-client's `finalized_height`
 /// is the `finalized` argument.
+/// What to supply for the mandatory parent-HeightIndex account (audit_1 F-BTC-03).
+#[derive(Clone, Copy, PartialEq)]
+enum ParentHi {
+    /// The real thing: HeightIndex[parent_height].block_hash == parent_hash.
+    Canonical,
+    /// Parent is NOT the canonical block at its height — what a fork block staged by an
+    /// earlier, non-canonical batch looks like. Must be rejected.
+    Mismatched,
+    /// The PDA exists as a bare system account — the only thing an attacker can actually pass
+    /// for a fork block, since the non-canonical branch never creates a HeightIndex.
+    Uninitialized,
+    /// Account omitted entirely — the pre-fix caller. Must now be NotEnoughAccountKeys.
+    Omitted,
+}
+
 fn extend_blockchain_call(
     pid: &Pubkey,
     parent_height: u64,
     finalized: u64,
+) -> (Instruction, Vec<(Pubkey, Account)>) {
+    extend_blockchain_call_with(pid, parent_height, finalized, ParentHi::Canonical)
+}
+
+fn extend_blockchain_call_with(
+    pid: &Pubkey,
+    parent_height: u64,
+    finalized: u64,
+    parent_hi: ParentHi,
 ) -> (Instruction, Vec<(Pubkey, Account)>) {
     let parent_hash = [0x42u8; 32]; // arbitrary deterministic value
     let (raw_header, new_block_hash) = make_raw_header(&parent_hash);
@@ -1094,7 +1270,7 @@ fn extend_blockchain_call(
     data.push(1u8); // num_headers = 1
     data.extend_from_slice(&raw_header);
 
-    let metas = vec![
+    let mut metas = vec![
         AccountMeta::new(light_client, false),
         AccountMeta::new(submitter, true),
         AccountMeta::new_readonly(system_key, false),
@@ -1102,6 +1278,12 @@ fn extend_blockchain_call(
         AccountMeta::new(block_pda, false),
         AccountMeta::new(hi_pda, false),
     ];
+    // Mandatory trailing account at index expected_accounts + num_ancestors = 6 + 0.
+    let (parent_hi_pda, _) =
+        Pubkey::find_program_address(&[b"height_index", &parent_height.to_le_bytes()], pid);
+    if parent_hi != ParentHi::Omitted {
+        metas.push(AccountMeta::new_readonly(parent_hi_pda, false));
+    }
     let ix = Instruction::new_with_bytes(*pid, &data, metas);
 
     // tip_height of the LC doesn't affect the fork-point gate; set it equal to
@@ -1109,7 +1291,7 @@ fn extend_blockchain_call(
     let lc_data = lc_blob_for_extend(parent_height, finalized);
     let parent_bh_data = parent_block_header_blob(&parent_hash, parent_height);
 
-    let accounts = vec![
+    let mut accounts = vec![
         (light_client, acct(10_000_000_000, lc_data, *pid)),
         (submitter, acct(10_000_000_000, vec![], SYSTEM_ID)),
         (system_key, system_acct),
@@ -1118,6 +1300,24 @@ fn extend_blockchain_call(
         (block_pda, acct(0, vec![], SYSTEM_ID)),
         (hi_pda, acct(0, vec![], SYSTEM_ID)),
     ];
+    match parent_hi {
+        ParentHi::Canonical => accounts.push((
+            parent_hi_pda,
+            acct(1_000_000, height_index_blob(&parent_hash, parent_height), *pid),
+        )),
+        ParentHi::Mismatched => accounts.push((
+            parent_hi_pda,
+            acct(
+                1_000_000,
+                height_index_blob(&[0x99u8; 32], parent_height),
+                *pid,
+            ),
+        )),
+        ParentHi::Uninitialized => {
+            accounts.push((parent_hi_pda, acct(0, vec![], SYSTEM_ID)))
+        }
+        ParentHi::Omitted => {}
+    }
 
     (ix, accounts)
 }
@@ -1148,6 +1348,46 @@ fn extend_blockchain_rejects_fork_below_finality() {
         ),
         "must return InvalidArgument (fork-point gate), got {:?}",
         res.program_result
+    );
+}
+
+/// audit_1 F-BTC-03: the parent-HeightIndex account is MANDATORY.
+///
+/// It used to be enforced only `if accounts.len() > expected_accounts + num_ancestors`, i.e.
+/// only when the caller volunteered it — so an attacker staging a multi-batch fork just left
+/// it out. These three cases pin the three ways that can now go.
+#[test]
+fn extend_blockchain_requires_parent_height_index() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "btc_light_client");
+
+    // 1. Omitted — the pre-fix caller. Rejected before any state is read.
+    let (ix, accounts) = extend_blockchain_call_with(&pid, 10, 10, ParentHi::Omitted);
+    assert!(
+        matches!(
+            mollusk.process_instruction(&ix, &accounts).program_result,
+            ProgramResult::Failure(ProgramError::NotEnoughAccountKeys)
+        ),
+        "omitting the parent HeightIndex must not silently skip the canonicality check"
+    );
+
+    // 2. Uninitialized — what an attacker can actually pass for a fork block staged by an
+    //    earlier non-canonical batch, since that branch never creates a HeightIndex.
+    let (ix, accounts) = extend_blockchain_call_with(&pid, 10, 10, ParentHi::Uninitialized);
+    assert!(
+        mollusk.process_instruction(&ix, &accounts).program_result.is_err(),
+        "an uninitialized parent HeightIndex must be rejected"
+    );
+
+    // 3. Present but naming a different block — the parent is not canonical at its height.
+    let (ix, accounts) = extend_blockchain_call_with(&pid, 10, 10, ParentHi::Mismatched);
+    assert!(
+        matches!(
+            mollusk.process_instruction(&ix, &accounts).program_result,
+            ProgramResult::Failure(ProgramError::InvalidAccountData)
+        ),
+        "a parent that is not the canonical block at its height must be rejected"
     );
 }
 
@@ -1600,6 +1840,258 @@ fn shield_permissioned_accepts_a_depositor_with_a_registered_exit() {
     assert!(
         !is_custom(&res.program_result, EXIT_DESTINATION_NOT_REGISTERED),
         "a registered depositor must clear the exit gate, got {:?}",
+        res.program_result
+    );
+}
+
+
+/// audit_1 F-BTC-04: a VerifiedTransaction is a permanent record of a proof that was valid
+/// once. `assert_canonical_verified_tx` re-derives the PDA from the block hash and txid stored
+/// inside that same account, so it cannot notice a reorg, and the confirmation count is computed
+/// against `tip`, which only grows. Without a live HeightIndex lookup, a deposit settles against
+/// a transaction that is no longer in the chain.
+///
+/// InvalidSpvProof (6019) is the check firing. The canonical case must get PAST it — it then
+/// fails at the ChadBuffer owner check with the builtin InvalidAccountOwner, which is a
+/// different error and proves execution moved on rather than tripping the same gate.
+#[test]
+fn complete_deposit_requires_the_block_to_still_be_canonical() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "utxopia");
+
+    // Reorged: the height index has moved on to a different block at that height.
+    let (ix, accounts) = complete_deposit_spv_call(&pid, HeightIdx::Reorged);
+    let res = mollusk.process_instruction(&ix, &accounts);
+    assert!(
+        is_custom(&res.program_result, INVALID_SPV_PROOF),
+        "a reorged-out block must be rejected, got {:?}",
+        res.program_result
+    );
+
+    // Omitted: an absent account must be an error, never a skipped check — that is exactly
+    // what made the F-BTC-03 fork-point gate bypassable.
+    let (ix, accounts) = complete_deposit_spv_call(&pid, HeightIdx::Omitted);
+    let res = mollusk.process_instruction(&ix, &accounts);
+    assert!(
+        is_custom(&res.program_result, INVALID_SPV_PROOF),
+        "omitting the HeightIndex must not silently skip the check, got {:?}",
+        res.program_result
+    );
+
+    // Canonical: passes, and stops somewhere else entirely.
+    let (ix, accounts) = complete_deposit_spv_call(&pid, HeightIdx::Canonical);
+    let res = mollusk.process_instruction(&ix, &accounts);
+    assert!(
+        !is_custom(&res.program_result, INVALID_SPV_PROOF),
+        "a still-canonical block must pass the check, got {:?}",
+        res.program_result
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// validate_upgrade_authority — the C-1 remediation guard.
+//
+// audit_1 closed C-1 (VK-registry cross-pool takeover) by gating every VK-registry
+// instruction on the program's own upgrade authority, and audit_1 F-BC-10 then flagged that
+// nothing in the repo asserts the guard rejects anything: `validation_tests.rs` covers only
+// `programdata_upgrade_authority`, the byte parse, and no SVM test drove disc 6/7/16. So the
+// parse was tested and the *authorization* was not.
+//
+// These drive disc 6 (`init_vk_registry`) through mollusk and pin all four rejection paths
+// plus a positive control. The control matters: with a correct authority the call fails
+// *later* and with a different code, which is what proves the negative tests fail at the
+// guard rather than somewhere earlier for an unrelated reason.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// BPFLoaderUpgradeab1e11111111111111111111111
+const BPF_LOADER_UPGRADEABLE: [u8; 32] = [
+    0x02, 0xa8, 0xf6, 0x91, 0x4e, 0x88, 0xa1, 0xb0, 0xe2, 0x10, 0x15, 0x3e, 0xf7, 0x63, 0xae, 0x2b,
+    0x00, 0xc2, 0xb9, 0x3d, 0x16, 0xc1, 0x24, 0xd2, 0xc0, 0x53, 0x7a, 0x10, 0x04, 0x80, 0x00, 0x00,
+];
+
+const VK_HASH_MISMATCH: u32 = 6105; // UTXOpiaError::VkHashMismatch
+
+/// `UpgradeableLoaderState::ProgramData`: u32 tag(3) | u64 slot | Option<Pubkey>(1 + 32).
+fn programdata_blob(authority: &[u8; 32]) -> Vec<u8> {
+    let mut d = 3u32.to_le_bytes().to_vec();
+    d.extend_from_slice(&7u64.to_le_bytes());
+    d.push(1); // Some(..)
+    d.extend_from_slice(authority);
+    d
+}
+
+/// disc 6 payload for JoinSplit(1,2): n_in | n_out | vk_hash(32) | delta_g2(128) | ic_len | ic.
+/// The vk_hash is deliberately bogus — every negative case rejects long before `set_vk` reads
+/// it, and the positive control *wants* to reach `set_vk` and be rejected there.
+fn init_vk_registry_data() -> Vec<u8> {
+    let ic_len: u8 = 6; // 2 + n_in + n_out + 1
+    let mut d = vec![6u8, 1, 2];
+    d.extend_from_slice(&[0xAAu8; 32]); // vk_hash
+    d.extend_from_slice(&[0x11u8; 128]); // delta_g2
+    d.push(ic_len);
+    for _ in 0..ic_len {
+        d.extend_from_slice(&[0x22u8; 64]);
+    }
+    d
+}
+
+struct UpgradeAuthCase {
+    /// Key that signs the instruction.
+    signer: Pubkey,
+    /// Whether it is actually marked as a signer.
+    is_signer: bool,
+    /// Authority recorded inside the ProgramData account.
+    stored_authority: [u8; 32],
+    /// Override the ProgramData address (defaults to the canonical PDA).
+    program_data_key: Option<Pubkey>,
+    /// Owner of the ProgramData account (defaults to the loader).
+    program_data_owner: Option<Pubkey>,
+}
+
+fn init_vk_registry_call(
+    pid: &Pubkey,
+    case: UpgradeAuthCase,
+) -> (Instruction, Vec<(Pubkey, Account)>) {
+    let loader = Pubkey::new_from_array(BPF_LOADER_UPGRADEABLE);
+    let (canonical_pd, _) = Pubkey::find_program_address(&[pid.as_ref()], &loader);
+    let pd_key = case.program_data_key.unwrap_or(canonical_pd);
+    let pd_owner = case.program_data_owner.unwrap_or(loader);
+    let (vk_registry, _) = Pubkey::find_program_address(&[b"vk_registry", &[1u8], &[2u8]], pid);
+
+    let (system_key, system_account) = keyed_account_for_system_program();
+
+    let metas = vec![
+        AccountMeta::new_readonly(pd_key, false),
+        AccountMeta::new(vk_registry, false),
+        AccountMeta::new(case.signer, case.is_signer),
+        AccountMeta::new_readonly(system_key, false),
+    ];
+    let ix = Instruction::new_with_bytes(*pid, &init_vk_registry_data(), metas);
+
+    let accounts = vec![
+        (
+            pd_key,
+            acct(1_000_000, programdata_blob(&case.stored_authority), pd_owner),
+        ),
+        (vk_registry, acct(0, vec![], SYSTEM_ID)),
+        (case.signer, acct(10_000_000_000, vec![], SYSTEM_ID)),
+        (system_key, system_account),
+    ];
+
+    (ix, accounts)
+}
+
+fn upgrade_auth_case(signer: Pubkey, stored_authority: [u8; 32]) -> UpgradeAuthCase {
+    UpgradeAuthCase {
+        signer,
+        is_signer: true,
+        stored_authority,
+        program_data_key: None,
+        program_data_owner: None,
+    }
+}
+
+/// Positive control: the real upgrade authority gets *past* the guard and dies later, at the
+/// vk_hash recomputation. Without this, every negative test below could be passing because
+/// the instruction never reaches `validate_upgrade_authority` at all.
+#[test]
+fn init_vk_registry_passes_the_guard_for_the_real_upgrade_authority() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "utxopia");
+
+    let authority = Pubkey::new_unique();
+    let (ix, accounts) = init_vk_registry_call(&pid, upgrade_auth_case(authority, authority.to_bytes()));
+    let res = mollusk.process_instruction(&ix, &accounts);
+
+    assert!(
+        is_custom(&res.program_result, VK_HASH_MISMATCH),
+        "the real upgrade authority must clear the guard and be stopped later by the vk_hash \
+         recomputation (6105), got {:?}",
+        res.program_result
+    );
+}
+
+#[test]
+fn init_vk_registry_rejects_a_signer_that_is_not_the_upgrade_authority() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "utxopia");
+
+    // Signs, is funded, and is simply not the key recorded in ProgramData.
+    let impersonator = Pubkey::new_unique();
+    let (ix, accounts) = init_vk_registry_call(&pid, upgrade_auth_case(impersonator, [0xAAu8; 32]));
+    let res = mollusk.process_instruction(&ix, &accounts);
+
+    assert!(
+        is_custom(&res.program_result, UNAUTHORIZED),
+        "a signer that is not the upgrade authority must be Unauthorized (6011), got {:?}",
+        res.program_result
+    );
+}
+
+#[test]
+fn init_vk_registry_rejects_the_authority_when_it_does_not_sign() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "utxopia");
+
+    // The correct key, present but unsigned — the guard must not accept presence for consent.
+    let authority = Pubkey::new_unique();
+    let mut case = upgrade_auth_case(authority, authority.to_bytes());
+    case.is_signer = false;
+    let (ix, accounts) = init_vk_registry_call(&pid, case);
+    let res = mollusk.process_instruction(&ix, &accounts);
+
+    assert_eq!(
+        res.program_result,
+        ProgramResult::Failure(ProgramError::MissingRequiredSignature),
+        "an unsigned upgrade authority must be MissingRequiredSignature, got {:?}",
+        res.program_result
+    );
+}
+
+#[test]
+fn init_vk_registry_rejects_a_substituted_program_data_account() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "utxopia");
+
+    // A loader-owned ProgramData blob naming the attacker, at an address that is not this
+    // program's PDA — i.e. some other program's ProgramData, or a forgery.
+    let attacker = Pubkey::new_unique();
+    let mut case = upgrade_auth_case(attacker, attacker.to_bytes());
+    case.program_data_key = Some(Pubkey::new_unique());
+    let (ix, accounts) = init_vk_registry_call(&pid, case);
+    let res = mollusk.process_instruction(&ix, &accounts);
+
+    assert_eq!(
+        res.program_result,
+        ProgramResult::Failure(ProgramError::InvalidArgument),
+        "ProgramData at a non-canonical address must be InvalidArgument, got {:?}",
+        res.program_result
+    );
+}
+
+#[test]
+fn init_vk_registry_rejects_program_data_not_owned_by_the_loader() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "utxopia");
+
+    // Right address, right contents, wrong owner: anyone can create a system-owned account and
+    // write these bytes, so the owner check is what makes the address meaningful.
+    let attacker = Pubkey::new_unique();
+    let mut case = upgrade_auth_case(attacker, attacker.to_bytes());
+    case.program_data_owner = Some(SYSTEM_ID);
+    let (ix, accounts) = init_vk_registry_call(&pid, case);
+    let res = mollusk.process_instruction(&ix, &accounts);
+
+    assert_eq!(
+        res.program_result,
+        ProgramResult::Failure(ProgramError::InvalidArgument),
+        "ProgramData not owned by the loader must be InvalidArgument, got {:?}",
         res.program_result
     );
 }

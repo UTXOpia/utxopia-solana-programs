@@ -228,6 +228,24 @@ pub enum UTXOpiaError {
 
     #[error("This Ika dWallet is already the custody key of another pool")]
     DwalletAlreadyBound = 6099,
+
+    #[error("Reserved UTXOs do not cover the redemption payout")]
+    InsufficientReservedInputs = 6100,
+
+    #[error("Reserved UTXOs exceed what the redemption payout needs")]
+    ExcessiveReservedInputs = 6101,
+
+    #[error("Miner fee differs from the one pinned by this redemption's first signing approval")]
+    RedemptionFeeMismatch = 6102,
+
+    #[error("Groth16 public input is not reduced mod the BN254 scalar field")]
+    PublicInputNotInField = 6103,
+
+    #[error("Groth16 proof point is the identity")]
+    InvalidProofPoint = 6104,
+
+    #[error("Verification key hash does not match the submitted key material")]
+    VkHashMismatch = 6105,
 }
 
 impl From<UTXOpiaError> for ProgramError {

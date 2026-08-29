@@ -164,6 +164,18 @@ pub fn process_approve_redemption_signing(
 
         check_redemption_signing(pool, redemption.amount_sats(), ix_data.miner_fee_sats)?;
 
+        // Pin the miner fee across every input of this redemption. The fee feeds the change
+        // output and therefore the TapSighash, so approving input 0 at fee A and input 1 at
+        // fee B has Ika sign two different transactions — neither broadcastable, while the
+        // completed bitset sets `signing_approved` and permanently blocks cancel_redemption
+        // (cancel_redemption.rs:115, checked before the timeout branch). The first approval
+        // stores the fee below; every later one must match it.
+        if redemption.has_any_input_approved()
+            && ix_data.miner_fee_sats != redemption.approval_miner_fee_sats()
+        {
+            return Err(UTXOpiaError::RedemptionFeeMismatch.into());
+        }
+
         let script = redemption.get_btc_script();
         let mut recipient_script = [0u8; MAX_BTC_SCRIPT_LEN];
         recipient_script[..script.len()].copy_from_slice(script);
@@ -282,6 +294,9 @@ pub fn process_approve_redemption_signing(
             txid: utxo.txid,
             vout: utxo.vout(),
             amount_sats: utxo.amount_sats(),
+            // Present only for tweak-bound deposit outputs, which sit at their own
+            // address rather than the pool script and are spent through a tapleaf.
+            leaf_commitment: UtxoRecord::leaf_commitment(&utxo_data).copied(),
         });
     }
     if sum_inputs != total_input_sats {
@@ -336,25 +351,82 @@ pub fn process_approve_redemption_signing(
         });
     }
 
-    // Reconstruct inputs in canonical order; every input spends the pool taproot spk.
+    // Reconstruct inputs in canonical order. Most spend the pool taproot spk, but a
+    // tweak-bound deposit output sits at its own address — one derived from its
+    // tapleaf — and BIP-341 hashes every input's scriptPubKey into the sighash. Using
+    // the pool script for all of them would approve a digest that does not match the
+    // transaction being signed, and the signature would be rejected at relay.
+    let mut input_scripts: std::vec::Vec<[u8; 34]> = std::vec::Vec::with_capacity(reserved.len());
+    let mut leaf_hashes: std::vec::Vec<Option<[u8; 32]>> =
+        std::vec::Vec::with_capacity(reserved.len());
+    for r in &reserved {
+        match r.leaf_commitment {
+            Some(commitment) => {
+                let leaf_hash = crate::instructions::complete_deposit::deposit_leaf_hash(
+                    &commitment,
+                    &dwallet_xonly,
+                );
+                let output_key = crate::utils::secp256k1::derive_taproot_output_key(
+                    &crate::instructions::complete_deposit::DEPOSIT_NUMS_INTERNAL_KEY,
+                    &crate::utils::secp256k1::compute_taptweak_hash(
+                        &crate::instructions::complete_deposit::DEPOSIT_NUMS_INTERNAL_KEY,
+                        &leaf_hash,
+                    ),
+                )?;
+                let mut spk = [0u8; 34];
+                spk[0] = 0x51; // OP_1
+                spk[1] = 0x20; // push 32
+                spk[2..].copy_from_slice(&output_key);
+                input_scripts.push(spk);
+                leaf_hashes.push(Some(leaf_hash));
+            }
+            None => {
+                let mut spk = [0u8; 34];
+                if pool_spk.len() != spk.len() {
+                    return Err(UTXOpiaError::InvalidUtxo.into());
+                }
+                spk.copy_from_slice(pool_spk);
+                input_scripts.push(spk);
+                leaf_hashes.push(None);
+            }
+        }
+    }
+
     let sig_inputs: std::vec::Vec<SighashInput> = reserved
         .iter()
-        .map(|r| SighashInput {
+        .zip(input_scripts.iter())
+        .map(|(r, spk)| SighashInput {
             txid: r.txid,
             vout: r.vout,
             sequence: BTC_INPUT_SEQUENCE,
             amount_sats: r.amount_sats,
-            script_pubkey: pool_spk,
+            script_pubkey: spk,
         })
         .collect();
 
-    let preimage = taproot_keyspend_preimage(
-        BTC_TX_VERSION,
-        BTC_TX_LOCKTIME,
-        &sig_inputs,
-        &sig_outputs,
-        ix_data.input_index,
-    );
+    // A deposit input is spent through its tapleaf, so the signature must commit to
+    // that leaf. Approving a key-path digest for it would authorise a spend of an
+    // address whose key path is a NUMS point — which nobody can produce, so the
+    // approval would simply be unusable.
+    let preimage: std::vec::Vec<u8> = match leaf_hashes[ix_data.input_index as usize] {
+        Some(leaf_hash) => crate::utils::sighash::taproot_scriptspend_preimage(
+            BTC_TX_VERSION,
+            BTC_TX_LOCKTIME,
+            &sig_inputs,
+            &sig_outputs,
+            ix_data.input_index,
+            &leaf_hash,
+        )
+        .to_vec(),
+        None => taproot_keyspend_preimage(
+            BTC_TX_VERSION,
+            BTC_TX_LOCKTIME,
+            &sig_inputs,
+            &sig_outputs,
+            ix_data.input_index,
+        )
+        .to_vec(),
+    };
     let computed_digest = ika_message_digest_from_preimage(&preimage);
     let computed_sighash = taproot_keyspend_sighash(&preimage);
 
@@ -403,6 +475,11 @@ pub fn process_approve_redemption_signing(
     {
         let mut redemption_data = redemption_info.try_borrow_mut()?;
         let redemption = RedemptionRequest::from_bytes_mut(&mut redemption_data)?;
+        // Store before marking: mark_input_signing_approved is what makes
+        // has_any_input_approved() true, so the order decides whether this is the first call.
+        if !redemption.has_any_input_approved() {
+            redemption.set_approval_miner_fee_sats(ix_data.miner_fee_sats)?;
+        }
         redemption.mark_input_signing_approved(ix_data.input_index)?;
     }
 

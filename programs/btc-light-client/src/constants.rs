@@ -50,3 +50,38 @@ pub(crate) fn network_allowed_in_build(network: u8) -> bool {
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod network_gate_tests {
+    use super::*;
+
+    /// `network_allowed_in_build` is the switch deciding how much of Bitcoin consensus a
+    /// deployment enforces, and its regtest arm is the only behavioural difference between a
+    /// mainnet build and every other one. Until `--features mainnet` compiled off-chain this
+    /// could not be asserted at all — audit_1 recorded every mainnet conclusion as analytic.
+    ///
+    /// Run under both flavours: bare `cargo test -p btc-light-client` and
+    /// `cargo test -p btc-light-client --features mainnet`.
+    #[test]
+    fn regtest_is_refused_only_by_a_mainnet_build() {
+        // Invariant in every build: real networks in, testnet3 out (no retarget handling, so
+        // accepting it would mean running with difficulty unchecked).
+        assert!(network_allowed_in_build(NETWORK_MAINNET));
+        assert!(network_allowed_in_build(NETWORK_TESTNET4));
+        assert!(!network_allowed_in_build(NETWORK_TESTNET3));
+        assert!(!network_allowed_in_build(4), "unknown network ids are refused");
+
+        // Regtest checks no proof-of-work at all, so a mainnet binary must refuse to track it
+        // — that is what stops the authority flipping SPV to "verify nothing" in production.
+        #[cfg(feature = "mainnet")]
+        assert!(
+            !network_allowed_in_build(NETWORK_REGTEST),
+            "a mainnet build must refuse regtest"
+        );
+        #[cfg(not(feature = "mainnet"))]
+        assert!(
+            network_allowed_in_build(NETWORK_REGTEST),
+            "non-mainnet builds legitimately track regtest"
+        );
+    }
+}

@@ -3,7 +3,7 @@
 //! Lightweight module to read btc-light-client accounts from utxopia.
 //! No Borsh, just zero-copy byte reading.
 
-use crate::pinocchio_compat::{find_program_address, ProgramError, Pubkey};
+use crate::pinocchio_compat::{find_program_address, AccountInfo, ProgramError, Pubkey};
 
 /// Discriminator for VerifiedTransaction account (must match btc-light-client)
 pub const VERIFIED_TX_DISCRIMINATOR: u8 = 0x08;
@@ -123,8 +123,35 @@ pub fn light_client_tip_height(data: &[u8]) -> Result<u64, ProgramError> {
 
 /// Bitcoin network the light client tracks (`BitcoinLightClient.network`, offset 3).
 /// 0 = mainnet, 1 = testnet3, 2 = testnet4, 3 = regtest.
+///
+/// The network this build's light client MUST be tracking, or `None` for a featureless host
+/// build (`cargo test`/`check`) which never reads a real client — an SBF build with no network
+/// feature is already a `compile_error!` in `lib.rs`. `localnet + devnet` together match two
+/// arms and fail loudly as a duplicate definition, which is the same way the light-client
+/// program id behaves.
+///
+/// Verified against the deployed clients on 2026-08-28: the devnet client
+/// (`9MBq6FCqw1tSh7Vn7rJjWEz8pRcZ5R6mfEzgALiAJwM9`) reports 2, the devnet-regtest client
+/// (`F7w1wWioDcKjoQkgqFZBbSATB3mxReFRJSBEJTn3CopZ`) reports 3.
 #[cfg(feature = "mainnet")]
-const NETWORK_MAINNET: u8 = 0;
+const EXPECTED_NETWORK: Option<u8> = Some(0);
+#[cfg(all(
+    not(feature = "mainnet"),
+    feature = "devnet",
+    not(feature = "devnet-regtest")
+))]
+const EXPECTED_NETWORK: Option<u8> = Some(2);
+#[cfg(all(
+    not(feature = "mainnet"),
+    any(feature = "devnet-regtest", feature = "localnet")
+))]
+const EXPECTED_NETWORK: Option<u8> = Some(3);
+#[cfg(all(
+    not(feature = "mainnet"),
+    not(feature = "devnet"),
+    not(feature = "localnet")
+))]
+const EXPECTED_NETWORK: Option<u8> = None;
 
 /// Reject a light client that is not tracking the network this build is for.
 ///
@@ -132,7 +159,14 @@ const NETWORK_MAINNET: u8 = 0;
 /// backs it" — but every consensus rule in btc-light-client (PoW, difficulty, median-time-past)
 /// is gated on that one `network` byte, and nothing on this side used to look at it. A light
 /// client pointed at regtest satisfies the same PDA derivation while checking nothing, so a
-/// mainnet build must refuse to read one. Cheap: one byte, once per SPV consumer.
+/// build must refuse to read a client tracking anything but its own network. Cheap: one byte,
+/// once per SPV consumer.
+///
+/// This used to be gated on `#[cfg(feature = "mainnet")]`, which meant the devnet build — the
+/// one actually deployed — performed no check at all, while carrying `process_reinitialize`
+/// (compiled in for every non-mainnet flavour) that can rewrite `network` to regtest. A devnet
+/// light-client admin could therefore turn the whole SPV layer into "verify nothing" and this
+/// side would not notice (audit_2 N-6).
 pub fn assert_light_client_network(data: &[u8]) -> Result<(), ProgramError> {
     if data.len() < LIGHT_CLIENT_MIN_LEN {
         return Err(ProgramError::InvalidAccountData);
@@ -140,9 +174,10 @@ pub fn assert_light_client_network(data: &[u8]) -> Result<(), ProgramError> {
     if data[0] != BTC_LIGHT_CLIENT_DISCRIMINATOR {
         return Err(ProgramError::InvalidAccountData);
     }
-    #[cfg(feature = "mainnet")]
-    if data[3] != NETWORK_MAINNET {
-        return Err(ProgramError::InvalidAccountData);
+    if let Some(expected) = EXPECTED_NETWORK {
+        if data[3] != expected {
+            return Err(ProgramError::InvalidAccountData);
+        }
     }
     Ok(())
 }
@@ -177,4 +212,187 @@ pub fn assert_verified_tx_current_epoch(
         return Err(ProgramError::InvalidAccountData);
     }
     Ok(())
+}
+
+/// PDA seed for HeightIndex (must match btc-light-client)
+pub const HEIGHT_INDEX_SEED: &[u8] = b"height_index";
+
+/// Discriminator for HeightIndex account (must match btc-light-client)
+pub const HEIGHT_INDEX_DISCRIMINATOR: u8 = 0x09;
+
+/// HeightIndex layout: disc(1) + bump(1) + _padding(6) + block_hash(32) + height(8)
+const HEIGHT_INDEX_LEN: usize = 48;
+
+/// Require live proof that `block_hash` is *still* the canonical block at `block_height`.
+///
+/// A `VerifiedTransaction` PDA is a permanent record of a merkle proof that was valid when
+/// `verify_transaction` ran. Nothing ever invalidates one. `assert_canonical_verified_tx`
+/// re-derives the PDA from the block hash and txid stored *inside that same account*, so it
+/// proves the account was minted by the light client and nothing about whether the fact still
+/// holds; and the confirmation count is computed against `tip`, which only grows, so it is
+/// vacuous for a stale proof. After a reorg that orphans the block, both checks still pass and
+/// the deposit or redemption settles against a transaction that is no longer in the chain
+/// (audit_1 F-BTC-04).
+///
+/// `HeightIndex` is what btc-light-client's own `verify_transaction` treats as the canonicality
+/// oracle, so consulting it here puts the spend path on the same footing.
+///
+/// The account is located by address rather than by a fixed index: its PDA is fully determined
+/// by `block_height`, which comes from the PDA-pinned `VerifiedTransaction`, and the four entry
+/// points into these instructions have different trailing-account layouts. Callers append it
+/// anywhere. Absence is an error, never a skip — an optional check is not a check (that is what
+/// made F-BTC-03 bypassable).
+pub fn assert_block_still_canonical(
+    accounts: &[AccountInfo],
+    block_height: u64,
+    block_hash: &[u8; 32],
+    btc_lc_id: &Pubkey,
+) -> Result<(), ProgramError> {
+    let height_le = block_height.to_le_bytes();
+    let (expected, _) = find_program_address(&[HEIGHT_INDEX_SEED, &height_le], btc_lc_id);
+
+    let hi = accounts
+        .iter()
+        .find(|a| a.address().as_ref() == expected.as_ref())
+        .ok_or(ProgramError::NotEnoughAccountKeys)?;
+
+    if crate::pinocchio_compat::account_owner(hi) != btc_lc_id {
+        return Err(ProgramError::IllegalOwner);
+    }
+
+    let data = hi.try_borrow()?;
+    check_height_index_bytes(&data, &height_le, block_hash)
+}
+
+/// Byte-level half of [`assert_block_still_canonical`], split out so the layout can be tested
+/// on the host — offsets into a foreign program's account are where this goes wrong, and they
+/// cannot drift silently if a test pins them.
+pub fn check_height_index_bytes(
+    data: &[u8],
+    height_le: &[u8; 8],
+    block_hash: &[u8; 32],
+) -> Result<(), ProgramError> {
+    if data.len() < HEIGHT_INDEX_LEN || data[0] != HEIGHT_INDEX_DISCRIMINATOR {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    // Redundant with the seed, but the seed only proves the address; this proves the account
+    // agrees about which height it indexes.
+    if &data[40..48] != height_le {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    if data[8..40] != block_hash[..] {
+        return Err(ProgramError::InvalidAccountData);
+    }
+    Ok(())
+}
+
+/// The devnet-regtest arm is covered empirically: `programs/svm-tests` builds that flavour and
+/// `complete_deposit_requires_the_block_to_still_be_canonical` feeds a light client whose
+/// network byte is regtest, so a wrong arm fails it (verified by mutation). No SVM suite builds
+/// the other flavours, so pin them here instead — run under `--features devnet` etc.
+///
+/// This is not circular: the assertion reads the value the *source* cfg selected. If the source
+/// arms were wired so a devnet build picked regtest, this fails under `--features devnet`.
+#[cfg(test)]
+mod expected_network_tests {
+    use super::EXPECTED_NETWORK;
+
+    #[test]
+    fn expected_network_matches_the_build_flavour() {
+        #[cfg(all(
+            not(feature = "mainnet"),
+            feature = "devnet",
+            not(feature = "devnet-regtest")
+        ))]
+        assert_eq!(
+            EXPECTED_NETWORK,
+            Some(2),
+            "a --features devnet build talks to the testnet4 light client \
+             (9MBq6FCqw1tSh7Vn7rJjWEz8pRcZ5R6mfEzgALiAJwM9 reports 2)"
+        );
+
+        #[cfg(all(not(feature = "mainnet"), feature = "devnet-regtest"))]
+        assert_eq!(EXPECTED_NETWORK, Some(3), "devnet-regtest tracks regtest");
+
+        #[cfg(all(not(feature = "mainnet"), feature = "localnet"))]
+        assert_eq!(EXPECTED_NETWORK, Some(3), "localnet tracks regtest");
+
+        #[cfg(feature = "mainnet")]
+        assert_eq!(EXPECTED_NETWORK, Some(0), "mainnet tracks mainnet");
+
+        // A featureless host build reads no real light client and must not assert a network.
+        #[cfg(all(
+            not(feature = "mainnet"),
+            not(feature = "devnet"),
+            not(feature = "localnet")
+        ))]
+        assert_eq!(EXPECTED_NETWORK, None, "host builds must not pin a network");
+    }
+}
+
+#[cfg(test)]
+mod height_index_tests {
+    use super::*;
+
+    /// Mirrors btc-light-client's `HeightIndex`:
+    /// disc(1) + bump(1) + _padding(6) + block_hash(32) + height(8) = 48.
+    fn blob(disc: u8, block_hash: &[u8; 32], height: u64) -> [u8; 48] {
+        let mut d = [0u8; 48];
+        d[0] = disc;
+        d[1] = 254; // bump — must not be read as anything
+        d[8..40].copy_from_slice(block_hash);
+        d[40..48].copy_from_slice(&height.to_le_bytes());
+        d
+    }
+
+    #[test]
+    fn accepts_the_canonical_block_at_that_height() {
+        let hash = [0xABu8; 32];
+        let d = blob(HEIGHT_INDEX_DISCRIMINATOR, &hash, 149_843);
+        assert!(check_height_index_bytes(&d, &149_843u64.to_le_bytes(), &hash).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_reorged_block_at_the_same_height() {
+        // The exact F-BTC-04 shape: a VerifiedTransaction still names the orphan, while the
+        // height index has moved on to the block that actually won.
+        let orphan = [0xABu8; 32];
+        let winner = [0xCDu8; 32];
+        let d = blob(HEIGHT_INDEX_DISCRIMINATOR, &winner, 149_843);
+        assert!(check_height_index_bytes(&d, &149_843u64.to_le_bytes(), &orphan).is_err());
+        assert!(check_height_index_bytes(&d, &149_843u64.to_le_bytes(), &winner).is_ok());
+    }
+
+    #[test]
+    fn rejects_a_height_index_for_a_different_height() {
+        let hash = [0xABu8; 32];
+        let d = blob(HEIGHT_INDEX_DISCRIMINATOR, &hash, 149_843);
+        assert!(check_height_index_bytes(&d, &149_844u64.to_le_bytes(), &hash).is_err());
+    }
+
+    #[test]
+    fn rejects_wrong_discriminator_and_short_data() {
+        let hash = [0xABu8; 32];
+        let h = 149_843u64.to_le_bytes();
+        // 0x07 is BlockHeader, 0x08 VerifiedTransaction — both are btc-light-client-owned, so
+        // the owner check upstream does not separate them. Only the discriminator does.
+        for wrong in [0x00u8, 0x06, 0x07, 0x08] {
+            let d = blob(wrong, &hash, 149_843);
+            assert!(check_height_index_bytes(&d, &h, &hash).is_err(), "disc {wrong:#04x}");
+        }
+        let d = blob(HEIGHT_INDEX_DISCRIMINATOR, &hash, 149_843);
+        assert!(check_height_index_bytes(&d[..47], &h, &hash).is_err());
+    }
+
+    /// If HeightIndex ever grows, the fields we read must not move. Pins the offsets against
+    /// the layout comment rather than against our own constructor.
+    #[test]
+    fn offsets_match_the_btc_light_client_layout() {
+        let hash = [0x11u8; 32];
+        let d = blob(HEIGHT_INDEX_DISCRIMINATOR, &hash, 0x0203_0405_0607_0809);
+        assert_eq!(d[0], HEIGHT_INDEX_DISCRIMINATOR);
+        assert_eq!(&d[8..40], &hash[..]);
+        assert_eq!(u64::from_le_bytes(d[40..48].try_into().unwrap()), 0x0203_0405_0607_0809);
+        assert_eq!(HEIGHT_INDEX_LEN, 48);
+    }
 }

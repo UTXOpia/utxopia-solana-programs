@@ -36,10 +36,63 @@ pub const BTC_LIGHT_CLIENT_PROGRAM_ID: [u8; 32] = [
     0x89, 0xe8, 0x73, 0x4e, 0x07, 0x71, 0x59, 0x93, 0xb3, 0x9c, 0xc3, 0xad, 0x89, 0x36, 0x61, 0x67,
 ];
 
-/// BTC Relay program ID — devnet (Ho6UTeF8yFnRdCK15tSZtcJozvkDABJZWYxkgGyWAfyq)
-#[cfg(not(any(feature = "localnet", feature = "devnet-regtest")))]
+// There is no mainnet BTC light client deployment yet (config.json's mainnet ids are empty),
+// and `mainnet` implies neither `localnet` nor `devnet-regtest` — so before this guard a
+// `--features mainnet` build fell through to the devnet arm below and silently validated every
+// SPV proof against the DEVNET light client. It fails closed (the PDA pin in verified_tx_reader
+// rejects the account, which does not exist on mainnet), but only after deploy. Fail at build
+// time instead: deploy the light client, then paste its id into a `mainnet` arm here.
+/// BTC Light Client — mainnet (FTELhuRjyagKYHSBnUHhtPSFf9r488toK7TeREg7fDmM)
+///
+/// RESERVED, NOT YET DEPLOYED. The address is claimed by a keypair generated 2026-08-29 and
+/// held outside this repo; the eventual deploy must target it with
+/// `--program-id <that keypair>` or this constant is wrong and every mainnet SPV proof fails.
+///
+/// Reserving the id rather than leaving a `compile_error!` here is what lets
+/// `--features mainnet` build at all. Before this, no mainnet-only branch in either program
+/// had ever been compiled — audit_1 recorded every `--features mainnet` conclusion as
+/// analytic, and audit_2 as unverifiable. An id that is real but unclaimed on chain keeps the
+/// artifact a pure function of (commit, features), which a build-time env var would not.
+///
+/// Until the light client is actually deployed there, a mainnet utxopia build is compilable
+/// and deployable but cannot verify a single deposit: `assert_canonical_light_client` pins the
+/// PDA under this id and the account will not exist. That is fail-closed, and deliberate —
+/// deploy the light client first.
+#[cfg(feature = "mainnet")]
 pub const BTC_LIGHT_CLIENT_PROGRAM_ID: [u8; 32] = [
-    // Live devnet btc-light-client: C8JoSKzondM7X1ESwrBSodGMrXWtEWNmawXyjh9zEWJZ
+    0xd6, 0xbb, 0xcd, 0x22, 0x35, 0x3e, 0x80, 0x7f, 0x52, 0x9d, 0xb5, 0x96, 0xa4, 0xc7, 0x16, 0x42,
+    0x13, 0xdc, 0x6a, 0xd8, 0xee, 0x31, 0xa4, 0x45, 0x87, 0x8d, 0xcb, 0x77, 0xcc, 0xbd, 0x41, 0xac,
+];
+
+/// BTC Light Client — devnet (4LZbktiNsiVAe2bwPCTPNgqiWWgZNUj4T3bDx8GZmehv)
+/// Solana devnet + Bitcoin testnet4. Deployed 2026-08-26; tracks TESTNET4 headers
+/// (network_byte=2). The previous pair (utxopia G1bj9Vw9…, LC C8JoSKzo…) was closed
+/// on chain, so this is a fresh deployment, not an upgrade of it.
+/// `devnet-regtest = ["devnet"]`, so this arm has to exclude it explicitly or
+/// both would define the constant — the same guard the localnet arm carries.
+#[cfg(all(feature = "devnet", not(feature = "devnet-regtest")))]
+pub const BTC_LIGHT_CLIENT_PROGRAM_ID: [u8; 32] = [
+    0x31, 0x95, 0xf4, 0xcc, 0x87, 0xb0, 0x1d, 0x1b, 0x40, 0x51, 0xcc, 0xc5, 0x81, 0x2f, 0xda, 0xaa,
+    0xb8, 0x1b, 0x75, 0xfa, 0x37, 0xb9, 0x09, 0x2d, 0x55, 0xc2, 0x95, 0xd9, 0xd2, 0x08, 0x29, 0xf9,
+];
+
+/// BTC Light Client — no-feature default build only (`cargo check`, host tests).
+/// The value is the retired devnet id C8JoSKzondM7X1ESwrBSodGMrXWtEWNmawXyjh9zEWJZ,
+/// closed on chain: nothing deployable reaches this arm. Every named network has its own arm,
+/// and `mainnet` is excluded explicitly — it used to be excluded implicitly by the
+/// compile_error above, but that is now scoped to the SBF target so host builds can
+/// type-check the mainnet paths, and without this both arms would define the constant.
+///
+/// Until 2026-08-26 this arm was `not(any(localnet, devnet-regtest))`, so one
+/// value served both devnet and the default build. Deploying testnet4 split
+/// devnet out; what is left is the placeholder nobody deploys.
+#[cfg(not(any(
+    feature = "localnet",
+    feature = "devnet-regtest",
+    feature = "devnet",
+    feature = "mainnet"
+)))]
+pub const BTC_LIGHT_CLIENT_PROGRAM_ID: [u8; 32] = [
     0xa5, 0x4f, 0xbf, 0xc4, 0x89, 0x7f, 0xa5, 0x53, 0x1c, 0x76, 0xa4, 0x82, 0xba, 0xce, 0x0f, 0x72,
     0x9d, 0x18, 0x8b, 0xc4, 0x4e, 0x4d, 0xdb, 0xe9, 0xf2, 0x1d, 0x69, 0x81, 0xa2, 0x08, 0x41, 0xa6,
 ];
@@ -138,3 +191,18 @@ pub const NATIVE_SOL_2022_MINT: [u8; 32] = [
     0x83, 0x0d, 0xfc, 0x9f, 0xde, 0x5f, 0xe6, 0xb8, 0xaa, 0x7c, 0x04, 0xa4, 0x76, 0xe9, 0x1e, 0x8a,
     0xc6, 0xbb, 0x26, 0x4a, 0xad, 0x90, 0xfa, 0x19, 0xc9, 0xdf, 0x49, 0xd8, 0x5c, 0x3e, 0x5b, 0x5e,
 ];
+
+#[cfg(test)]
+mod chain_id_tests {
+    /// CHAIN_ID is a domain separator baked into every proof's bound_params_hash, so a mainnet
+    /// deployment built without `--features mainnet` binds proofs to the devnet domain — the
+    /// hazard the comment above warns about, previously unassertable because the mainnet
+    /// feature did not compile.
+    #[test]
+    fn chain_id_follows_the_build_flavour() {
+        #[cfg(feature = "mainnet")]
+        assert_eq!(super::CHAIN_ID, 101, "mainnet builds must bind Solana mainnet");
+        #[cfg(not(feature = "mainnet"))]
+        assert_eq!(super::CHAIN_ID, 103, "non-mainnet builds bind Solana devnet");
+    }
+}

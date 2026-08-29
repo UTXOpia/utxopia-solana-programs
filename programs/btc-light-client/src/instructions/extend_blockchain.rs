@@ -51,9 +51,9 @@ pub fn process_extend_blockchain(
         return Err(ProgramError::InvalidInstructionData);
     }
 
-    // Need: lc(1) + submitter(1) + system(1) + parent(1) + N block_headers + N height_indices.
-    // OPTIONAL trailing account at index `4 + 2n`: the parent's HeightIndex, used to enforce the
-    // parent is canonical (audit f03). Omitting it preserves the prior behavior.
+    // Need: lc(1) + submitter(1) + system(1) + parent(1) + N block_headers + N height_indices,
+    // then `num_ancestors` MTP ancestors, then a REQUIRED trailing account: the parent's
+    // HeightIndex (audit f03 / audit_1 F-BTC-03). It used to be optional.
     let expected_accounts = 4 + 2 * n;
     // Optional trailing data byte: number of parent-ancestor BlockHeader PDAs supplied for the
     // Median-Time-Past check (audit #3). Backward-compatible: absent => 0 (regtest/localnet skip
@@ -68,7 +68,8 @@ pub fn process_extend_blockchain(
     if num_ancestors > 10 {
         return Err(ProgramError::InvalidInstructionData);
     }
-    if accounts.len() < expected_accounts + num_ancestors {
+    // +1 for the mandatory parent HeightIndex at `expected_accounts + num_ancestors`.
+    if accounts.len() < expected_accounts + num_ancestors + 1 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
@@ -160,17 +161,26 @@ pub fn process_extend_blockchain(
         return Err(ProgramError::InvalidAccountData);
     }
 
-    // f03: optionally enforce that the parent is the CURRENT canonical block at its height.
-    // When the caller supplies the parent's HeightIndex as a trailing account (index `4+2n`),
-    // reject any parent that is not canonical. This forbids building a detached fork
-    // incrementally across calls and then overtaking — the pattern that leaves earlier-batch
-    // ancestor HeightIndex entries stale (multi-batch reorg corruption). With this enforced, a
-    // promotion's batch always spans `[parent_height+1 ..= new_tip]`, so the per-batch HeightIndex
-    // reindex below is complete. Normal extension (parent == canonical tip) and single-call
-    // reorgs from a canonical ancestor both pass. The account is OPTIONAL so rollout is
-    // non-breaking; verify_transaction's finality gate bounds the residual until the backend
-    // opts in by supplying it.
-    if accounts.len() > expected_accounts + num_ancestors {
+    // f03: enforce that the parent is the CURRENT canonical block at its height.
+    //
+    // This was optional — "so rollout is non-breaking" — which made it no guard at all: an
+    // attacker simply omitted the account. audit_1 F-BTC-03 walks the bypass. Split a fork
+    // across two calls; the first stays below the tip's chainwork so it takes the non-canonical
+    // branch, which writes BlockHeader PDAs but never runs the finality gate and never touches
+    // HeightIndex. The second call's parent is then a fork block at or above finalized_height,
+    // so the gate at the bottom of this function passes, while heights below the real fork point
+    // keep HeightIndex entries naming orphaned blocks. verify_transaction (:126-135) reads
+    // HeightIndex as its canonicality oracle, so it then attests transactions from orphaned
+    // blocks and rejects them from the canonical block at the same height.
+    //
+    // Mandatory closes it, and the failure mode is exactly right: a fork block written by the
+    // non-canonical branch has NO HeightIndex, so the attacker cannot produce the account at all
+    // and an uninitialized one fails the discriminator check below. Legitimate paths are
+    // unaffected — normal extension (parent == canonical tip) and single-call reorgs from a
+    // canonical ancestor both have a HeightIndex, and genesis gets one from initialize /
+    // reinitialize. With this enforced a promoting batch always spans
+    // `[parent_height+1 ..= new_tip]`, so the per-batch reindex below is complete.
+    {
         let parent_hi_info = &accounts[expected_accounts + num_ancestors];
         if parent_hi_info.owner() != program_id {
             return Err(ProgramError::IllegalOwner);

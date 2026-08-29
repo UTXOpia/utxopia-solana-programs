@@ -58,6 +58,47 @@ fn parse_prefix_rejects_noncanonical_nullifier() {
     assert!(res.is_err(), "non-canonical nullifier must be rejected");
 }
 
+/// The precise attack value, not just a saturated one. `0xff..ff` above is comfortably above
+/// the modulus; `n + r` sits just above it and is what an attacker would actually submit —
+/// same field element, same proof, different PDA seed. It also stays under 2^256, which is what
+/// makes the replay expressible in 32 bytes at all.
+#[test]
+fn parse_prefix_rejects_the_nullifier_plus_r_alias() {
+    let r = crate::utils::crypto::BN254_FR_MODULUS;
+    // A plausible Poseidon output, comfortably below r.
+    let n = [
+        0x0a, 0x1b, 0x2c, 0x3d, 0x4e, 0x5f, 0x60, 0x71, 0x82, 0x93, 0xa4, 0xb5, 0xc6, 0xd7, 0xe8,
+        0xf9, 0x01, 0x12, 0x23, 0x34, 0x45, 0x56, 0x67, 0x78, 0x89, 0x9a, 0xab, 0xbc, 0xcd, 0xde,
+        0xef, 0x00,
+    ];
+
+    // n + r, big-endian.
+    let mut alias = [0u8; 32];
+    let mut carry = 0u16;
+    for i in (0..32).rev() {
+        let sum = n[i] as u16 + r[i] as u16 + carry;
+        alias[i] = sum as u8;
+        carry = sum >> 8;
+    }
+    assert_eq!(carry, 0, "n + r must still fit in 32 bytes");
+    assert_ne!(n, alias);
+
+    let header = parse_header(&joinsplit_1x1_with_nullifier(n)).unwrap();
+    let mut proof_buf = [0u8; GROTH16_PROOF_SIZE];
+
+    let canonical = joinsplit_1x1_with_nullifier(n);
+    assert!(
+        parse_prefix(&canonical, &[], header, 1, &mut proof_buf).is_ok(),
+        "the canonical nullifier must still parse"
+    );
+
+    let replayed = joinsplit_1x1_with_nullifier(alias);
+    assert!(
+        parse_prefix(&replayed, &[], header, 1, &mut proof_buf).is_err(),
+        "n + r must be rejected: it proves the same statement but seeds a different PDA"
+    );
+}
+
 /// The nullifier PDA must include pool_state, so the same nullifier in two pools
 /// lands on two different accounts. Before this, one global PDA meant spending a
 /// note in one pool bricked the same-seed twin note in the other.

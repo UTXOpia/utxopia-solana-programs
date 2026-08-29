@@ -136,7 +136,7 @@ pub fn process_set_pool_config(
             authority,
             dwallet_binding_info,
             program_id,
-            rent.minimum_balance(DwalletBinding::LEN),
+            rent.try_minimum_balance(DwalletBinding::LEN)?,
             DwalletBinding::LEN as u64,
             signer_seeds,
         )?;
@@ -168,7 +168,7 @@ pub fn process_set_pool_config(
             authority,
             pool_config_info,
             program_id,
-            rent.minimum_balance(PoolConfig::LEN),
+            rent.try_minimum_balance(PoolConfig::LEN)?,
             PoolConfig::LEN as u64,
             signer_seeds,
         )?;
@@ -197,7 +197,7 @@ pub fn process_set_pool_config(
         // Zeroed/preallocated PDA: grow if necessary before initialization.
         if config_data_len < PoolConfig::LEN {
             let rent = Rent::get()?;
-            let needed = rent.minimum_balance(PoolConfig::LEN);
+            let needed = rent.try_minimum_balance(PoolConfig::LEN)?;
             let current = pool_config_info.lamports();
             if needed > current {
                 let transfer_ix = pinocchio_system::instructions::Transfer {

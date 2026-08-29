@@ -243,6 +243,11 @@ pub fn process_complete_redemption(
         return Err(ProgramError::NotEnoughAccountKeys);
     }
 
+    // Deliberately NOT pause-gated, unlike every other value-moving instruction.
+    // By the time this runs the BTC has already been broadcast and confirmed; refusing
+    // to settle would strand the accounting rather than prevent anything. The stop is
+    // upstream — `approve_redemption_signing` is gated, so a paused pool signs nothing
+    // new, and `mark_processing` reserves nothing new (93c28ed).
     let pool_state_info = &accounts[0];
     let redemption_info = &accounts[1];
     let authority = &accounts[2];
@@ -352,7 +357,7 @@ pub fn process_complete_redemption(
             authority,
             completion_receipt_info,
             program_id,
-            rent.minimum_balance(CompletionReceipt::LEN),
+            rent.try_minimum_balance(CompletionReceipt::LEN)?,
             CompletionReceipt::LEN as u64,
             signer_seeds,
         )?;
@@ -429,6 +434,21 @@ pub fn process_complete_redemption(
         (vt.block_height() as u64, vt.reinit_epoch())
     };
     crate::state::assert_canonical_light_client(light_client_info.address(), &btc_lc_id)?;
+
+    // Same as complete_deposit: a VerifiedTransaction is a permanent record of a proof that was
+    // valid once, and `tip` only grows, so the confirmation count cannot detect a reorg that
+    // orphaned the block. Require live proof the block is still canonical (audit_1 F-BTC-04).
+    {
+        let vt_data = verified_tx_info.try_borrow()?;
+        let vt = VerifiedTransactionView::from_bytes(&vt_data)?;
+        crate::state::assert_block_still_canonical(
+            accounts,
+            block_height,
+            vt.block_hash(),
+            &btc_lc_id,
+        )
+        .map_err(|_| UTXOpiaError::RedemptionSpvFailed)?;
+    }
 
     // Verify sufficient confirmations
     {
@@ -619,7 +639,7 @@ pub fn process_complete_redemption(
                 authority,
                 change_utxo_info,
                 program_id,
-                rent.minimum_balance(UtxoRecord::LEN),
+                rent.try_minimum_balance(UtxoRecord::LEN)?,
                 UtxoRecord::LEN as u64,
                 utxo_signer_seeds,
             )?;

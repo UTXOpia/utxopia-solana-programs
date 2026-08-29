@@ -7,7 +7,7 @@ use crate::pinocchio_compat::ProgramError;
 
 /// BN254 scalar field modulus (Fr) — big-endian
 /// = 21888242871839275222246405745257275088548364400416034343698204186575808495617
-const BN254_FR_MODULUS: [u8; 32] = [
+pub(crate) const BN254_FR_MODULUS: [u8; 32] = [
     0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58, 0x5d,
     0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00, 0x00, 0x01,
 ];
@@ -36,11 +36,12 @@ pub fn poseidon2_hash(left: &[u8; 32], right: &[u8; 32]) -> Result<[u8; 32], Pro
 
 /// True if a big-endian 32-byte value is a canonical BN254 Fr element (< modulus).
 ///
-/// The `alt_bn128` multiplication syscall reduces scalars mod the Fr order, so two
-/// byte-distinct encodings of the same field element (`n` and `n + p`) verify the same
-/// Groth16 proof. Nullifiers are also used as PDA dedup seeds from their raw bytes, so a
-/// non-canonical re-encoding would seed a fresh nullifier PDA while re-using a spent
-/// note's proof → double-spend. Reject any non-canonical nullifier before use.
+/// The `alt_bn128` multiplication syscall does NOT reduce its scalar — it multiplies by the
+/// raw 256-bit value — but G1 has order r, so `n` and `n + r` yield the same point and verify
+/// the same Groth16 proof. Nullifiers are also used as PDA dedup seeds from their raw bytes,
+/// so a non-canonical re-encoding would seed a fresh nullifier PDA while re-using a spent
+/// note's proof → double-spend. This check is what prevents that; do not delete it on the
+/// assumption the syscall reduces. `verify_groth16_proof` repeats it as defence in depth.
 #[inline]
 pub fn is_canonical_fr(val: &[u8; 32]) -> bool {
     !is_ge_modulus(val)

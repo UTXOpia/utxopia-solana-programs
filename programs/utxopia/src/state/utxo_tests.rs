@@ -174,3 +174,54 @@ fn test_utxo_record_zero_copy_layout() {
     assert_eq!(buf[40..48], 12345u64.to_le_bytes()); // amount_sats
     assert_eq!(buf[48..56], 99u64.to_le_bytes()); // reserved_for_request_id
 }
+
+/// A UTXO whose tapleaf cannot be rebuilt is a UTXO nobody can ever spend — the
+/// key path is a NUMS point, so the commitment stored here is the only thing
+/// standing between the pool and burned coins.
+#[test]
+fn leaf_commitment_round_trips() {
+    let mut data = vec![0u8; UtxoRecord::LEN_WITH_LEAF];
+    UtxoRecord::init(&mut data).unwrap();
+
+    let commitment = [0xADu8; 32];
+    UtxoRecord::set_leaf_commitment(&mut data, &commitment).unwrap();
+
+    assert_eq!(UtxoRecord::leaf_commitment(&data), Some(&commitment));
+    // The base record still parses — the commitment is a tail, not a field.
+    assert_eq!(UtxoRecord::from_bytes(&data).unwrap().discriminator, data[0]);
+}
+
+/// Records written before the tail existed must keep working. They are key-path
+/// UTXOs at the raw dWallet address and have no leaf to rebuild.
+#[test]
+fn a_record_without_the_tail_is_a_key_path_utxo() {
+    let mut data = vec![0u8; UtxoRecord::LEN];
+    UtxoRecord::init(&mut data).unwrap();
+
+    assert!(UtxoRecord::from_bytes(&data).is_ok());
+    assert_eq!(UtxoRecord::leaf_commitment(&data), None);
+
+    // Writing into an account that was never sized for it must fail loudly
+    // rather than scribble past the end or silently no-op.
+    assert!(UtxoRecord::set_leaf_commitment(&mut data, &[0xADu8; 32]).is_err());
+}
+
+#[test]
+fn the_tail_sits_past_every_field_the_record_uses() {
+    let mut data = vec![0u8; UtxoRecord::LEN_WITH_LEAF];
+    {
+        let utxo = UtxoRecord::init(&mut data).unwrap();
+        utxo.set_txid(&[0x11u8; 32]);
+        utxo.set_vout(7);
+        utxo.set_amount_sats(50_000);
+    }
+    UtxoRecord::set_leaf_commitment(&mut data, &[0xADu8; 32]).unwrap();
+
+    // Neither write may have clobbered the other.
+    let utxo = UtxoRecord::from_bytes(&data).unwrap();
+    assert_eq!(utxo.txid, [0x11u8; 32]);
+    assert_eq!(utxo.vout(), 7);
+    assert_eq!(utxo.amount_sats(), 50_000);
+    assert_eq!(UtxoRecord::leaf_commitment(&data), Some(&[0xADu8; 32]));
+}
+

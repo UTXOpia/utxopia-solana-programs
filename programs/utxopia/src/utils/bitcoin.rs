@@ -307,7 +307,15 @@ impl<'a> ParsedTransaction<'a> {
 
             // Script length (varint)
             let (script_len, varint_size) = read_varint(&raw_tx[offset..])?;
-            offset += varint_size + script_len as usize + 4; // script + sequence
+            // Checked for the same reason `segwit_body_end` is: a 0xff varint carries a full
+            // u64, which would wrap `offset` backwards so the bounds check below passes and
+            // the same region is re-parsed. Today `overflow-checks` catches it, but that lives
+            // in Cargo.toml, not here (audit_2 N-8).
+            offset = offset
+                .checked_add(varint_size)
+                .and_then(|o| o.checked_add(script_len as usize))
+                .and_then(|o| o.checked_add(4)) // script + sequence
+                .ok_or(ProgramError::InvalidInstructionData)?;
 
             if offset > raw_tx.len() {
                 return Err(ProgramError::InvalidInstructionData);
@@ -331,7 +339,10 @@ impl<'a> ParsedTransaction<'a> {
             }
 
             let (script_len, varint_size) = read_varint(&raw_tx[offset..])?;
-            offset += varint_size + script_len as usize;
+            offset = offset
+                .checked_add(varint_size)
+                .and_then(|o| o.checked_add(script_len as usize))
+                .ok_or(ProgramError::InvalidInstructionData)?;
 
             if offset > raw_tx.len() {
                 return Err(ProgramError::InvalidInstructionData);
@@ -441,7 +452,7 @@ impl<'a> Iterator for OutputIterator<'a> {
         let (script_len, varint_size) = read_varint(&self.data[self.offset..]).ok()?;
         self.offset += varint_size;
 
-        let script_end = self.offset + script_len as usize;
+        let script_end = self.offset.checked_add(script_len as usize)?;
         if script_end > self.data.len() {
             return None;
         }
@@ -492,7 +503,11 @@ impl<'a> Iterator for InputIterator<'a> {
 
         // Script length (varint) + script + sequence (4)
         let (script_len, varint_size) = read_varint(&self.data[self.offset..]).ok()?;
-        self.offset += varint_size + script_len as usize + 4;
+        self.offset = self
+            .offset
+            .checked_add(varint_size)?
+            .checked_add(script_len as usize)?
+            .checked_add(4)?;
 
         if self.offset > self.data.len() {
             return None;
@@ -551,6 +566,39 @@ mod txid_tests {
         raw.extend_from_slice(&0u32.to_le_bytes());
 
         assert!(ParsedTransaction::parse(&raw).is_err());
+    }
+
+    /// A `0xff` varint carries a full u64, so `offset + varint + script_len + 4` wraps to a
+    /// small value and the `offset > raw_tx.len()` guard below it passes — the parser then
+    /// re-reads the same region as if it were a later field. `segwit_body_end` was hardened
+    /// against this (F-BTC-06); these four sites were not (audit_2 N-8).
+    ///
+    /// Before the fix this panics under `overflow-checks` rather than returning, so the test
+    /// fails either way — which is the point: the invariant was living in Cargo.toml.
+    #[test]
+    fn parse_rejects_an_overflowing_script_length() {
+        for site in ["input", "output"] {
+            let mut raw = Vec::new();
+            raw.extend_from_slice(&1u32.to_le_bytes()); // version
+            raw.push(1); // vin_count
+            raw.extend_from_slice(&[0u8; 32]); // prev txid
+            raw.extend_from_slice(&0u32.to_le_bytes()); // prev vout
+            if site == "input" {
+                raw.push(0xff); // script_len varint: next 8 bytes are a u64
+                raw.extend_from_slice(&u64::MAX.to_le_bytes());
+            } else {
+                raw.push(0); // empty input script
+                raw.extend_from_slice(&0xffff_ffffu32.to_le_bytes()); // sequence
+                raw.push(1); // vout_count
+                raw.extend_from_slice(&0u64.to_le_bytes()); // value
+                raw.push(0xff);
+                raw.extend_from_slice(&u64::MAX.to_le_bytes());
+            }
+            assert!(
+                ParsedTransaction::parse(&raw).is_err(),
+                "{site} script_len overflow must be rejected, not wrapped"
+            );
+        }
     }
 
     #[test]

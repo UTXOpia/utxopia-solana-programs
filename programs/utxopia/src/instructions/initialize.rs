@@ -112,8 +112,8 @@ pub fn process_initialize(
 
     // Get rent for account sizes
     let rent = Rent::get()?;
-    let pool_lamports = rent.minimum_balance(PoolState::LEN);
-    let tree_lamports = rent.minimum_balance(CommitmentTree::LEN);
+    let pool_lamports = rent.try_minimum_balance(PoolState::LEN)?;
+    let tree_lamports = rent.try_minimum_balance(CommitmentTree::LEN)?;
 
     // Check if pool_state already exists
     let pool_data_len = accounts.pool_state.data_len();

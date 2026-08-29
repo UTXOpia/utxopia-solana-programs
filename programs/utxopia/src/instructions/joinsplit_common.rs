@@ -175,9 +175,9 @@ pub fn parse_prefix<'a>(
     let mut nullifiers: [&[u8; 32]; MAX_JOINSPLIT_SIZE] = [ZERO_REF; MAX_JOINSPLIT_SIZE];
     for nullifier in nullifiers.iter_mut().take(header.n_inputs) {
         let n: &[u8; 32] = data[offset..offset + 32].try_into().unwrap();
-        // Reject non-canonical encodings: the proof scalar is reduced mod Fr by the
-        // syscall, but the nullifier PDA dedup seed uses these raw bytes, so `n` and
-        // `n + p` would seed distinct PDAs for one note → double-spend.
+        // Reject non-canonical encodings: the syscall multiplies by the raw scalar and G1
+        // has order r, so `n` and `n + r` prove the same statement, but the nullifier PDA
+        // dedup seed uses these raw bytes — distinct PDAs for one note → double-spend.
         if !crate::utils::crypto::is_canonical_fr(n) {
             return Err(UTXOpiaError::InvalidZkProof.into());
         }
@@ -188,8 +188,8 @@ pub fn parse_prefix<'a>(
     let mut commitments_out: [&[u8; 32]; MAX_JOINSPLIT_SIZE] = [ZERO_REF; MAX_JOINSPLIT_SIZE];
     for commitment in commitments_out.iter_mut().take(header.n_outputs) {
         let c: &[u8; 32] = data[offset..offset + 32].try_into().unwrap();
-        // Reject non-canonical encodings. Groth16 verifies public inputs modulo Fr, so a
-        // byte-distinct alias `c + k*p` would still satisfy the proof, but these RAW bytes are
+        // Reject non-canonical encodings. Groth16 verifies public inputs modulo r, so a
+        // byte-distinct alias `c + k*r` would still satisfy the proof, but these RAW bytes are
         // inserted into the Merkle tree and emitted in stealth/memo events. A non-canonical alias
         // would create a leaf and metadata that the wallet/circuit can never reproduce, stranding
         // the output. Requiring canonical bytes keeps the on-chain leaf == the proved commitment.
@@ -406,7 +406,7 @@ pub fn create_nullifier_records(
             payer,
             nullifier_info,
             program_id,
-            rent.minimum_balance(NullifierRecord::LEN),
+            rent.try_minimum_balance(NullifierRecord::LEN)?,
             NullifierRecord::LEN as u64,
             signer_seeds,
         )?;

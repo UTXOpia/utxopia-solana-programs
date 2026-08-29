@@ -127,7 +127,7 @@ pub fn process_register_token(
 
     // Create TokenConfig PDA
     let rent = Rent::get()?;
-    let lamports = rent.minimum_balance(TokenConfig::LEN);
+    let lamports = rent.try_minimum_balance(TokenConfig::LEN)?;
     let bump_bytes = [tc_bump];
     let create_seeds: &[&[u8]] = &[
         TokenConfig::SEED,

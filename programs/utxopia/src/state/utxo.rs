@@ -72,6 +72,39 @@ impl UtxoRecord {
     pub const LEN: usize = core::mem::size_of::<Self>(); // 48 bytes
     pub const SEED: &'static [u8] = b"utxo";
 
+    /// Account size for a UTXO whose tapleaf must be reconstructable to spend it.
+    ///
+    /// `LEN` bytes of record, then the 32-byte deposit commitment.
+    pub const LEN_WITH_LEAF: usize = Self::LEN + 32;
+
+    /// The deposit commitment this UTXO's tapleaf carries, if it has one.
+    ///
+    /// Kept as a tail past the fixed struct rather than a field, so records
+    /// written before this existed still parse: an account at exactly `LEN` is a
+    /// key-path UTXO sitting at the raw dWallet address, and answers `None`.
+    ///
+    /// Spending a script-path UTXO means rebuilding
+    /// `<commitment> OP_DROP <ika_xonly> OP_CHECKSIG`, and the commitment is the
+    /// only half not already on chain. Without it stored here the leaf is
+    /// unreconstructable and the coins are unspendable by anyone — the key path
+    /// is a NUMS point, so there is no fallback.
+    pub fn leaf_commitment(data: &[u8]) -> Option<&[u8; 32]> {
+        data.get(Self::LEN..Self::LEN_WITH_LEAF)?.try_into().ok()
+    }
+
+    /// Write the tapleaf commitment. The account must have been created at
+    /// `LEN_WITH_LEAF`.
+    pub fn set_leaf_commitment(
+        data: &mut [u8],
+        commitment: &[u8; 32],
+    ) -> Result<(), ProgramError> {
+        let tail = data
+            .get_mut(Self::LEN..Self::LEN_WITH_LEAF)
+            .ok_or(ProgramError::AccountDataTooSmall)?;
+        tail.copy_from_slice(commitment);
+        Ok(())
+    }
+
     /// Parse from account data
     pub fn from_bytes(data: &[u8]) -> Result<&Self, ProgramError> {
         if data.len() < Self::LEN {

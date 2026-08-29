@@ -31,6 +31,7 @@ use pinocchio::{
     ProgramResult,
 };
 
+#[cfg(test)]
 const TARGET_POOL_STATE: u8 = 0;
 const TARGET_POLICY_APPROVAL: u8 = 2;
 const NO_VALIDATOR_SENTINEL: [u8; 32] = [0; 32];
