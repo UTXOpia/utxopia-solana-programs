@@ -9,7 +9,7 @@
         "@noble/hashes": "^2.0.1",
         "@solana/spl-token": "^0.4.14",
         "@solana/web3.js": "^1.98.4",
-        "@utxopia/sdk": "0.1.0-alpha.6",
+        "@utxopia/sdk": "0.1.0-alpha.7",
         "tweetnacl": "^1.0.3",
       },
       "devDependencies": {
@@ -206,7 +206,7 @@
 
     "@types/ws": ["@types/ws@8.18.1", "", { "dependencies": { "@types/node": "*" } }, "sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg=="],
 
-    "@utxopia/sdk": ["@utxopia/sdk@0.1.0-alpha.6", "", { "dependencies": { "@magicblock-labs/ephemeral-rollups-kit": "0.16.2", "@noble/ciphers": "^2.2.0", "@noble/curves": "2.0.1", "@noble/hashes": "1.8.0", "@scure/base": "2.0.0", "@scure/btc-signer": "2.0.1", "@solana-program/system": "^0.10.0", "@solana/kit": "^5.5.0", "circomlibjs": "^0.1.7", "poseidon-lite": "0.3.0" }, "peerDependencies": { "react": ">=17.0.0", "snarkjs": "^0.7.5" }, "optionalPeers": ["react", "snarkjs"] }, "sha512-hr3QACoUK5S+8Wqr1MEB//nx5vYogMLUtcI1SHQkV0dDnfwpDu9kItWCVpJ5OxZKTeu5lu81BGyU8AnV0pxPgg=="],
+    "@utxopia/sdk": ["@utxopia/sdk@0.1.0-alpha.7", "", { "dependencies": { "@magicblock-labs/ephemeral-rollups-kit": "0.16.2", "@noble/ciphers": "^2.2.0", "@noble/curves": "2.0.1", "@noble/hashes": "1.8.0", "@scure/base": "2.0.0", "@scure/btc-signer": "2.0.1", "@solana-program/system": "^0.10.0", "@solana/kit": "^5.5.0", "circomlibjs": "^0.1.7", "poseidon-lite": "0.3.0" }, "peerDependencies": { "react": ">=17.0.0", "snarkjs": "^0.7.5" }, "optionalPeers": ["react", "snarkjs"] }, "sha512-5l3bUsIKFslpgUOAbRE86aMP/22uSH0McoFajWx5OcEfgZ1qoRuXkEhgShmKUxpiAd2pVygN0PgpSgpGRlJZOA=="],
 
     "aes-js": ["aes-js@3.0.0", "", {}, "sha512-H7wUZRn8WpTq9jocdxQ2c8x2sKo9ZVmzfRE13GiNJXfp7NcKYEdvl3vspKjXox6RIG2VtaRe4JFvxG4rqp2Zuw=="],
 
