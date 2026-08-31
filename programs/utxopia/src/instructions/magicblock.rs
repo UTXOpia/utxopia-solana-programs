@@ -17,7 +17,7 @@ use ephemeral_rollups_pinocchio::{
         DELEGATION_PROGRAM_ID, EPHEMERAL_VAULT_ID, EXTERNAL_UNDELEGATE_DISCRIMINATOR,
         MAGIC_CONTEXT_ID, MAGIC_PROGRAM_ID,
     },
-    instruction::{delegate_account, delegate_account_with_any_validator, undelegate},
+    instruction::{delegate_account, undelegate},
     intent_bundle::MagicIntentBundleBuilder,
     pda::{
         delegate_buffer_pda_from_delegated_account_and_owner_program,
@@ -52,12 +52,31 @@ const PER_ALLOWED_MEMBER_FLAGS: u8 = MemberFlags::AUTHORITY
 pub const MAX_PER_PERMISSION_MEMBERS: usize = crate::constants::MAGICBLOCK_MAX_PER_MEMBERS;
 const PER_CPI_DATA_BUFFER_SIZE: usize = data_buffer_size(MAX_PER_PERMISSION_MEMBERS);
 
+/// Parse the pinned TEE validator out of `magicblock_delegate` data.
+///
+/// Rejects the all-zero sentinel that the delegation program reads as
+/// "any validator" — see `process_magicblock_delegate` for why that is unsafe
+/// here. Callers have already length-checked `data`.
+fn parse_delegate_validator(data: &[u8]) -> Result<Pubkey, ProgramError> {
+    let mut validator = [0u8; 32];
+    validator.copy_from_slice(&data[5..37]);
+    if validator == NO_VALIDATOR_SENTINEL {
+        return Err(UTXOpiaError::ValidatorNotPinned.into());
+    }
+    Ok(Pubkey::new_from_array(validator))
+}
+
 /// Delegate a one-time PolicyApproval PDA on the base layer.
 ///
 /// Data after the UTXOpia discriminator:
 /// - target: u8, must be 2 = PolicyApproval
 /// - commit_frequency_ms: u32 LE
-/// - validator: optional [u8; 32]; omitted or all-zero allows any validator
+/// - validator: [u8; 32], required and non-zero — the TEE validator to pin to
+///
+/// A PolicyApproval is only ever evaluated inside a Private Ephemeral Rollup, so
+/// letting it land on any validator would silently drop both the confidentiality
+/// and the ingress compliance screening that make the decision meaningful — with
+/// no on-chain trace. The delegation must therefore name its validator.
 ///
 /// Accounts:
 /// 0. payer signer writable
@@ -78,7 +97,7 @@ pub fn process_magicblock_delegate(
     if accounts.len() != 10 {
         return Err(ProgramError::NotEnoughAccountKeys);
     }
-    if data.len() != 5 && data.len() != 37 {
+    if data.len() != 37 {
         return Err(ProgramError::InvalidInstructionData);
     }
 
@@ -115,17 +134,7 @@ pub fn process_magicblock_delegate(
         return Err(ProgramError::InvalidInstructionData);
     }
     let commit_frequency_ms = u32::from_le_bytes(data[1..5].try_into().unwrap());
-    let validator = if data.len() == 37 {
-        let mut validator = [0u8; 32];
-        validator.copy_from_slice(&data[5..37]);
-        if validator == NO_VALIDATOR_SENTINEL {
-            None
-        } else {
-            Some(Pubkey::new_from_array(validator))
-        }
-    } else {
-        None
-    };
+    let validator = Some(parse_delegate_validator(data)?);
 
     let mut tree_index_bytes = [0u8; 4];
     let mut approval_request_hash = [0u8; 32];
@@ -164,11 +173,7 @@ pub fn process_magicblock_delegate(
         system_program,
     ];
 
-    if config.validator.is_some() {
-        delegate_account(&cpi_accounts, seeds, bump, config)
-    } else {
-        delegate_account_with_any_validator(&cpi_accounts, seeds, bump, config)
-    }
+    delegate_account(&cpi_accounts, seeds, bump, config)
 }
 
 /// Atomically commit the pool, active tree, and every nullifier created by a
@@ -723,6 +728,22 @@ mod tests {
         assert!(parse_commit_data(&[COMMIT_ABI_VERSION, 0, 1, 7]).is_err());
         assert!(parse_commit_data(&[0, 0, 1]).is_err());
         assert!(parse_commit_data(&[COMMIT_ABI_VERSION, 0x80, 1]).is_err());
+    }
+
+    #[test]
+    fn delegate_refuses_an_unpinned_validator() {
+        // A PolicyApproval evaluated outside the TEE loses confidentiality and
+        // ingress screening with no on-chain trace, so the sentinel must fail.
+        let mut sentinel = vec![TARGET_POLICY_APPROVAL, 0, 0, 0, 0];
+        sentinel.extend_from_slice(&NO_VALIDATOR_SENTINEL);
+        assert!(parse_delegate_validator(&sentinel).is_err());
+
+        let mut pinned = vec![TARGET_POLICY_APPROVAL, 0, 0, 0, 0];
+        pinned.extend_from_slice(&[7u8; 32]);
+        assert_eq!(
+            parse_delegate_validator(&pinned).unwrap(),
+            Pubkey::new_from_array([7u8; 32])
+        );
     }
 
     #[test]

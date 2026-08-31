@@ -246,6 +246,9 @@ pub enum UTXOpiaError {
 
     #[error("Verification key hash does not match the submitted key material")]
     VkHashMismatch = 6105,
+
+    #[error("PolicyApproval delegation must pin an explicit TEE validator")]
+    ValidatorNotPinned = 6106,
 }
 
 impl From<UTXOpiaError> for ProgramError {
