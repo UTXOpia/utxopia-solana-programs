@@ -1,0 +1,63 @@
+# Closes audit_1 F-BC-09 — programs/svm-tests had a script but nothing ran it.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Ships the cargo-build-sbf that scripts/build-sbf.sh expects. The artifact is pinned by
+  # that script's --tools-version, not by this, so a minor drift here warns rather than fails.
+  AGAVE_VERSION: v4.1.1
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          # svm-tests is excluded from the workspace, so it has its own target dir.
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            programs/svm-tests/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # Fast signal first: the host suite needs no Solana toolchain.
+      - name: Host unit tests
+        run: cargo test --workspace
+
+      - name: Install Agave
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/${AGAVE_VERSION}/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      - name: SVM integration tests
+        run: |
+          cargo-build-sbf --version
+          sh scripts/build-sbf.sh --features devnet-regtest
+          cargo test --manifest-path programs/svm-tests/Cargo.toml
+
+      # Regression guard for audit_1 F-BC-04 (severity 7): a build that names no network used to
+      # succeed and silently take every devnet default. It must now fail to compile.
+      - name: A featureless on-chain build must be rejected
+        run: |
+          if sh scripts/build-sbf.sh > "$RUNNER_TEMP/featureless.log" 2>&1; then
+            echo "::error::featureless SBF build succeeded — the F-BC-04 compile_error guard is gone"
+            exit 1
+          fi
+          grep -q 'must name its network' "$RUNNER_TEMP/featureless.log" || {
+            echo "::error::featureless build failed, but not on the F-BC-04 guard:"
+            tail -30 "$RUNNER_TEMP/featureless.log"
+            exit 1
+          }
