@@ -383,6 +383,20 @@ pub fn verify_vk_merkle_and_proof(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Whether a spend settles its nullifier count now or hands it to the merge.
+///
+/// `pool_state.nullifier_count` is the reconciler's only check for missing
+/// nullifier rows, so it is never skipped — only moved. A queued spend must
+/// record the returned count on one of its `QueuedLeaf`s; dropping it would
+/// leave the counter permanently short and blind the reconciler to a real gap.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum NullifierAccounting {
+    /// Bump `pool_state` inline. Takes a write lock on the shared account.
+    ApplyNow,
+    /// Leave `pool_state` untouched — the caller owes the count to a merge.
+    DeferToQueue,
+}
+
 pub fn create_nullifier_records(
     program_id: &Pubkey,
     accounts: &[AccountInfo],
@@ -394,6 +408,7 @@ pub fn create_nullifier_records(
     rent: &Rent,
     operation_type: u8,
     instruction_disc: u8,
+    accounting: NullifierAccounting,
 ) -> ProgramResult {
     let pool_state = pool_state_info.address();
     // Tree 0 keeps the original seeds. Every nullifier ever recorded lives under
@@ -483,7 +498,7 @@ pub fn create_nullifier_records(
     // this is the one place every spend path creates nullifier records, so a new
     // path cannot forget it. Every caller's pool_state borrows are block-scoped
     // and released before this point.
-    {
+    if accounting == NullifierAccounting::ApplyNow {
         let mut pool_data = pool_state_info.try_borrow_mut()?;
         PoolState::from_bytes_mut(&mut pool_data)?.add_nullifiers(nullifiers.len() as u32);
     }
@@ -549,6 +564,8 @@ pub struct JoinSplitTail {
     pub source_tree: Option<usize>,
     /// First policy account, if any. `PolicyTail` says how many follow.
     pub policy_start: Option<usize>,
+    /// First `QueuedLeaf` PDA, if the spend defers placement. One per output.
+    pub queued_leaves_start: Option<usize>,
     pub proof_buffer: Option<usize>,
 }
 
@@ -575,6 +592,7 @@ pub fn resolve_joinsplit_tail(
     flags: u8,
     tail_start: usize,
     policy: PolicyTail,
+    n_outputs: usize,
     account_count: usize,
 ) -> Result<JoinSplitTail, ProgramError> {
     let mut cursor = tail_start;
@@ -594,6 +612,11 @@ pub fn resolve_joinsplit_tail(
         relayer: take_n(usize::from(flags & jsflags::RELAYER != 0))?,
         source_tree: take_n(usize::from(flags & jsflags::FROZEN_SOURCE_TREE != 0))?,
         policy_start: take_n(policy.account_count())?,
+        queued_leaves_start: take_n(if flags & jsflags::QUEUED_LEAVES != 0 {
+            n_outputs
+        } else {
+            0
+        })?,
         proof_buffer: take_n(usize::from(flags & jsflags::PROOF_IN_BUFFER != 0))?,
     };
 
@@ -609,7 +632,7 @@ mod tail_tests {
 
     /// Mirrors transact's tail start so the numbers stay readable.
     fn t(flags: u8, n_inputs: usize, policy: PolicyTail, n: usize) -> JoinSplitTail {
-        resolve_joinsplit_tail(flags, 5 + n_inputs, policy, n).expect("resolves")
+        resolve_joinsplit_tail(flags, 5 + n_inputs, policy, 0, n).expect("resolves")
     }
 
     #[test]
@@ -662,18 +685,42 @@ mod tail_tests {
         assert_eq!(with_buf.proof_buffer, Some(10));
     }
 
+    /// Queued placement reserves one PDA slot per output, and must not disturb
+    /// anything declared after it.
+    #[test]
+    fn queued_leaves_reserve_one_slot_per_output() {
+        let got = resolve_joinsplit_tail(
+            jsflags::QUEUED_LEAVES | jsflags::PROOF_IN_BUFFER,
+            7,
+            PolicyTail::None,
+            3,
+            11,
+        )
+        .expect("resolves");
+        assert_eq!(got.queued_leaves_start, Some(7));
+        assert_eq!(got.proof_buffer, Some(10));
+
+        // Without the flag the slots are not reserved even if n_outputs is set.
+        let bare = resolve_joinsplit_tail(0, 7, PolicyTail::None, 3, 7).expect("resolves");
+        assert_eq!(bare.queued_leaves_start, None);
+
+        // Count must match n_outputs exactly.
+        assert!(resolve_joinsplit_tail(jsflags::QUEUED_LEAVES, 7, PolicyTail::None, 3, 9).is_err());
+        assert!(resolve_joinsplit_tail(jsflags::QUEUED_LEAVES, 7, PolicyTail::None, 3, 11).is_err());
+    }
+
     #[test]
     fn a_stuffed_extra_account_is_rejected() {
-        assert!(resolve_joinsplit_tail(0, 5 + 2, PolicyTail::None, 8).is_err());
-        assert!(resolve_joinsplit_tail(jsflags::RELAYER, 5 + 2, PolicyTail::None, 9).is_err());
-        assert!(resolve_joinsplit_tail(jsflags::RAGEQUIT, 5 + 2, PolicyTail::Ragequit(3), 11).is_err());
+        assert!(resolve_joinsplit_tail(0, 5 + 2, PolicyTail::None, 0, 8).is_err());
+        assert!(resolve_joinsplit_tail(jsflags::RELAYER, 5 + 2, PolicyTail::None, 0, 9).is_err());
+        assert!(resolve_joinsplit_tail(jsflags::RAGEQUIT, 5 + 2, PolicyTail::Ragequit(3), 0, 11).is_err());
     }
 
     #[test]
     fn a_short_list_is_rejected() {
-        assert!(resolve_joinsplit_tail(jsflags::RELAYER, 5 + 2, PolicyTail::None, 7).is_err());
-        assert!(resolve_joinsplit_tail(jsflags::POLICY, 5 + 2, PolicyTail::Verified, 8).is_err());
-        assert!(resolve_joinsplit_tail(jsflags::RAGEQUIT, 5 + 2, PolicyTail::Ragequit(3), 9).is_err());
+        assert!(resolve_joinsplit_tail(jsflags::RELAYER, 5 + 2, PolicyTail::None, 0, 7).is_err());
+        assert!(resolve_joinsplit_tail(jsflags::POLICY, 5 + 2, PolicyTail::Verified, 0, 8).is_err());
+        assert!(resolve_joinsplit_tail(jsflags::RAGEQUIT, 5 + 2, PolicyTail::Ragequit(3), 0, 9).is_err());
     }
 
     #[test]

@@ -47,13 +47,14 @@ use pinocchio::{
 
 use crate::error::UTXOpiaError;
 use crate::instructions::joinsplit_common::{
-    jsflags, resolve_joinsplit_tail, PolicyTail,
+    jsflags, NullifierAccounting, resolve_joinsplit_tail, PolicyTail,
     create_nullifier_records, looks_like_commitment_tree, parse_header, parse_prefix,
     validate_account_count, validate_public_outputs, verify_vk_merkle_and_proof, JoinSplitHeader,
     STEALTH_DATA_PER_OUTPUT,
 };
-use crate::state::{CommitmentTree, NullifierOperationType, PoolState};
+use crate::state::{CommitmentTree, QueuedLeaf, NullifierOperationType, PoolState};
 use crate::utils::{
+    create_pda_account,
     validate_account_writable, validate_active_tree_pda, validate_program_owner,
     validate_system_program,
 };
@@ -98,8 +99,20 @@ pub fn process_transact(
     validate_program_owner(commitment_tree_info, program_id)?;
     validate_program_owner(vk_registry_info, program_id)?;
     validate_system_program(system_program)?;
-    validate_account_writable(pool_state_info)?;
-    validate_account_writable(commitment_tree_info)?;
+    // Writability is demanded only where this instruction actually writes. A
+    // queued spend touches neither shared account — the tree is read for
+    // `is_valid_root` and pool_state for its policy flags — and requiring them
+    // writable anyway would take both locks and destroy the parallelism the
+    // queue exists for. Sealevel serialises on the declared metas, not on what
+    // the program ends up doing.
+    if header.has(jsflags::QUEUED_LEAVES) {
+        if pool_state_info.is_writable() || commitment_tree_info.is_writable() {
+            return Err(UTXOpiaError::InvalidPDA.into());
+        }
+    } else {
+        validate_account_writable(pool_state_info)?;
+        validate_account_writable(commitment_tree_info)?;
+    }
 
     // Validate pool is not paused + tree PDA matches active index
     let (active_index, permissioned, policy_authority) = {
@@ -162,7 +175,16 @@ pub fn process_transact(
     if matches!(policy_tail, PolicyTail::Ragequit(_)) {
         return Err(ProgramError::InvalidInstructionData);
     }
-    let tail = resolve_joinsplit_tail(flags, min_accounts, policy_tail, accounts.len())?;
+    let tail = resolve_joinsplit_tail(flags, min_accounts, policy_tail, n_outputs, accounts.len())?;
+    // Deferred placement. The outputs become QueuedLeaf PDAs — accounts unique to
+    // this transaction — instead of leaves written into the shared tree, so two
+    // queued spends share no writable account and Sealevel can run them together.
+    //
+    // The caller must also pass commitment_tree as READONLY for that to hold: the
+    // program stops writing it here, but a writable meta still takes the lock and
+    // silently costs the parallelism this whole path exists for. The tree is still
+    // needed, read-only, for `is_valid_root`.
+    let queued = header.has(jsflags::QUEUED_LEAVES);
     let (relayer_at, source_tree_at) = (tail.relayer, tail.source_tree);
     let (approval_at, policy_program_at) = match tail.verified_pair() {
         Some((a, p)) => (Some(a), Some(p)),
@@ -258,28 +280,36 @@ pub fn process_transact(
         &rent,
         NullifierOperationType::PrivateTransfer as u8,
         crate::instruction::TRANSACT,
+        if queued { NullifierAccounting::DeferToQueue } else { NullifierAccounting::ApplyNow },
     )?;
 
-    // Insert output commitments into Merkle tree and emit stealth announcements
-    {
-        let mut tree_data = commitment_tree_info.try_borrow_mut()?;
-        let tree = CommitmentTree::from_bytes_mut(&mut tree_data)?;
-
-        // One history slot for the whole batch, not one per output — see
-        // `insert_leaves_batch` and _handoff/HANDOFF.md §12.
-        // Defensive: an outputless spend inserts nothing, so it must not push a
-        // root (or trip the empty-batch guard). `transact` forbids public
-        // outputs, so n_outputs is normally >= 1.
-        let first_leaf_index = if n_outputs > 0 {
-            tree.insert_leaves_batch(&prefix.commitments_out[..n_outputs])?
-        } else {
-            tree.next_index()
-        };
-
+    // Place the outputs: into the tree now, or into per-transaction PDAs that a
+    // later `merge_queued_leaves` inserts as one batch.
+    //
+    // The announcement goes out either way, but a queued one carries
+    // UNPLACED_LEAF_INDEX: the index does not exist yet. The recipient still
+    // discovers the note immediately — only spending it waits for the merge.
+    let first_leaf_index = if queued {
+        let rent = Rent::get()?;
+        let queued_start = tail
+            .queued_leaves_start
+            .ok_or(ProgramError::NotEnoughAccountKeys)?;
         for (i, commitment) in prefix.commitments_out.iter().take(n_outputs).enumerate() {
-            let leaf_index = first_leaf_index + i as u64;
+            let leaf_info = &accounts[queued_start + i];
+            validate_account_writable(leaf_info)?;
 
-            // Parse stealth data for this output
+            let (expected_pda, bump) = crate::pinocchio_compat::find_program_address(
+                &[
+                    QueuedLeaf::SEED,
+                    pool_state_info.address().as_ref(),
+                    commitment.as_ref(),
+                ],
+                program_id,
+            );
+            if leaf_info.address() != &expected_pda {
+                return Err(ProgramError::InvalidSeeds);
+            }
+
             let stealth_offset = stealth_data_start + i * STEALTH_DATA_PER_OUTPUT;
             let ephemeral_pub: &[u8; 32] = data[stealth_offset..stealth_offset + 32]
                 .try_into()
@@ -291,7 +321,79 @@ pub fn process_transact(
                 .try_into()
                 .unwrap();
 
-            // Emit stealth announcement — token_id is encrypted (only recipient can decrypt)
+            let bump_bytes = [bump];
+            create_pda_account(
+                payer,
+                leaf_info,
+                program_id,
+                rent.try_minimum_balance(QueuedLeaf::LEN)?,
+                QueuedLeaf::LEN as u64,
+                &[
+                    QueuedLeaf::SEED,
+                    pool_state_info.address().as_ref(),
+                    commitment.as_ref(),
+                    &bump_bytes,
+                ],
+            )?;
+
+            {
+                let mut leaf_data = leaf_info.try_borrow_mut()?;
+                QueuedLeaf::init(
+                    &mut leaf_data,
+                    bump,
+                    active_index,
+                    commitment,
+                    payer.address().as_ref().try_into().unwrap(),
+                    ephemeral_pub,
+                    encrypted_amount,
+                    encrypted_token_id,
+                    // Exactly one leaf carries the whole spend's nullifier debt;
+                    // splitting it across siblings would double-count on merge.
+                    if i == 0 { n_inputs as u8 } else { 0 },
+                )?;
+            }
+
+            crate::utils::events::emit_stealth_announcement(
+                crate::utils::events::ANNOUNCEMENT_TYPE_TRANSFER,
+                ephemeral_pub,
+                encrypted_amount,
+                *commitment,
+                crate::utils::events::UNPLACED_LEAF_INDEX,
+                encrypted_token_id,
+            );
+        }
+        None
+    } else {
+        let mut tree_data = commitment_tree_info.try_borrow_mut()?;
+        let tree = CommitmentTree::from_bytes_mut(&mut tree_data)?;
+
+        // One history slot for the whole batch, not one per output — see
+        // `insert_leaves_batch` and _handoff/HANDOFF.md §12.
+        // Defensive: an outputless spend inserts nothing, so it must not push a
+        // root (or trip the empty-batch guard). `transact` forbids public
+        // outputs, so n_outputs is normally >= 1.
+        Some(if n_outputs > 0 {
+            tree.insert_leaves_batch(&prefix.commitments_out[..n_outputs])?
+        } else {
+            tree.next_index()
+        })
+    };
+
+    if let Some(first_leaf_index) = first_leaf_index {
+        for (i, commitment) in prefix.commitments_out.iter().take(n_outputs).enumerate() {
+            let leaf_index = first_leaf_index + i as u64;
+
+            let stealth_offset = stealth_data_start + i * STEALTH_DATA_PER_OUTPUT;
+            let ephemeral_pub: &[u8; 32] = data[stealth_offset..stealth_offset + 32]
+                .try_into()
+                .unwrap();
+            let encrypted_amount: &[u8; 8] = data[stealth_offset + 32..stealth_offset + 40]
+                .try_into()
+                .unwrap();
+            let encrypted_token_id: &[u8; 32] = data[stealth_offset + 40..stealth_offset + 72]
+                .try_into()
+                .unwrap();
+
             crate::utils::events::emit_stealth_announcement(
                 crate::utils::events::ANNOUNCEMENT_TYPE_TRANSFER,
                 ephemeral_pub,

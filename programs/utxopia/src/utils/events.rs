@@ -56,6 +56,14 @@ const EVENT_UNSHIELD_META: u8 = 0x0E;
 /// Event discriminator: UTXO created (deposit or change)
 const EVENT_UTXO_CREATED: u8 = 0x0F;
 
+/// Leaf index on an announcement whose commitment is queued, not yet placed.
+///
+/// The recipient can decrypt and recognise the note straight away; only the
+/// Merkle path — and so spending it — waits for `merge_queued_leaves`, which
+/// publishes the real index via `emit_leaves_merged`. u32::MAX is safe as a
+/// sentinel: the tree is depth 16, so a real index never approaches it.
+pub const UNPLACED_LEAF_INDEX: u32 = u32::MAX;
+
 /// Leaf placements from `merge_queued_leaves` — see `emit_leaves_merged`.
 const EVENT_LEAVES_MERGED: u8 = 0x1A;
 

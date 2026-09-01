@@ -41,7 +41,7 @@ use pinocchio::{
 
 use crate::error::UTXOpiaError;
 use crate::instructions::joinsplit_common::{
-    jsflags, resolve_joinsplit_tail, PolicyTail,
+    jsflags, NullifierAccounting, resolve_joinsplit_tail, PolicyTail,
     create_nullifier_records, looks_like_commitment_tree, parse_header, parse_prefix, read_u64_le,
     validate_account_count, validate_public_outputs, verify_vk_merkle_and_proof, JoinSplitHeader,
     MAX_PUBLIC_OUTPUTS, STEALTH_DATA_PER_OUTPUT,
@@ -213,12 +213,12 @@ pub fn process_unshield(
     //
     // Flags only pick which index to read — every slot is still validated below
     // exactly as before.
-    if flags & jsflags::RELAYER != 0 {
+    if flags & (jsflags::RELAYER | jsflags::QUEUED_LEAVES) != 0 {
         // unshield has no relayer path; the note owner signs (checked above).
         return Err(ProgramError::InvalidInstructionData);
     }
     let policy_tail = PolicyTail::from_flags(flags, permissioned, n_public_outputs)?;
-    let tail = resolve_joinsplit_tail(flags, min_accounts, policy_tail, accounts.len())?;
+    let tail = resolve_joinsplit_tail(flags, min_accounts, policy_tail, 0, accounts.len())?;
 
     let (approval_info, policy_program_info) = match policy_tail {
         PolicyTail::Verified => {
@@ -392,6 +392,7 @@ pub fn process_unshield(
         &rent,
         NullifierOperationType::FullWithdrawal as u8,
         crate::instruction::UNSHIELD,
+        NullifierAccounting::ApplyNow,
     )?;
 
     // Insert tree outputs into Merkle tree
