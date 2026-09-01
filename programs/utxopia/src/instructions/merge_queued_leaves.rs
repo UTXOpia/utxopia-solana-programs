@@ -139,12 +139,21 @@ pub fn process_merge_queued_leaves(
             return Err(UTXOpiaError::InvalidPDA.into());
         }
 
-        // The same leaf twice would insert one commitment at two leaf indices.
-        // Nullifiers are derived from (key, leaf index), so the duplicate yields
-        // a second distinct nullifier and the note becomes spendable twice —
-        // minting. O(n^2) over at most MAX_MERGE_LEAVES is not worth avoiding.
-        for seen in commitments.iter().take(i) {
-            if seen == commitment {
+        // One account must not be counted twice. Nullifiers are
+        // Poseidon(nullifyingKey, leafIndex) — position, not content
+        // (joinsplit.circom:42) — so a leaf placed at two indices yields two
+        // distinct spendable nullifiers for one deposit of value.
+        //
+        // Deliberately compares ADDRESSES, not commitments. Two *different*
+        // deposits that happen to collide on a commitment are two real notes and
+        // both belong in the tree at their own leaves; only re-counting a single
+        // account is theft. The PDA is seeded on the commitment today, which
+        // makes the two checks equivalent, but the address is the invariant that
+        // stays right if that seeding ever changes.
+        //
+        // O(n^2) over at most MAX_MERGE_LEAVES is not worth avoiding.
+        for prior in 0..i {
+            if accounts[FIXED_ACCOUNTS + prior * 2].address() == leaf_info.address() {
                 return Err(UTXOpiaError::NullifierAlreadyUsed.into());
             }
         }

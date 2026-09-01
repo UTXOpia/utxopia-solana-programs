@@ -28,6 +28,23 @@
 //! Exactly one leaf per spend carries the debt; its siblings carry 0. Splitting
 //! it any other way double-counts.
 
+//! ## Known divergence from inline placement
+//!
+//! The PDA is seeded on the commitment, so a commitment can be queued only
+//! once. Inline placement has no such limit: two *different* deposits that
+//! collide on a commitment — same recipient, token and value, and the sender
+//! reused the blinding factor — are two real notes, and both belong in the tree
+//! at their own leaves. Queued, the second is refused at account creation.
+//!
+//! Left as is on purpose. With a correct client `random` comes from a CSPRNG, so
+//! a collision is ~2^-256; and when it does happen the spend fails cleanly and
+//! retries with fresh randomness, losing nothing. Seeding on a caller-supplied
+//! nonce instead would remove the limit at the cost of a value the SDK must
+//! track and the program cannot check.
+//!
+//! Worth knowing because it makes the queued path strictly more restrictive
+//! than the inline one — the same spend can succeed inline and fail queued.
+
 use crate::pinocchio_compat::ProgramError;
 
 pub const QUEUED_LEAF_DISCRIMINATOR: u8 = 0x16;
