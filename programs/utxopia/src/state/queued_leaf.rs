@@ -36,10 +36,23 @@
 //! reused the blinding factor — are two real notes, and both belong in the tree
 //! at their own leaves. Queued, the second is refused at account creation.
 //!
-//! Left as is on purpose. With a correct client `random` comes from a CSPRNG, so
-//! a collision is ~2^-256; and when it does happen the spend fails cleanly and
-//! retries with fresh randomness, losing nothing. Seeding on a caller-supplied
-//! nonce instead would remove the limit at the cost of a value the SDK must
+//! Left as is, but the reason is narrower than it first looks.
+//!
+//! Colliding commitments are NOT merely a 2^-256 curiosity in this protocol.
+//! `complete_deposit` computes `Poseidon(note_public_key, token_id,
+//! shielded_amount)`, and the BTC deposit address is derived from that same note
+//! key — so paying the same deposit address twice for the same amount produces
+//! byte-identical commitments every time. That is address reuse, not a hash
+//! collision. It is handled: both land at their own leaves, announcements and
+//! merkle proofs are keyed on leaf_index throughout, and each note spends once.
+//!
+//! Only `transact` queues. Its output commitments carry a sender-chosen `npk`
+//! derived with a fresh blinding factor, so for THIS path a collision really is
+//! ~2^-256, and when it happens the spend fails cleanly and retries — nothing is
+//! lost. Deposits, which can collide routinely, place inline and are unaffected.
+//!
+//! Do not generalise the queued restriction to the deposit path. Seeding on a
+//! caller-supplied nonce would lift it, at the cost of a value the SDK must
 //! track and the program cannot check.
 //!
 //! Worth knowing because it makes the queued path strictly more restrictive
