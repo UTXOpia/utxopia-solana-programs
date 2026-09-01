@@ -65,9 +65,17 @@ pub mod jsflags {
     pub const POLICY: u8 = 1 << 3;
     /// Outputs are queued as `QueuedLeaf` PDAs instead of inserted inline.
     pub const QUEUED_LEAVES: u8 = 1 << 4;
+    /// Permissioned exit taken without an approval: one registered
+    /// `ExitDestination` per public output instead of the policy pair.
+    /// Mutually exclusive with [`POLICY`].
+    pub const RAGEQUIT: u8 = 1 << 5;
 
-    pub const ALL: u8 =
-        PROOF_IN_BUFFER | RELAYER | FROZEN_SOURCE_TREE | POLICY | QUEUED_LEAVES;
+    pub const ALL: u8 = PROOF_IN_BUFFER
+        | RELAYER
+        | FROZEN_SOURCE_TREE
+        | POLICY
+        | QUEUED_LEAVES
+        | RAGEQUIT;
 }
 
 #[derive(Clone, Copy)]
@@ -491,55 +499,102 @@ mod tests;
 /// Pure arithmetic, extracted so it can be tested without standing up a proof.
 /// The slots it returns are still validated by the caller — owner, signer, seeds
 /// — exactly as before; this only decides *which index* to look at.
+/// Which permissioned tail a spend carries, if any.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum PolicyTail {
+    /// Public pool: no policy accounts.
+    None,
+    /// Approval consumed against the policy program: `(approval, policy_program)`.
+    Verified,
+    /// No approval at all — one registered `ExitDestination` per public output.
+    /// The auditor bounds *where* an unapproved exit lands, never whether it can
+    /// happen, so this path must stay reachable without any approval.
+    Ragequit(usize),
+}
+
+impl PolicyTail {
+    fn account_count(self) -> usize {
+        match self {
+            PolicyTail::None => 0,
+            PolicyTail::Verified => 2,
+            PolicyTail::Ragequit(n) => n,
+        }
+    }
+
+    /// Derive from the declared flags, cross-checked against pool state.
+    ///
+    /// `permissioned` is authoritative — it comes from the pool, not the caller
+    /// — so a flag that disagrees is refused rather than believed.
+    pub fn from_flags(
+        flags: u8,
+        permissioned: bool,
+        n_public_outputs: usize,
+    ) -> Result<Self, ProgramError> {
+        let verified = flags & jsflags::POLICY != 0;
+        let ragequit = flags & jsflags::RAGEQUIT != 0;
+        match (permissioned, verified, ragequit) {
+            (false, false, false) => Ok(PolicyTail::None),
+            (true, true, false) => Ok(PolicyTail::Verified),
+            (true, false, true) => Ok(PolicyTail::Ragequit(n_public_outputs)),
+            // Both set, neither set on a permissioned pool, or either set on a
+            // public one: all ambiguous, none guessable.
+            _ => Err(ProgramError::InvalidInstructionData),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct JoinSplitTail {
     pub relayer: Option<usize>,
     pub source_tree: Option<usize>,
-    pub approval: Option<usize>,
-    pub policy_program: Option<usize>,
+    /// First policy account, if any. `PolicyTail` says how many follow.
+    pub policy_start: Option<usize>,
     pub proof_buffer: Option<usize>,
+}
+
+impl JoinSplitTail {
+    /// `(approval, policy_program)` for a verified exit.
+    pub fn verified_pair(&self) -> Option<(usize, usize)> {
+        self.policy_start.map(|i| (i, i + 1))
+    }
 }
 
 /// Resolve the optional tail that follows the nullifiers.
 ///
-/// Order is fixed: relayer, frozen source tree, (approval, policy_program),
-/// proof buffer. `permissioned` comes from pool state rather than the flag byte
-/// because the pool is authoritative; the caller's POLICY flag must agree with
-/// it, which keeps the layout readable from flags while the authority stays
-/// on-chain.
+/// Order is fixed: relayer, frozen source tree, policy accounts, proof buffer.
 ///
 /// Rejects a list that is short **or** long. The subtraction-based version this
 /// replaces silently absorbed a stuffed extra account into whichever count it
-/// happened to land in.
+/// happened to land in, and identified slots by asking whether an account
+/// "looked like" a commitment tree or carried the policy program's id.
+/// `tail_start` is the first index after each instruction's own fixed accounts
+/// and per-input/per-output slots. It differs per instruction — transact has
+/// five fixed accounts, unshield and redeem eight plus one recipient per public
+/// output — so it is passed in rather than assumed.
 pub fn resolve_joinsplit_tail(
     flags: u8,
-    n_inputs: usize,
-    permissioned: bool,
+    tail_start: usize,
+    policy: PolicyTail,
     account_count: usize,
 ) -> Result<JoinSplitTail, ProgramError> {
-    if (flags & jsflags::POLICY != 0) != permissioned {
-        return Err(ProgramError::InvalidInstructionData);
-    }
-
-    let mut cursor = 5 + n_inputs;
-    let mut take = |present: bool| -> Result<Option<usize>, ProgramError> {
-        if !present {
+    let mut cursor = tail_start;
+    let mut take_n = |n: usize| -> Result<Option<usize>, ProgramError> {
+        if n == 0 {
             return Ok(None);
         }
-        if cursor >= account_count {
+        if cursor + n > account_count {
             return Err(ProgramError::NotEnoughAccountKeys);
         }
         let at = cursor;
-        cursor += 1;
+        cursor += n;
         Ok(Some(at))
     };
 
     let tail = JoinSplitTail {
-        relayer: take(flags & jsflags::RELAYER != 0)?,
-        source_tree: take(flags & jsflags::FROZEN_SOURCE_TREE != 0)?,
-        approval: take(permissioned)?,
-        policy_program: take(permissioned)?,
-        proof_buffer: take(flags & jsflags::PROOF_IN_BUFFER != 0)?,
+        relayer: take_n(usize::from(flags & jsflags::RELAYER != 0))?,
+        source_tree: take_n(usize::from(flags & jsflags::FROZEN_SOURCE_TREE != 0))?,
+        policy_start: take_n(policy.account_count())?,
+        proof_buffer: take_n(usize::from(flags & jsflags::PROOF_IN_BUFFER != 0))?,
     };
 
     if cursor != account_count {
@@ -552,63 +607,92 @@ pub fn resolve_joinsplit_tail(
 mod tail_tests {
     use super::*;
 
-    fn t(flags: u8, n_inputs: usize, permissioned: bool, n: usize) -> JoinSplitTail {
-        resolve_joinsplit_tail(flags, n_inputs, permissioned, n).expect("resolves")
+    /// Mirrors transact's tail start so the numbers stay readable.
+    fn t(flags: u8, n_inputs: usize, policy: PolicyTail, n: usize) -> JoinSplitTail {
+        resolve_joinsplit_tail(flags, 5 + n_inputs, policy, n).expect("resolves")
     }
 
     #[test]
     fn bare_spend_has_no_tail() {
-        let got = t(0, 2, false, 7);
+        let got = t(0, 2, PolicyTail::None, 7);
         assert_eq!(got.relayer, None);
         assert_eq!(got.source_tree, None);
-        assert_eq!(got.approval, None);
+        assert_eq!(got.policy_start, None);
         assert_eq!(got.proof_buffer, None);
     }
 
     #[test]
     fn slots_follow_the_declared_order() {
-        // relayer + frozen tree + policy pair + proof buffer, n_inputs = 2.
         let flags = jsflags::RELAYER
             | jsflags::FROZEN_SOURCE_TREE
             | jsflags::POLICY
             | jsflags::PROOF_IN_BUFFER;
-        let got = t(flags, 2, true, 12);
+        let got = t(flags, 2, PolicyTail::Verified, 12);
         assert_eq!(got.relayer, Some(7));
         assert_eq!(got.source_tree, Some(8));
-        assert_eq!(got.approval, Some(9));
-        assert_eq!(got.policy_program, Some(10));
+        assert_eq!(got.verified_pair(), Some((9, 10)));
         assert_eq!(got.proof_buffer, Some(11));
     }
 
     #[test]
     fn one_optional_account_does_not_move_the_others() {
-        // The whole point: dropping the relayer shifts only the relayer.
-        let with = t(jsflags::RELAYER | jsflags::PROOF_IN_BUFFER, 1, false, 8);
-        let without = t(jsflags::PROOF_IN_BUFFER, 1, false, 7);
+        let with = t(jsflags::RELAYER | jsflags::PROOF_IN_BUFFER, 1, PolicyTail::None, 8);
+        let without = t(jsflags::PROOF_IN_BUFFER, 1, PolicyTail::None, 7);
         assert_eq!(with.relayer, Some(6));
         assert_eq!(with.proof_buffer, Some(7));
         assert_eq!(without.relayer, None);
         assert_eq!(without.proof_buffer, Some(6));
     }
 
+    /// A ragequit tail is as long as the public-output count, which is exactly
+    /// what the old backwards-counting could not express.
+    #[test]
+    fn ragequit_reserves_one_slot_per_public_output() {
+        let got = t(jsflags::RAGEQUIT, 2, PolicyTail::Ragequit(3), 10);
+        assert_eq!(got.policy_start, Some(7));
+        assert_eq!(got.proof_buffer, None);
+
+        let with_buf = t(
+            jsflags::RAGEQUIT | jsflags::PROOF_IN_BUFFER,
+            2,
+            PolicyTail::Ragequit(3),
+            11,
+        );
+        assert_eq!(with_buf.policy_start, Some(7));
+        assert_eq!(with_buf.proof_buffer, Some(10));
+    }
+
     #[test]
     fn a_stuffed_extra_account_is_rejected() {
-        // The subtraction this replaced absorbed it silently.
-        assert!(resolve_joinsplit_tail(0, 2, false, 8).is_err());
-        assert!(resolve_joinsplit_tail(jsflags::RELAYER, 2, false, 9).is_err());
+        assert!(resolve_joinsplit_tail(0, 5 + 2, PolicyTail::None, 8).is_err());
+        assert!(resolve_joinsplit_tail(jsflags::RELAYER, 5 + 2, PolicyTail::None, 9).is_err());
+        assert!(resolve_joinsplit_tail(jsflags::RAGEQUIT, 5 + 2, PolicyTail::Ragequit(3), 11).is_err());
     }
 
     #[test]
     fn a_short_list_is_rejected() {
-        assert!(resolve_joinsplit_tail(jsflags::RELAYER, 2, false, 7).is_err());
-        assert!(resolve_joinsplit_tail(jsflags::POLICY, 2, true, 8).is_err());
+        assert!(resolve_joinsplit_tail(jsflags::RELAYER, 5 + 2, PolicyTail::None, 7).is_err());
+        assert!(resolve_joinsplit_tail(jsflags::POLICY, 5 + 2, PolicyTail::Verified, 8).is_err());
+        assert!(resolve_joinsplit_tail(jsflags::RAGEQUIT, 5 + 2, PolicyTail::Ragequit(3), 9).is_err());
     }
 
     #[test]
-    fn the_policy_flag_must_agree_with_pool_state() {
-        // Caller claims a policy pair on a public pool, or omits it on a
-        // permissioned one: both are refused rather than silently reinterpreted.
-        assert!(resolve_joinsplit_tail(jsflags::POLICY, 2, false, 9).is_err());
-        assert!(resolve_joinsplit_tail(0, 2, true, 9).is_err());
+    fn policy_flags_must_agree_with_pool_state() {
+        // Claimed on a public pool.
+        assert!(PolicyTail::from_flags(jsflags::POLICY, false, 0).is_err());
+        assert!(PolicyTail::from_flags(jsflags::RAGEQUIT, false, 2).is_err());
+        // Omitted on a permissioned one.
+        assert!(PolicyTail::from_flags(0, true, 2).is_err());
+        // Both paths claimed at once — the old code read this off a tail account.
+        assert!(PolicyTail::from_flags(jsflags::POLICY | jsflags::RAGEQUIT, true, 2).is_err());
+        // The two legitimate permissioned shapes.
+        assert_eq!(
+            PolicyTail::from_flags(jsflags::POLICY, true, 0).unwrap(),
+            PolicyTail::Verified
+        );
+        assert_eq!(
+            PolicyTail::from_flags(jsflags::RAGEQUIT, true, 3).unwrap(),
+            PolicyTail::Ragequit(3)
+        );
     }
 }

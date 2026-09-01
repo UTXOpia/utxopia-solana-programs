@@ -47,7 +47,7 @@ use pinocchio::{
 
 use crate::error::UTXOpiaError;
 use crate::instructions::joinsplit_common::{
-    jsflags, resolve_joinsplit_tail,
+    jsflags, resolve_joinsplit_tail, PolicyTail,
     create_nullifier_records, looks_like_commitment_tree, parse_header, parse_prefix,
     validate_account_count, validate_public_outputs, verify_vk_merkle_and_proof, JoinSplitHeader,
     STEALTH_DATA_PER_OUTPUT,
@@ -155,13 +155,19 @@ pub fn process_transact(
     // same layout by counting backwards and asking whether an account "looks
     // like" a CommitmentTree, where adding any optional account perturbed the
     // arithmetic recovering the others.
-    let tail = resolve_joinsplit_tail(flags, n_inputs, permissioned, accounts.len())?;
-    let (relayer_at, source_tree_at, approval_at, policy_program_at) = (
-        tail.relayer,
-        tail.source_tree,
-        tail.approval,
-        tail.policy_program,
-    );
+    // transact has no ragequit: an internal transfer has no external destination
+    // for the exit registry to bound, so a permissioned pool always needs the
+    // approval pair. PolicyTail cross-checks the flag against pool state.
+    let policy_tail = PolicyTail::from_flags(flags, permissioned, 0)?;
+    if matches!(policy_tail, PolicyTail::Ragequit(_)) {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    let tail = resolve_joinsplit_tail(flags, min_accounts, policy_tail, accounts.len())?;
+    let (relayer_at, source_tree_at) = (tail.relayer, tail.source_tree);
+    let (approval_at, policy_program_at) = match tail.verified_pair() {
+        Some((a, p)) => (Some(a), Some(p)),
+        None => (None, None),
+    };
     let approval_info = approval_at.map(|i| &accounts[i]);
     let policy_program_info = policy_program_at.map(|i| &accounts[i]);
 

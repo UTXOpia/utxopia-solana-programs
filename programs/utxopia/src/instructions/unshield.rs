@@ -41,7 +41,7 @@ use pinocchio::{
 
 use crate::error::UTXOpiaError;
 use crate::instructions::joinsplit_common::{
-    jsflags,
+    jsflags, resolve_joinsplit_tail, PolicyTail,
     create_nullifier_records, looks_like_commitment_tree, parse_header, parse_prefix, read_u64_le,
     validate_account_count, validate_public_outputs, verify_vk_merkle_and_proof, JoinSplitHeader,
     MAX_PUBLIC_OUTPUTS, STEALTH_DATA_PER_OUTPUT,
@@ -198,45 +198,49 @@ pub fn process_unshield(
         )
     };
 
-    // Optional frozen source tree (for spending notes committed before a tree rotation): appended
-    // just before the optional proof_buffer (which parse_prefix reads as the last account).
-    // Identified by being a program-owned CommitmentTree, so it cannot be confused with the buffer.
-    let pb = usize::from(flags & jsflags::PROOF_IN_BUFFER != 0);
-    // A permissioned exit appends either the approval pair (verified) or one
-    // registry entry per public output (ragequit). Which is in play is read off
-    // the tail account the same way the frozen source tree is: the policy
-    // program's id is fixed and known, so it cannot be confused with a PDA.
-    let verified = permissioned
-        && accounts
-            .len()
-            .checked_sub(1 + pb)
-            .is_some_and(|i| {
-                accounts[i].address()
-                    == &Pubkey::new_from_array(crate::constants::POLICY_PROGRAM_ID)
-            });
-    let policy = match (permissioned, verified) {
-        (false, _) => 0,
-        (true, true) => 2,
-        (true, false) => n_public_outputs,
-    };
-    if permissioned && accounts.len() < min_accounts + policy + pb {
-        return Err(ProgramError::NotEnoughAccountKeys);
+    // Explicit account layout. The flags byte declares what follows the
+    // nullifiers; this walk reads fixed slots in order and must land exactly on
+    // the end of the list.
+    //
+    //   [.. nullifiers] [frozen source tree?]
+    //   [approval, policy_program | exit_destination x n_public_outputs] [proof_buffer?]
+    //
+    // What this replaces: `verified` used to be decided by peeking at whether the
+    // account at `len - 1 - pb` carried the policy program's id, the source tree
+    // by whether an account "looked like" a CommitmentTree, and the ragequit base
+    // by another backwards subtraction. Each optional slot appeared in the
+    // arithmetic recovering the others.
+    //
+    // Flags only pick which index to read — every slot is still validated below
+    // exactly as before.
+    if flags & jsflags::RELAYER != 0 {
+        // unshield has no relayer path; the note owner signs (checked above).
+        return Err(ProgramError::InvalidInstructionData);
     }
-    let approval_info = verified
-        .then(|| accounts.get(accounts.len() - 2 - pb))
-        .flatten();
-    let policy_program_info = verified
-        .then(|| accounts.get(accounts.len() - 1 - pb))
-        .flatten();
-    let source_tree_info = accounts
-        .len()
-        .checked_sub(1 + pb + policy)
-        .filter(|&i| i >= min_accounts)
-        .map(|i| &accounts[i])
-        .filter(|a| {
-            a.address() != commitment_tree_info.address()
-                && looks_like_commitment_tree(a, program_id)
-        });
+    let policy_tail = PolicyTail::from_flags(flags, permissioned, n_public_outputs)?;
+    let tail = resolve_joinsplit_tail(flags, min_accounts, policy_tail, accounts.len())?;
+
+    let (approval_info, policy_program_info) = match policy_tail {
+        PolicyTail::Verified => {
+            let (a, p) = tail.verified_pair().ok_or(ProgramError::NotEnoughAccountKeys)?;
+            (Some(&accounts[a]), Some(&accounts[p]))
+        }
+        _ => (None, None),
+    };
+
+    // Declared, still verified: a program-owned CommitmentTree that is not the
+    // active one, or a caller could prove membership against a root it just wrote.
+    let source_tree_info = match tail.source_tree.map(|i| &accounts[i]) {
+        Some(a) => {
+            if a.address() == commitment_tree_info.address()
+                || !looks_like_commitment_tree(a, program_id)
+            {
+                return Err(UTXOpiaError::InvalidPDA.into());
+            }
+            Some(a)
+        }
+        None => None,
+    };
 
     // Read token config — get token_id, validate vault
     let (token_id, is_pool_zkbtc) = {
@@ -311,9 +315,8 @@ pub fn process_unshield(
             // `is_paused` above is deliberately NOT waived the same way. It is
             // the protocol-wide emergency stop for an active exploit, not a
             // compliance lever, and halting a drain means halting every exit.
-            let base = accounts
-                .len()
-                .checked_sub(n_public_outputs + pb)
+            let base = tail
+                .policy_start
                 .ok_or(ProgramError::NotEnoughAccountKeys)?;
             for k in 0..n_public_outputs {
                 let owner: &[u8; 32] = owners_concat[k * 32..(k + 1) * 32].try_into().unwrap();

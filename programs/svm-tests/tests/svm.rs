@@ -1529,8 +1529,12 @@ fn unshield_ragequit_call(
 
     // header(4) + proof(256) + merkle_root(32) + bound_params(32)
     //   + nullifiers(1*32) + commitments_out(1*32) + stealth_data(0) + amounts(1*8)
+    // jsflags::RAGEQUIT — a permissioned pool must now declare which exit it is
+    // taking. The program used to infer it by peeking at whether a tail account
+    // carried the policy program's id.
+    const JSFLAG_RAGEQUIT: u8 = 1 << 5;
     let mut data = vec![14u8]; // discriminator
-    data.extend_from_slice(&[1u8, 1, 1, 0]); // n_in, n_out, n_pub, proof_source=inline
+    data.extend_from_slice(&[1u8, 1, 1, JSFLAG_RAGEQUIT]); // n_in, n_out, n_pub, flags
     data.extend_from_slice(&[7u8; 256]); // proof (garbage)
     data.extend_from_slice(&[0u8; 32]); // merkle_root
     data.extend_from_slice(&[0u8; 32]); // bound_params_hash (garbage)
