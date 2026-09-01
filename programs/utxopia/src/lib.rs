@@ -155,6 +155,9 @@ pub mod instruction {
 
     // Append-only exit registry backing the ragequit path (39)
     pub const REGISTER_EXIT_DESTINATION: u8 = 39;
+
+    // Deferred leaf placement: queue at spend time, merge in batches (40)
+    pub const MERGE_QUEUED_LEAVES: u8 = 40;
 }
 
 #[cfg(not(feature = "no-entrypoint"))]
@@ -295,6 +298,9 @@ pub fn process_instruction(
             instructions::process_policy_approval_commit(program_id, accounts, data)
         }
         // Append-only exit registry backing the ragequit path (39)
+        instruction::MERGE_QUEUED_LEAVES => {
+            instructions::process_merge_queued_leaves(program_id, accounts, data)
+        }
         instruction::REGISTER_EXIT_DESTINATION => {
             instructions::process_register_exit_destination(program_id, accounts, data)
         }

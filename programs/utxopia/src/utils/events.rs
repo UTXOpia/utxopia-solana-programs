@@ -56,6 +56,12 @@ const EVENT_UNSHIELD_META: u8 = 0x0E;
 /// Event discriminator: UTXO created (deposit or change)
 const EVENT_UTXO_CREATED: u8 = 0x0F;
 
+/// Leaf placements from `merge_queued_leaves` — see `emit_leaves_merged`.
+const EVENT_LEAVES_MERGED: u8 = 0x1A;
+
+/// Account-list ceiling for one merge; see `MAX_MERGE_LEAVES`.
+pub const MAX_MERGE_BATCH: usize = 24;
+
 /// Event discriminator: UTXO consumed (spent in withdrawal)
 const EVENT_UTXO_CONSUMED: u8 = 0x10;
 
@@ -422,4 +428,30 @@ pub fn emit_announcements_batch(items: &[AnnouncementItem]) {
     }
 
     log_data(&[&buf[..offset]]);
+}
+
+/// Emit the leaf placements produced by one `merge_queued_leaves`.
+///
+/// Layout: disc(1) + count(1) + first_leaf_index(4 LE) + [commitment(32)] x count
+///
+/// Deliberately carries commitments rather than whole announcements. The stealth
+/// payload already went out at queue time, so a recipient holding their own
+/// commitment only needs the placement: their leaf index is
+/// `first_leaf_index + position_in_this_list`. At 32 bytes per entry a full
+/// batch costs well under the 10 KB per-transaction log budget, which a repeat
+/// of the ~146-byte announcements would not.
+pub fn emit_leaves_merged(first_leaf_index: u64, commitments: &[&[u8; 32]]) {
+    let disc = [EVENT_LEAVES_MERGED];
+    let count = [commitments.len() as u8];
+    let first = (first_leaf_index as u32).to_le_bytes();
+
+    let mut slices: [&[u8]; 3 + MAX_MERGE_BATCH] = [&[0u8; 0]; 3 + MAX_MERGE_BATCH];
+    slices[0] = &disc;
+    slices[1] = &count;
+    slices[2] = &first;
+    let n = commitments.len().min(MAX_MERGE_BATCH);
+    for i in 0..n {
+        slices[3 + i] = commitments[i].as_ref();
+    }
+    log_data(&slices[..3 + n]);
 }
