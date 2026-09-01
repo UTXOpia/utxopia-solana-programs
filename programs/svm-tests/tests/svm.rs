@@ -2099,3 +2099,207 @@ fn init_vk_registry_rejects_program_data_not_owned_by_the_loader() {
         res.program_result
     );
 }
+
+// ---- merge_queued_leaves (disc 40) -----------------------------------------
+//
+// Queued placement moves the tree write off the spend path so two spends share
+// no writable account. The spend half needs a real Groth16 proof and so is not
+// reachable here; the merge half needs none, and it is where the money actually
+// lands — leaves into the tree, the deferred nullifier count into pool_state,
+// rent back to whoever paid it. Those are the failures that would be silent.
+
+const QUEUED_LEAF_DISC: u8 = 0x16;
+const CT_LEN: usize = 8816;
+const CT_OFF_CURRENT_ROOT: usize = 8;
+const CT_OFF_NEXT_INDEX: usize = 40;
+const CT_OFF_ROOT_HISTORY_INDEX: usize = 8752;
+const POOL_OFF_ACTIVE_TREE_INDEX: usize = 258;
+const POOL_OFF_NULLIFIER_COUNT: usize = 328;
+
+fn commitment_tree_blob(tree_index: u32) -> Vec<u8> {
+    let mut d = vec![0u8; CT_LEN];
+    d[0] = CT_DISC;
+    d[8756..8760].copy_from_slice(&tree_index.to_le_bytes());
+    d
+}
+
+fn queued_leaf_blob(
+    bump: u8,
+    tree_index: u32,
+    commitment: &[u8; 32],
+    payer: &Pubkey,
+    nullifier_debt: u8,
+) -> Vec<u8> {
+    let mut d = vec![0u8; 144];
+    d[0] = QUEUED_LEAF_DISC;
+    d[1] = 1; // version
+    d[2] = bump;
+    d[3..7].copy_from_slice(&tree_index.to_le_bytes());
+    d[7..39].copy_from_slice(commitment);
+    d[39..71].copy_from_slice(payer.as_ref());
+    d[143] = nullifier_debt;
+    d
+}
+
+struct MergeFixture {
+    ix: Instruction,
+    accounts: Vec<(Pubkey, Account)>,
+    tree: Pubkey,
+    pool_state: Pubkey,
+    payer: Pubkey,
+}
+
+/// Two queued leaves, one carrying the spend's nullifier debt.
+fn merge_call(pid: &Pubkey, leaf_tree_index: u32, honest_rent_recipient: bool) -> MergeFixture {
+    let mint = Pubkey::new_unique();
+    let (pool_state, pool_bump) = Pubkey::find_program_address(&[b"pool_state", mint.as_ref()], pid);
+    let (tree, _) = Pubkey::find_program_address(
+        &[b"commitment_tree", pool_state.as_ref(), &0u32.to_le_bytes()],
+        pid,
+    );
+    let caller = Pubkey::new_unique();
+    let payer = Pubkey::new_unique();
+    let thief = Pubkey::new_unique();
+
+    let commitments: [[u8; 32]; 2] = [[11u8; 32], [22u8; 32]];
+    let mut leaf_keys = vec![];
+    let mut leaf_accounts = vec![];
+    for (i, c) in commitments.iter().enumerate() {
+        let (leaf, bump) =
+            Pubkey::find_program_address(&[b"queued_leaf", pool_state.as_ref(), c], pid);
+        leaf_keys.push(leaf);
+        leaf_accounts.push((
+            leaf,
+            acct(
+                2_000_000,
+                // Only the first leaf owes the debt; siblings carry 0 or the
+                // merge would count the spend's inputs twice.
+                queued_leaf_blob(bump, leaf_tree_index, c, &payer, if i == 0 { 3 } else { 0 }),
+                *pid,
+            ),
+        ));
+    }
+
+    let rent_target = if honest_rent_recipient { payer } else { thief };
+    let mut metas = vec![
+        AccountMeta::new(caller, true),
+        AccountMeta::new(pool_state, false),
+        AccountMeta::new(tree, false),
+    ];
+    for leaf in &leaf_keys {
+        metas.push(AccountMeta::new(*leaf, false));
+        metas.push(AccountMeta::new(rent_target, false));
+    }
+    let ix = Instruction::new_with_bytes(*pid, &[40u8], metas);
+
+    let mut pool_blob = pool_state_blob(0, &[9u8; 32], &[0u8; 32]);
+    pool_blob[POOL_OFF_BUMP] = pool_bump;
+    // validate_pool_state_pda re-derives from the mint held in the account, not
+    // from whatever the caller used — leave it unset and every check fails on
+    // InvalidSeeds, which would let the negative tests pass for the wrong reason.
+    pool_blob[POOL_OFF_ZKBTC_MINT..POOL_OFF_ZKBTC_MINT + 32].copy_from_slice(mint.as_ref());
+    pool_blob[POOL_OFF_ACTIVE_TREE_INDEX..POOL_OFF_ACTIVE_TREE_INDEX + 4]
+        .copy_from_slice(&0u32.to_le_bytes());
+
+    let mut accounts = vec![
+        (caller, acct(10_000_000_000, vec![], SYSTEM_ID)),
+        (pool_state, acct(1_000_000, pool_blob, *pid)),
+        (tree, acct(1_000_000, commitment_tree_blob(0), *pid)),
+        (payer, acct(0, vec![], SYSTEM_ID)),
+        (thief, acct(0, vec![], SYSTEM_ID)),
+    ];
+    accounts.extend(leaf_accounts);
+
+    MergeFixture { ix, accounts, tree, pool_state, payer }
+}
+
+fn run_merge(leaf_tree_index: u32, honest_rent: bool, duplicate: bool)
+    -> (mollusk_svm::result::InstructionResult, MergeFixture) {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "utxopia");
+    let mut f = merge_call(&pid, leaf_tree_index, honest_rent);
+    if duplicate {
+        // Same leaf presented twice in one batch.
+        let dup_leaf = f.ix.accounts[3].clone();
+        let dup_rent = f.ix.accounts[4].clone();
+        f.ix.accounts[5] = dup_leaf;
+        f.ix.accounts[6] = dup_rent;
+    }
+    let res = mollusk.process_instruction(&f.ix, &f.accounts);
+    (res, f)
+}
+
+#[test]
+fn merge_places_queued_leaves_and_settles_the_deferred_count() {
+    let (res, f) = run_merge(0, true, false);
+    assert!(res.program_result.is_ok(), "merge must succeed, got {:?}", res.program_result);
+
+    let tree = res.get_account(&f.tree).expect("tree present");
+    let next_index = u64::from_le_bytes(
+        tree.data[CT_OFF_NEXT_INDEX..CT_OFF_NEXT_INDEX + 8].try_into().unwrap(),
+    );
+    assert_eq!(next_index, 2, "both commitments must land as leaves");
+
+    // One history slot for the whole batch, not one per leaf — the §12 property.
+    let history_index = u32::from_le_bytes(
+        tree.data[CT_OFF_ROOT_HISTORY_INDEX..CT_OFF_ROOT_HISTORY_INDEX + 4]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(history_index, 1, "a batch must spend exactly one history slot");
+    assert_ne!(
+        &tree.data[CT_OFF_CURRENT_ROOT..CT_OFF_CURRENT_ROOT + 32],
+        &[0u8; 32],
+        "root must advance"
+    );
+
+    // The count the spend deferred, applied once — not once per leaf.
+    let pool = res.get_account(&f.pool_state).expect("pool present");
+    let nullifiers = u32::from_le_bytes(
+        pool.data[POOL_OFF_NULLIFIER_COUNT..POOL_OFF_NULLIFIER_COUNT + 4]
+            .try_into()
+            .unwrap(),
+    );
+    assert_eq!(nullifiers, 3, "nullifier_debt must be applied exactly once");
+
+    // Rent goes home, so nobody profits by racing to merge.
+    let payer = res.get_account(&f.payer).expect("payer present");
+    assert_eq!(payer.lamports, 4_000_000, "both rents must return to the recorded payer");
+}
+
+#[test]
+fn merge_refuses_to_flush_across_a_tree_rotation() {
+    // Leaf indices restart at 0 in a new tree and nullifiers are tree-scoped, so
+    // a commitment proved against tree 0 landing in tree 1 would be unspendable
+    // and the note silently lost.
+    let (res, _) = run_merge(1, true, false);
+    assert!(
+        is_custom(&res.program_result, 6085), // InvalidPDA
+        "a leaf from another tree must be refused on its tree_index, got {:?}",
+        res.program_result
+    );
+}
+
+#[test]
+fn merge_refuses_to_pay_rent_to_anyone_but_the_recorded_payer() {
+    let (res, _) = run_merge(0, false, false);
+    assert!(
+        is_custom(&res.program_result, 6085), // InvalidPDA
+        "rent must be refused when it does not match the recorded payer, got {:?}",
+        res.program_result
+    );
+}
+
+/// The same leaf twice would put one commitment at two leaf indices. Nullifiers
+/// are derived from (key, leaf index), so the duplicate mints a second spendable
+/// nullifier for the same note.
+#[test]
+fn merge_refuses_the_same_leaf_twice_in_one_batch() {
+    let (res, _) = run_merge(0, true, true);
+    assert!(
+        is_custom(&res.program_result, 6004), // NullifierAlreadyUsed
+        "a duplicated leaf must be refused as a double-spend, got {:?}",
+        res.program_result
+    );
+}

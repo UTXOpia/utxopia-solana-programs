@@ -139,6 +139,16 @@ pub fn process_merge_queued_leaves(
             return Err(UTXOpiaError::InvalidPDA.into());
         }
 
+        // The same leaf twice would insert one commitment at two leaf indices.
+        // Nullifiers are derived from (key, leaf index), so the duplicate yields
+        // a second distinct nullifier and the note becomes spendable twice —
+        // minting. O(n^2) over at most MAX_MERGE_LEAVES is not worth avoiding.
+        for seen in commitments.iter().take(i) {
+            if seen == commitment {
+                return Err(UTXOpiaError::NullifierAlreadyUsed.into());
+            }
+        }
+
         commitments[i] = *commitment;
         // u8 per leaf, at most MAX_MERGE_LEAVES of them, so this cannot overflow
         // a u32 — and `add_nullifiers` saturates anyway.
