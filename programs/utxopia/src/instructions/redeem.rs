@@ -46,6 +46,7 @@ use pinocchio::{
 
 use crate::error::UTXOpiaError;
 use crate::instructions::joinsplit_common::{
+    jsflags,
     create_nullifier_records, looks_like_commitment_tree, parse_header, parse_prefix, read_u64_le,
     take_bytes, validate_account_count, validate_public_outputs, verify_vk_merkle_and_proof,
     JoinSplitHeader, MAX_PUBLIC_OUTPUTS, STEALTH_DATA_PER_OUTPUT,
@@ -69,14 +70,14 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
         n_inputs,
         n_outputs,
         n_public_outputs,
-        proof_source,
+        flags,
     } = header;
 
     // Tree outputs = n_outputs - n_public_outputs
     let n_tree_outputs = n_outputs - n_public_outputs;
 
     let min_accounts = FIXED_ACCOUNTS + n_inputs + n_public_outputs;
-    validate_account_count(accounts.len(), min_accounts, proof_source)?;
+    validate_account_count(accounts.len(), min_accounts, flags & jsflags::PROOF_IN_BUFFER)?;
     let mut proof_buf = [0u8; crate::utils::groth16::GROTH16_PROOF_SIZE];
     let prefix = parse_prefix(data, accounts, header, n_tree_outputs, &mut proof_buf)?;
     let stealth_data_start = prefix.stealth_data_start;
@@ -196,7 +197,7 @@ pub fn process_redeem(program_id: &Pubkey, accounts: &[AccountInfo], data: &[u8]
 
     // Optional frozen source tree for spending notes committed before a tree rotation; appended
     // just before the optional proof_buffer and identified by being a program-owned CommitmentTree.
-    let pb = usize::from(proof_source == 1);
+    let pb = usize::from(flags & jsflags::PROOF_IN_BUFFER != 0);
     // A permissioned exit appends either the approval pair (verified) or one
     // registry entry per public output (ragequit). Which is in play is read off
     // the tail account the same way the frozen source tree is: the policy

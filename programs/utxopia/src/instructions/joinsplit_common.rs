@@ -39,12 +39,55 @@ pub fn read_u64_le(data: &[u8], offset: &mut usize) -> Result<u64, ProgramError>
     Ok(u64::from_le_bytes(out))
 }
 
+/// What the caller declares it is passing, so the program never has to guess.
+///
+/// This byte used to be `proof_source`, valued 0 or 1 — bit 0 keeps that exact
+/// meaning, so instruction-data offsets are unchanged and nothing downstream
+/// shifts. The remaining bits replace the positional heuristics that used to
+/// recover the optional account tail by counting backwards from the end and by
+/// asking whether an account "looks like" a commitment tree.
+///
+/// A flag only selects **which slot to read**. Every slot still validates owner,
+/// signer and PDA seeds exactly as before, so a caller that lies about what it
+/// passed does not gain anything — it breaks its own transaction. What the flags
+/// buy is that adding an optional account no longer perturbs the arithmetic that
+/// recovers the others, and that a stuffed extra account is caught by the
+/// end-of-list check instead of being silently absorbed into a subtraction.
+pub mod jsflags {
+    /// Proof lives in the trailing `ChadBuffer` rather than instruction data.
+    pub const PROOF_IN_BUFFER: u8 = 1 << 0;
+    /// A relayer signs and pays instead of the note owner.
+    pub const RELAYER: u8 = 1 << 1;
+    /// A rotated-out `CommitmentTree` is supplied to prove membership of notes
+    /// committed before the rotation.
+    pub const FROZEN_SOURCE_TREE: u8 = 1 << 2;
+    /// `(PolicyApproval, policy_program)` pair for a permissioned pool.
+    pub const POLICY: u8 = 1 << 3;
+    /// Outputs are queued as `QueuedLeaf` PDAs instead of inserted inline.
+    pub const QUEUED_LEAVES: u8 = 1 << 4;
+
+    pub const ALL: u8 =
+        PROOF_IN_BUFFER | RELAYER | FROZEN_SOURCE_TREE | POLICY | QUEUED_LEAVES;
+}
+
 #[derive(Clone, Copy)]
 pub struct JoinSplitHeader {
     pub n_inputs: usize,
     pub n_outputs: usize,
     pub n_public_outputs: usize,
-    pub proof_source: u8,
+    /// See [`jsflags`]. Bit 0 is the historical `proof_source`.
+    pub flags: u8,
+}
+
+impl JoinSplitHeader {
+    pub fn has(&self, flag: u8) -> bool {
+        self.flags & flag != 0
+    }
+
+    /// Bit 0, under its old name, for call sites that only care about the proof.
+    pub fn proof_in_buffer(&self) -> bool {
+        self.has(jsflags::PROOF_IN_BUFFER)
+    }
 }
 
 pub struct JoinSplitPrefix<'a> {
@@ -80,10 +123,13 @@ pub fn parse_header(data: &[u8]) -> Result<JoinSplitHeader, ProgramError> {
         n_inputs: data[0] as usize,
         n_outputs: data[1] as usize,
         n_public_outputs: data[2] as usize,
-        proof_source: data[3],
+        flags: data[3],
     };
 
-    if header.proof_source > 1
+    // Reject unknown bits rather than ignoring them: a client built against a
+    // newer flag set must fail loudly here, not have its extra accounts
+    // reinterpreted as something else.
+    if header.flags & !jsflags::ALL != 0
         || header.n_inputs == 0
         || header.n_outputs == 0
         || header.n_inputs + header.n_outputs > MAX_JOINSPLIT_SIZE
@@ -133,7 +179,7 @@ pub fn parse_prefix<'a>(
     n_tree_outputs: usize,
     proof_buf: &'a mut [u8; GROTH16_PROOF_SIZE],
 ) -> Result<JoinSplitPrefix<'a>, ProgramError> {
-    let proof_data_size = if header.proof_source == 0 {
+    let proof_data_size = if !header.proof_in_buffer() {
         GROTH16_PROOF_SIZE
     } else {
         0
@@ -150,7 +196,7 @@ pub fn parse_prefix<'a>(
     }
 
     let mut offset = 4;
-    let proof_bytes: &[u8] = if header.proof_source == 0 {
+    let proof_bytes: &[u8] = if header.flags == 0 {
         let proof = &data[offset..offset + GROTH16_PROOF_SIZE];
         offset += GROTH16_PROOF_SIZE;
         proof

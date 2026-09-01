@@ -47,6 +47,7 @@ use pinocchio::{
 
 use crate::error::UTXOpiaError;
 use crate::instructions::joinsplit_common::{
+    jsflags,
     create_nullifier_records, looks_like_commitment_tree, parse_header, parse_prefix,
     validate_account_count, validate_public_outputs, verify_vk_merkle_and_proof, JoinSplitHeader,
     STEALTH_DATA_PER_OUTPUT,
@@ -67,12 +68,12 @@ pub fn process_transact(
     let JoinSplitHeader {
         n_inputs,
         n_outputs,
-        proof_source,
+        flags,
         ..
     } = header;
 
     let min_accounts = 5 + n_inputs;
-    validate_account_count(accounts.len(), min_accounts, proof_source)?;
+    validate_account_count(accounts.len(), min_accounts, flags & jsflags::PROOF_IN_BUFFER)?;
     let mut proof_buf = [0u8; crate::utils::groth16::GROTH16_PROOF_SIZE];
     let prefix = parse_prefix(data, accounts, header, n_outputs, &mut proof_buf)?;
     let mut nullifiers_buf = [0u8; crate::instructions::joinsplit_common::MAX_JOINSPLIT_SIZE * 32];
@@ -148,7 +149,7 @@ pub fn process_transact(
     // tree rotation still be spent — its root proves membership while new outputs go to the active
     // tree. It is identified by being a program-owned CommitmentTree, so it is unambiguous against a
     // relayer (signer) or proof_buffer (ChadBuffer-owned).
-    let has_proof_buffer = proof_source == 1;
+    let has_proof_buffer = flags & jsflags::PROOF_IN_BUFFER != 0;
     let pb = usize::from(has_proof_buffer);
     let policy = if permissioned { 2 } else { 0 };
     if permissioned && accounts.len() < min_accounts + policy + pb {
