@@ -16,12 +16,18 @@
 //! Rent goes back to the payer recorded in each `QueuedLeaf`, never to the
 //! caller, so racing to merge earns nothing.
 //!
+//! This is also where `pool_state.nullifier_count` is applied. Bumping it per
+//! spend is what keeps `pool_state` a shared write lock on the hot path; each
+//! spend records its `nullifier_debt` instead and merge pays the sum. Merge
+//! already takes the tree's lock and runs once per batch, so the write costs
+//! nothing that was not already serialised.
+//!
 //! Instruction data: none beyond the discriminator. What gets merged, and in
 //! what order, is the account list — leaf `i` lands at `first_leaf_index + i`.
 //!
 //! Accounts:
 //! 0. caller           (signer, writable — pays the fee; a relayer or the holder)
-//! 1. pool_state       (read)
+//! 1. pool_state       (writable — nullifier_count)
 //! 2. commitment_tree  (writable — the active tree)
 //! 3.. pairs of (queued_leaf writable, rent_recipient writable), 1..=MAX_MERGE_LEAVES
 
@@ -73,6 +79,7 @@ pub fn process_merge_queued_leaves(
     }
     validate_program_owner(pool_state_info, program_id)?;
     validate_program_owner(commitment_tree_info, program_id)?;
+    validate_account_writable(pool_state_info)?;
     validate_account_writable(commitment_tree_info)?;
 
     // A paused pool must not grow its tree; queued leaves keep until it resumes.
@@ -94,6 +101,7 @@ pub fn process_merge_queued_leaves(
     // Pass 1 — validate everything and copy the commitments out, so no account
     // borrow is still open when the tree is written.
     let mut commitments = [[0u8; 32]; MAX_MERGE_LEAVES];
+    let mut nullifier_debt: u32 = 0;
     for i in 0..leaf_count {
         let leaf_info = &accounts[FIXED_ACCOUNTS + i * 2];
         let rent_recipient = &accounts[FIXED_ACCOUNTS + i * 2 + 1];
@@ -132,6 +140,9 @@ pub fn process_merge_queued_leaves(
         }
 
         commitments[i] = *commitment;
+        // u8 per leaf, at most MAX_MERGE_LEAVES of them, so this cannot overflow
+        // a u32 — and `add_nullifiers` saturates anyway.
+        nullifier_debt += QueuedLeaf::nullifier_debt(&leaf_data) as u32;
     }
 
     // Pass 2 — one batched insert, one root-history slot.
@@ -143,6 +154,13 @@ pub fn process_merge_queued_leaves(
     };
 
     crate::utils::events::emit_leaves_merged(first_leaf_index, &refs[..leaf_count]);
+
+    // Settle the nullifier accounting the spends deferred. Saturating, and never
+    // able to abort the merge — the same property the inline bump had.
+    if nullifier_debt > 0 {
+        let mut pool_data = pool_state_info.try_borrow_mut()?;
+        PoolState::from_bytes_mut(&mut pool_data)?.add_nullifiers(nullifier_debt);
+    }
 
     // Pass 3 — close each leaf to its recorded payer. Last, so a failure in any
     // validation above leaves every queued leaf untouched.

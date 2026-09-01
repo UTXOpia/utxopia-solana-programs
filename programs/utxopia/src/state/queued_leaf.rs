@@ -14,6 +14,19 @@
 //!
 //! The stealth payload rides along because the announcement that carries a
 //! leaf index can only be emitted once the index exists, i.e. at merge time.
+//!
+//! `nullifier_debt` is how `pool_state.nullifier_count` survives being taken off
+//! the hot path. That counter is not decoration: the backend reconciler compares
+//! it against the local set, and by its own comment it is the *only* thing that
+//! catches missing nullifier rows — leaves and root can both agree while spent
+//! notes still look spendable. So instead of dropping it, the spend records how
+//! many nullifiers it wrote and `merge_queued_leaves` applies the sum. The
+//! counter stays exact; only its timing moves, and it moves in the safe
+//! direction (on-chain lags, so the reconciler's `local >= on_chain` floor
+//! cannot false-positive — detection is delayed, never lost).
+//!
+//! Exactly one leaf per spend carries the debt; its siblings carry 0. Splitting
+//! it any other way double-counts.
 
 use crate::pinocchio_compat::ProgramError;
 
@@ -25,7 +38,7 @@ pub const QUEUED_LEAF_VERSION: u8 = 1;
 pub struct QueuedLeaf;
 
 impl QueuedLeaf {
-    pub const LEN: usize = 143;
+    pub const LEN: usize = 144;
     pub const SEED: &'static [u8] = b"queued_leaf";
 
     const DISCRIMINATOR: usize = 0;
@@ -40,6 +53,9 @@ impl QueuedLeaf {
     const EPHEMERAL_PUB: core::ops::Range<usize> = 71..103;
     const ENCRYPTED_AMOUNT: core::ops::Range<usize> = 103..111;
     const ENCRYPTED_TOKEN_ID: core::ops::Range<usize> = 111..143;
+    /// Nullifiers this spend wrote, carried by exactly one of its leaves so
+    /// `merge_queued_leaves` can apply them once. 0 on the siblings.
+    const NULLIFIER_DEBT: usize = 143;
 
     #[allow(clippy::too_many_arguments)]
     pub fn init(
@@ -51,6 +67,7 @@ impl QueuedLeaf {
         ephemeral_pub: &[u8; 32],
         encrypted_amount: &[u8; 8],
         encrypted_token_id: &[u8; 32],
+        nullifier_debt: u8,
     ) -> Result<(), ProgramError> {
         if data.len() != Self::LEN {
             return Err(ProgramError::InvalidAccountData);
@@ -65,6 +82,7 @@ impl QueuedLeaf {
         data[Self::EPHEMERAL_PUB].copy_from_slice(ephemeral_pub);
         data[Self::ENCRYPTED_AMOUNT].copy_from_slice(encrypted_amount);
         data[Self::ENCRYPTED_TOKEN_ID].copy_from_slice(encrypted_token_id);
+        data[Self::NULLIFIER_DEBT] = nullifier_debt;
         Ok(())
     }
 
@@ -101,6 +119,10 @@ impl QueuedLeaf {
     pub fn encrypted_token_id(data: &[u8]) -> &[u8; 32] {
         data[Self::ENCRYPTED_TOKEN_ID].try_into().unwrap()
     }
+
+    pub fn nullifier_debt(data: &[u8]) -> u8 {
+        data[Self::NULLIFIER_DEBT]
+    }
 }
 
 #[cfg(test)]
@@ -118,6 +140,7 @@ mod tests {
             &[3u8; 32],
             &[4u8; 8],
             &[5u8; 32],
+            3,
         )
         .expect("init");
         data
@@ -133,6 +156,7 @@ mod tests {
         assert_eq!(QueuedLeaf::ephemeral_pub(&data), &[3u8; 32]);
         assert_eq!(QueuedLeaf::encrypted_amount(&data), &[4u8; 8]);
         assert_eq!(QueuedLeaf::encrypted_token_id(&data), &[5u8; 32]);
+        assert_eq!(QueuedLeaf::nullifier_debt(&data), 3);
     }
 
     #[test]
@@ -146,6 +170,9 @@ mod tests {
         assert!(QueuedLeaf::validate(&wrong_version).is_err());
 
         assert!(QueuedLeaf::validate(&sample()[..QueuedLeaf::LEN - 1]).is_err());
-        assert!(QueuedLeaf::init(&mut [0u8; 8], 0, 0, &[0; 32], &[0; 32], &[0; 32], &[0; 8], &[0; 32]).is_err());
+        assert!(
+            QueuedLeaf::init(&mut [0u8; 8], 0, 0, &[0; 32], &[0; 32], &[0; 32], &[0; 8], &[0; 32], 0)
+                .is_err()
+        );
     }
 }
