@@ -250,8 +250,19 @@ pub fn process_transact(
         let mut tree_data = commitment_tree_info.try_borrow_mut()?;
         let tree = CommitmentTree::from_bytes_mut(&mut tree_data)?;
 
+        // One history slot for the whole batch, not one per output — see
+        // `insert_leaves_batch` and _handoff/HANDOFF.md §12.
+        // Defensive: an outputless spend inserts nothing, so it must not push a
+        // root (or trip the empty-batch guard). `transact` forbids public
+        // outputs, so n_outputs is normally >= 1.
+        let first_leaf_index = if n_outputs > 0 {
+            tree.insert_leaves_batch(&prefix.commitments_out[..n_outputs])?
+        } else {
+            tree.next_index()
+        };
+
         for (i, commitment) in prefix.commitments_out.iter().take(n_outputs).enumerate() {
-            let leaf_index = tree.insert_leaf(commitment)?;
+            let leaf_index = first_leaf_index + i as u64;
 
             // Parse stealth data for this output
             let stealth_offset = stealth_data_start + i * STEALTH_DATA_PER_OUTPUT;
@@ -270,7 +281,7 @@ pub fn process_transact(
                 crate::utils::events::ANNOUNCEMENT_TYPE_TRANSFER,
                 ephemeral_pub,
                 encrypted_amount,
-                prefix.commitments_out[i],
+                *commitment,
                 leaf_index as u32,
                 encrypted_token_id,
             );

@@ -224,6 +224,19 @@ impl CommitmentTree {
     /// # Returns
     /// The leaf index where the commitment was inserted
     pub fn insert_leaf(&mut self, commitment: &[u8; 32]) -> Result<u64, ProgramError> {
+        let (root, leaf_index) = self.append_leaf(commitment)?;
+        self.update_root(root);
+        Ok(leaf_index)
+    }
+
+    /// Append one leaf and return `(new_root, leaf_index)` **without** touching
+    /// root history.
+    ///
+    /// Split out of `insert_leaf` so a batch can walk N leaves and push a single
+    /// history entry. The frontier walk itself is unchanged, so a batch produces
+    /// bit-for-bit the same root as the equivalent sequence of `insert_leaf`
+    /// calls — see `batch_insert_matches_sequential_inserts`.
+    fn append_leaf(&mut self, commitment: &[u8; 32]) -> Result<([u8; 32], u64), ProgramError> {
         let leaf_index = self.next_index();
         if leaf_index >= Self::MAX_LEAVES {
             return Err(crate::error::UTXOpiaError::TreeFull.into());
@@ -245,13 +258,48 @@ impl CommitmentTree {
             current_index /= 2;
         }
 
-        // Update root
-        self.update_root(current_hash);
-
         // Increment leaf counter
         self.set_next_index(leaf_index + 1);
 
-        Ok(leaf_index)
+        Ok((current_hash, leaf_index))
+    }
+
+    /// Insert `commitments` as consecutive leaves, pushing **one** root-history
+    /// entry for the whole batch.
+    ///
+    /// Why this exists: `ROOT_HISTORY_SIZE` is 256 *slots*, and a per-leaf
+    /// `update_root` spends one slot per output — so a 9-output JoinSplit used to
+    /// burn nine, leaving roughly 28 transactions of proving headroom instead of
+    /// 256. See `_handoff/HANDOFF.md` §12.
+    ///
+    /// The intermediate roots that a per-leaf loop would have pushed were only
+    /// ever current mid-instruction, so no client could have proven against one;
+    /// dropping them from history loses nothing.
+    ///
+    /// Returns the index of the first leaf. An empty batch is rejected rather
+    /// than silently pushing a duplicate root.
+    ///
+    /// ponytail: still O(depth) hashes per leaf — the upper levels are recomputed
+    /// for every leaf in the batch. Collapsing that to one propagation per batch
+    /// is a further win, but it changes the hashing sequence and needs its own
+    /// equivalence proof; do it only if Poseidon shows up in a CU profile.
+    pub fn insert_leaves_batch(
+        &mut self,
+        commitments: &[&[u8; 32]],
+    ) -> Result<u64, ProgramError> {
+        if commitments.is_empty() {
+            return Err(crate::error::UTXOpiaError::EmptyCommitmentBatch.into());
+        }
+
+        let first_index = self.next_index();
+        let mut root = self.current_root;
+        for commitment in commitments {
+            let (new_root, _) = self.append_leaf(commitment)?;
+            root = new_root;
+        }
+        self.update_root(root);
+
+        Ok(first_index)
     }
 
     /// Insert a leaf and return the new root (for verification)

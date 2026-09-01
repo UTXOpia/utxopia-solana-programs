@@ -249,6 +249,9 @@ pub enum UTXOpiaError {
 
     #[error("PolicyApproval delegation must pin an explicit TEE validator")]
     ValidatorNotPinned = 6106,
+
+    #[error("Commitment batch is empty")]
+    EmptyCommitmentBatch = 6107,
 }
 
 impl From<UTXOpiaError> for ProgramError {

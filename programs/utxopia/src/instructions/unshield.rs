@@ -395,13 +395,23 @@ pub fn process_unshield(
         let mut tree_data = commitment_tree_info.try_borrow_mut()?;
         let tree = CommitmentTree::from_bytes_mut(&mut tree_data)?;
 
+        // One history slot for the whole batch, not one per output — see
+        // `insert_leaves_batch` and _handoff/HANDOFF.md §12.
+        // n_tree_outputs can be 0 — a spend whose outputs are all public leaves nothing to
+        // insert, and must not push a root (or trip the empty-batch guard).
+        let first_leaf_index = if n_tree_outputs > 0 {
+            tree.insert_leaves_batch(&prefix.commitments_out[..n_tree_outputs])?
+        } else {
+            tree.next_index()
+        };
+
         for (i, commitment) in prefix
             .commitments_out
             .iter()
             .take(n_tree_outputs)
             .enumerate()
         {
-            let leaf_index = tree.insert_leaf(commitment)?;
+            let leaf_index = first_leaf_index + i as u64;
 
             let stealth_offset = stealth_data_start + i * STEALTH_DATA_PER_OUTPUT;
             let ephemeral_pub: &[u8; 32] = data[stealth_offset..stealth_offset + 32]
@@ -418,7 +428,7 @@ pub fn process_unshield(
                 crate::utils::events::ANNOUNCEMENT_TYPE_TRANSFER,
                 ephemeral_pub,
                 encrypted_amount,
-                prefix.commitments_out[i],
+                *commitment,
                 leaf_index as u32,
                 encrypted_token_id,
             );
