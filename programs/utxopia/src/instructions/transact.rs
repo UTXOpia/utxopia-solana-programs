@@ -47,7 +47,7 @@ use pinocchio::{
 
 use crate::error::UTXOpiaError;
 use crate::instructions::joinsplit_common::{
-    jsflags,
+    jsflags, resolve_joinsplit_tail,
     create_nullifier_records, looks_like_commitment_tree, parse_header, parse_prefix,
     validate_account_count, validate_public_outputs, verify_vk_merkle_and_proof, JoinSplitHeader,
     STEALTH_DATA_PER_OUTPUT,
@@ -143,48 +143,56 @@ pub fn process_transact(
         )
     };
 
-    // Optional account layout after nullifiers:
-    //   [5..5+N nullifiers] [optional relayer] [optional frozen source tree] [optional proof_buffer]
-    // The frozen source tree (a previous, rotated-out CommitmentTree) lets notes committed before a
-    // tree rotation still be spent — its root proves membership while new outputs go to the active
-    // tree. It is identified by being a program-owned CommitmentTree, so it is unambiguous against a
-    // relayer (signer) or proof_buffer (ChadBuffer-owned).
-    let has_proof_buffer = flags & jsflags::PROOF_IN_BUFFER != 0;
-    let pb = usize::from(has_proof_buffer);
-    let policy = if permissioned { 2 } else { 0 };
-    if permissioned && accounts.len() < min_accounts + policy + pb {
-        return Err(ProgramError::NotEnoughAccountKeys);
-    }
-    let approval_info = permissioned
-        .then(|| accounts.get(accounts.len() - 2 - pb))
-        .flatten();
-    let policy_program_info = permissioned
-        .then(|| accounts.get(accounts.len() - 1 - pb))
-        .flatten();
-    let source_tree_info = accounts
-        .len()
-        .checked_sub(1 + pb + policy)
-        .filter(|&i| i >= 5 + n_inputs)
-        .map(|i| &accounts[i])
-        .filter(|a| {
-            a.address() != commitment_tree_info.address()
-                && looks_like_commitment_tree(a, program_id)
-        });
-    let frozen = usize::from(source_tree_info.is_some());
+    // Explicit account layout. The flags byte says what is present; this walk
+    // reads fixed slots in order and must land exactly on the end of the list.
+    //
+    //   [0..5] [5..5+N nullifiers] [relayer?] [frozen source tree?]
+    //   [approval, policy_program if permissioned] [proof_buffer?]
+    //
+    // A flag only selects which slot to read — each one is still validated below
+    // exactly as before, so a caller that mislabels an account breaks only its
+    // own transaction. What this replaces is the previous reconstruction of the
+    // same layout by counting backwards and asking whether an account "looks
+    // like" a CommitmentTree, where adding any optional account perturbed the
+    // arithmetic recovering the others.
+    let tail = resolve_joinsplit_tail(flags, n_inputs, permissioned, accounts.len())?;
+    let (relayer_at, source_tree_at, approval_at, policy_program_at) = (
+        tail.relayer,
+        tail.source_tree,
+        tail.approval,
+        tail.policy_program,
+    );
+    let approval_info = approval_at.map(|i| &accounts[i]);
+    let policy_program_info = policy_program_at.map(|i| &accounts[i]);
 
-    let extra_accounts_after_nullifiers = accounts.len() - (5 + n_inputs);
-    let has_relayer = extra_accounts_after_nullifiers > frozen + pb + policy;
-    let payer = if has_relayer {
-        let relayer = &accounts[5 + n_inputs];
-        if !relayer.is_signer() {
-            return Err(ProgramError::MissingRequiredSignature);
+    // Declared, still verified: it must be a program-owned CommitmentTree and
+    // must not be the active one, or a caller could pass the active tree twice
+    // and prove membership against a root it also just wrote.
+    let source_tree_info = match source_tree_at.map(|i| &accounts[i]) {
+        Some(a) => {
+            if a.address() == commitment_tree_info.address()
+                || !looks_like_commitment_tree(a, program_id)
+            {
+                return Err(UTXOpiaError::InvalidPDA.into());
+            }
+            Some(a)
         }
-        relayer
-    } else {
-        if !user.is_signer() {
-            return Err(ProgramError::MissingRequiredSignature);
+        None => None,
+    };
+
+    let payer = match relayer_at.map(|i| &accounts[i]) {
+        Some(relayer) => {
+            if !relayer.is_signer() {
+                return Err(ProgramError::MissingRequiredSignature);
+            }
+            relayer
         }
-        user
+        None => {
+            if !user.is_signer() {
+                return Err(ProgramError::MissingRequiredSignature);
+            }
+            user
+        }
     };
 
     // Circulation inside a permissioned pool always needs the auditor: there is

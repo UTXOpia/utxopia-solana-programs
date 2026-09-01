@@ -196,7 +196,7 @@ pub fn parse_prefix<'a>(
     }
 
     let mut offset = 4;
-    let proof_bytes: &[u8] = if header.flags == 0 {
+    let proof_bytes: &[u8] = if !header.proof_in_buffer() {
         let proof = &data[offset..offset + GROTH16_PROOF_SIZE];
         offset += GROTH16_PROOF_SIZE;
         proof
@@ -485,3 +485,130 @@ pub fn create_nullifier_records(
 #[cfg(test)]
 #[path = "joinsplit_common_tests.rs"]
 mod tests;
+
+/// Where each optional account sits, resolved from the declared flags alone.
+///
+/// Pure arithmetic, extracted so it can be tested without standing up a proof.
+/// The slots it returns are still validated by the caller — owner, signer, seeds
+/// — exactly as before; this only decides *which index* to look at.
+#[derive(Debug, PartialEq, Eq)]
+pub struct JoinSplitTail {
+    pub relayer: Option<usize>,
+    pub source_tree: Option<usize>,
+    pub approval: Option<usize>,
+    pub policy_program: Option<usize>,
+    pub proof_buffer: Option<usize>,
+}
+
+/// Resolve the optional tail that follows the nullifiers.
+///
+/// Order is fixed: relayer, frozen source tree, (approval, policy_program),
+/// proof buffer. `permissioned` comes from pool state rather than the flag byte
+/// because the pool is authoritative; the caller's POLICY flag must agree with
+/// it, which keeps the layout readable from flags while the authority stays
+/// on-chain.
+///
+/// Rejects a list that is short **or** long. The subtraction-based version this
+/// replaces silently absorbed a stuffed extra account into whichever count it
+/// happened to land in.
+pub fn resolve_joinsplit_tail(
+    flags: u8,
+    n_inputs: usize,
+    permissioned: bool,
+    account_count: usize,
+) -> Result<JoinSplitTail, ProgramError> {
+    if (flags & jsflags::POLICY != 0) != permissioned {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+
+    let mut cursor = 5 + n_inputs;
+    let mut take = |present: bool| -> Result<Option<usize>, ProgramError> {
+        if !present {
+            return Ok(None);
+        }
+        if cursor >= account_count {
+            return Err(ProgramError::NotEnoughAccountKeys);
+        }
+        let at = cursor;
+        cursor += 1;
+        Ok(Some(at))
+    };
+
+    let tail = JoinSplitTail {
+        relayer: take(flags & jsflags::RELAYER != 0)?,
+        source_tree: take(flags & jsflags::FROZEN_SOURCE_TREE != 0)?,
+        approval: take(permissioned)?,
+        policy_program: take(permissioned)?,
+        proof_buffer: take(flags & jsflags::PROOF_IN_BUFFER != 0)?,
+    };
+
+    if cursor != account_count {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+    Ok(tail)
+}
+
+#[cfg(test)]
+mod tail_tests {
+    use super::*;
+
+    fn t(flags: u8, n_inputs: usize, permissioned: bool, n: usize) -> JoinSplitTail {
+        resolve_joinsplit_tail(flags, n_inputs, permissioned, n).expect("resolves")
+    }
+
+    #[test]
+    fn bare_spend_has_no_tail() {
+        let got = t(0, 2, false, 7);
+        assert_eq!(got.relayer, None);
+        assert_eq!(got.source_tree, None);
+        assert_eq!(got.approval, None);
+        assert_eq!(got.proof_buffer, None);
+    }
+
+    #[test]
+    fn slots_follow_the_declared_order() {
+        // relayer + frozen tree + policy pair + proof buffer, n_inputs = 2.
+        let flags = jsflags::RELAYER
+            | jsflags::FROZEN_SOURCE_TREE
+            | jsflags::POLICY
+            | jsflags::PROOF_IN_BUFFER;
+        let got = t(flags, 2, true, 12);
+        assert_eq!(got.relayer, Some(7));
+        assert_eq!(got.source_tree, Some(8));
+        assert_eq!(got.approval, Some(9));
+        assert_eq!(got.policy_program, Some(10));
+        assert_eq!(got.proof_buffer, Some(11));
+    }
+
+    #[test]
+    fn one_optional_account_does_not_move_the_others() {
+        // The whole point: dropping the relayer shifts only the relayer.
+        let with = t(jsflags::RELAYER | jsflags::PROOF_IN_BUFFER, 1, false, 8);
+        let without = t(jsflags::PROOF_IN_BUFFER, 1, false, 7);
+        assert_eq!(with.relayer, Some(6));
+        assert_eq!(with.proof_buffer, Some(7));
+        assert_eq!(without.relayer, None);
+        assert_eq!(without.proof_buffer, Some(6));
+    }
+
+    #[test]
+    fn a_stuffed_extra_account_is_rejected() {
+        // The subtraction this replaced absorbed it silently.
+        assert!(resolve_joinsplit_tail(0, 2, false, 8).is_err());
+        assert!(resolve_joinsplit_tail(jsflags::RELAYER, 2, false, 9).is_err());
+    }
+
+    #[test]
+    fn a_short_list_is_rejected() {
+        assert!(resolve_joinsplit_tail(jsflags::RELAYER, 2, false, 7).is_err());
+        assert!(resolve_joinsplit_tail(jsflags::POLICY, 2, true, 8).is_err());
+    }
+
+    #[test]
+    fn the_policy_flag_must_agree_with_pool_state() {
+        // Caller claims a policy pair on a public pool, or omits it on a
+        // permissioned one: both are refused rather than silently reinterpreted.
+        assert!(resolve_joinsplit_tail(jsflags::POLICY, 2, false, 9).is_err());
+        assert!(resolve_joinsplit_tail(0, 2, true, 9).is_err());
+    }
+}
