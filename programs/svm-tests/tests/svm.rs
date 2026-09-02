@@ -2303,3 +2303,61 @@ fn merge_refuses_the_same_leaf_twice_in_one_batch() {
         res.program_result
     );
 }
+
+/// reinitialize (disc 4) stamps the optional prev_block_hash (data 57..89) on the genesis
+/// BlockHeader so extend_blockchain's MTP ancestor walk can link through the anchor to the
+/// pre-reinit headers below it. Without it the first 10 post-reinit headers are judged on a
+/// truncated timestamp window, which testnet4's timestamp-cycling miners fail (2026-09-02).
+#[test]
+fn reinitialize_stamps_prev_block_hash_on_genesis() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "btc_light_client");
+
+    let authority = Pubkey::new_unique();
+    let start_hash = [0x11u8; 32];
+    let prev_hash = [0x22u8; 32];
+    let height: u64 = 150_103;
+    let (light_client, _) = Pubkey::find_program_address(&[b"btc_light_client"], &pid);
+    let (hi_pda, _) = Pubkey::find_program_address(&[b"height_index", &height.to_le_bytes()], &pid);
+    let (bh_pda, _) = Pubkey::find_program_address(&[b"block", &start_hash], &pid);
+    let (system_key, system_acct) = keyed_account_for_system_program();
+
+    let mut lc = vec![0u8; LC_LEN];
+    lc[0] = LC_DISC;
+    lc[LC_NETWORK_OFFSET] = NETWORK_REGTEST;
+    lc[8..40].copy_from_slice(authority.as_ref());
+
+    let mut data = vec![4u8];
+    data.extend_from_slice(&height.to_le_bytes());
+    data.extend_from_slice(&start_hash);
+    data.push(NETWORK_REGTEST);
+    data.extend_from_slice(&[0u8; 16]); // initial_bits, epoch_start, start_timestamp, start_bits
+    data.extend_from_slice(&prev_hash);
+    assert_eq!(data.len(), 1 + 89);
+
+    let ix = Instruction::new_with_bytes(
+        pid,
+        &data,
+        vec![
+            AccountMeta::new(light_client, false),
+            AccountMeta::new(authority, true),
+            AccountMeta::new_readonly(system_key, false),
+            AccountMeta::new(hi_pda, false),
+            AccountMeta::new(bh_pda, false),
+        ],
+    );
+    let accounts = vec![
+        (light_client, acct(10_000_000_000, lc, pid)),
+        (authority, acct(10_000_000_000, vec![], SYSTEM_ID)),
+        (system_key, system_acct),
+        (hi_pda, acct(0, vec![], SYSTEM_ID)),
+        (bh_pda, acct(0, vec![], SYSTEM_ID)),
+    ];
+    let res = mollusk.process_instruction(&ix, &accounts);
+    assert!(matches!(res.program_result, ProgramResult::Success), "{:?}", res.program_result);
+    let bh = &res.resulting_accounts.iter().find(|(k, _)| *k == bh_pda).unwrap().1.data;
+    assert_eq!(bh[0], BH_DISC);
+    assert_eq!(&bh[8..40], &prev_hash, "genesis prev_block_hash must be stamped");
+    assert_eq!(&bh[BH_BLOCK_HASH_OFFSET..BH_BLOCK_HASH_OFFSET + 32], &start_hash);
+}

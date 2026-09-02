@@ -25,6 +25,7 @@ use crate::state::{BitcoinLightClient, BlockHeader, HeightIndex};
 ///   [45-48] epoch_start_time   (u32 LE, optional — 0 to skip)
 ///   [49-52] start_timestamp    (u32 LE, optional — 0 to skip)
 ///   [53-56] start_bits         (u32 LE, optional — 0 to skip)
+///   [57-88] prev_block_hash    ([u8; 32], optional — lets MTP ancestors link past the anchor)
 ///
 /// Accounts:
 ///   0. [writable]        BitcoinLightClient
@@ -119,6 +120,15 @@ pub fn process_reinitialize(
     if start_bits == 0 {
         start_bits = initial_bits;
     }
+    // Optional anchor prev_block_hash. Without it the genesis header's prev hash is zero and
+    // extend_blockchain's MTP ancestor linkage stops at genesis, so the first 10 headers after
+    // a reinit are judged against a truncated timestamp window — stricter than consensus, and
+    // testnet4's timestamp-cycling miners fail it within a few blocks (2026-09-02). With it,
+    // pre-reinit BlockHeader PDAs below the anchor keep serving as ancestors.
+    let mut prev_block_hash = [0u8; 32];
+    if data.len() >= 89 {
+        prev_block_hash.copy_from_slice(&data[57..89]);
+    }
 
     let clock = Clock::get()?;
     lc.set_last_update(clock.unix_timestamp);
@@ -163,6 +173,7 @@ pub fn process_reinitialize(
 
         let bh = unsafe { &mut *(bh_data.as_mut_ptr() as *mut BlockHeader) };
         bh.block_hash = start_block_hash;
+        bh.prev_block_hash = prev_block_hash;
         bh.height = start_height.to_le_bytes();
         bh.timestamp = start_timestamp.to_le_bytes();
         bh.bits = start_bits.to_le_bytes();
