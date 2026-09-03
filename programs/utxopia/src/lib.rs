@@ -158,6 +158,8 @@ pub mod instruction {
 
     // Deferred leaf placement: queue at spend time, merge in batches (40)
     pub const MERGE_QUEUED_LEAVES: u8 = 40;
+    /// Lower `deposit_fee_bps` immediately (decrease-only; raises need the timelock).
+    pub const SET_DEPOSIT_FEE_BPS: u8 = 41;
 }
 
 #[cfg(not(feature = "no-entrypoint"))]
@@ -303,6 +305,9 @@ pub fn process_instruction(
         }
         instruction::REGISTER_EXIT_DESTINATION => {
             instructions::process_register_exit_destination(program_id, accounts, data)
+        }
+        instruction::SET_DEPOSIT_FEE_BPS => {
+            instructions::process_set_deposit_fee_bps(program_id, accounts, data)
         }
         _ => Err(ProgramError::InvalidInstructionData),
     }

@@ -2361,3 +2361,58 @@ fn reinitialize_stamps_prev_block_hash_on_genesis() {
     assert_eq!(&bh[8..40], &prev_hash, "genesis prev_block_hash must be stamped");
     assert_eq!(&bh[BH_BLOCK_HASH_OFFSET..BH_BLOCK_HASH_OFFSET + 32], &start_hash);
 }
+
+// ---- set_deposit_fee_bps (disc 41) ----------------------------------------
+
+const POOL_OFF_DEPOSIT_FEE_BPS: usize = 244;
+
+fn set_deposit_fee_call(
+    pid: &Pubkey,
+    authority: &Pubkey,
+    pool_authority: &[u8; 32],
+    current_bps: u16,
+    new_bps: u16,
+) -> (Instruction, Vec<(Pubkey, Account)>) {
+    let pool_state = Pubkey::new_unique();
+    let mut pool_data = pool_state_blob(0, &[0; 32], &[0; 32]);
+    pool_data[POOL_OFF_AUTHORITY..POOL_OFF_AUTHORITY + 32].copy_from_slice(pool_authority);
+    pool_data[POOL_OFF_DEPOSIT_FEE_BPS..POOL_OFF_DEPOSIT_FEE_BPS + 2]
+        .copy_from_slice(&current_bps.to_le_bytes());
+    let mut data = vec![41u8];
+    data.extend_from_slice(&new_bps.to_le_bytes());
+    let ix = Instruction::new_with_bytes(
+        *pid,
+        &data,
+        vec![
+            AccountMeta::new(pool_state, false),
+            AccountMeta::new_readonly(*authority, true),
+        ],
+    );
+    let accounts = vec![
+        (pool_state, acct(1_000_000, pool_data, *pid)),
+        (*authority, acct(1_000_000, vec![], SYSTEM_ID)),
+    ];
+    (ix, accounts)
+}
+
+#[test]
+fn set_deposit_fee_bps_lowers_immediately_but_never_raises() {
+    std::env::set_var("SBF_OUT_DIR", so_dir());
+    let pid = Pubkey::new_unique();
+    let mollusk = Mollusk::new(&pid, "utxopia");
+    let authority = Pubkey::new_unique();
+
+    let (ix, accounts) = set_deposit_fee_call(&pid, &authority, &authority.to_bytes(), 20, 0);
+    let res = mollusk.process_instruction(&ix, &accounts);
+    assert!(res.program_result.is_ok(), "lowering failed: {:?}", res.program_result);
+    let pool = res.get_account(&accounts[0].0).unwrap();
+    assert_eq!(&pool.data[POOL_OFF_DEPOSIT_FEE_BPS..POOL_OFF_DEPOSIT_FEE_BPS + 2], &[0, 0]);
+
+    let (ix, accounts) = set_deposit_fee_call(&pid, &authority, &authority.to_bytes(), 0, 20);
+    let res = mollusk.process_instruction(&ix, &accounts);
+    assert!(!res.program_result.is_ok(), "a raise must not bypass the timelock");
+
+    let (ix, accounts) = set_deposit_fee_call(&pid, &Pubkey::new_unique(), &authority.to_bytes(), 20, 0);
+    let res = mollusk.process_instruction(&ix, &accounts);
+    assert!(is_custom(&res.program_result, UNAUTHORIZED));
+}

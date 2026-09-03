@@ -169,3 +169,41 @@ pub fn process_cancel_pool_update(
 
     Ok(())
 }
+
+/// Lower the shield fee with no timelock. Instruction data: deposit_fee_bps (u16 LE).
+///
+/// The timelock exists to protect users from the authority making terms worse; a fee
+/// cut is never worse, so it applies at once. Raising it is refused here.
+/// ponytail: PoolState has no spare bytes for a pending bps, so raises have no path
+/// until a field is carved out — acceptable while the fee is meant to sit at zero.
+pub fn process_set_deposit_fee_bps(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    data: &[u8],
+) -> ProgramResult {
+    if accounts.len() < 2 {
+        return Err(ProgramError::NotEnoughAccountKeys);
+    }
+    if data.len() != 2 {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    let pool_state_info = &accounts[0];
+    let authority = &accounts[1];
+    if !authority.is_signer() {
+        return Err(ProgramError::MissingRequiredSignature);
+    }
+    validate_program_owner(pool_state_info, program_id)?;
+    validate_account_writable(pool_state_info)?;
+
+    let new_bps = u16::from_le_bytes([data[0], data[1]]);
+    let mut pool_data = pool_state_info.try_borrow_mut()?;
+    let pool = PoolState::from_bytes_mut(&mut pool_data)?;
+    if authority.address().as_ref() != pool.authority {
+        return Err(UTXOpiaError::Unauthorized.into());
+    }
+    if new_bps > pool.deposit_fee_bps() {
+        return Err(ProgramError::InvalidInstructionData);
+    }
+    pool.set_deposit_fee_bps(new_bps);
+    Ok(())
+}
